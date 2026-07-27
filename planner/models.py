@@ -1,6 +1,5 @@
-from django.db import models
+import uuid
 
-# Create your models here.
 from django.db import models
 
 from core.choices import (
@@ -10,12 +9,11 @@ from core.choices import (
     RecoveryPlanStatus,
     RecoveryType,
 )
-from exams.models import Exam, StudyTask
 
 
 class DailyPlan(models.Model):
     exam = models.ForeignKey(
-        Exam,
+        'exams.Exam',
         on_delete=models.CASCADE,
         related_name='daily_plans',
     )
@@ -48,10 +46,11 @@ class DailyPlanItem(models.Model):
         related_name='items',
     )
     study_task = models.ForeignKey(
-        StudyTask,
-        on_delete=models.CASCADE,
+        'exams.StudyTask',
+        on_delete=models.PROTECT,
         related_name='plan_items',
     )
+    # 생성 당시 값을 별도 저장 (StudyTask 예상시간이 나중에 바뀌어도 과거 기록 불변)
     planned_minutes = models.PositiveIntegerField()
     order = models.PositiveIntegerField()
     status = models.CharField(
@@ -68,17 +67,22 @@ class DailyPlanItem(models.Model):
 
 
 class ProgressLog(models.Model):
-    daily_plan_item = models.ForeignKey(
+    """
+    작업당 하루 한 번 결과를 입력하는 MVP 정책에 맞춰 OneToOne으로 관리.
+    수정 시에는 record_progress 서비스에서 update_or_create로 덮어씀.
+    """
+    daily_plan_item = models.OneToOneField(
         DailyPlanItem,
         on_delete=models.CASCADE,
-        related_name='progress_logs',
+        related_name='progress_log',
     )
     progress_status = models.CharField(
         max_length=20, choices=ProgressStatus.choices
     )
     actual_minutes = models.PositiveIntegerField(null=True, blank=True)
-    completed_amount = models.PositiveIntegerField(null=True, blank=True)
-    recorded_at = models.DateTimeField(auto_now_add=True)
+    # 완료=100, 못함=0, 일부완료=1~99. 속도보정은 actual_minutes, 남은 작업량 계산은 completion_percent로 책임 분리.
+    completion_percent = models.PositiveSmallIntegerField(null=True, blank=True)
+    recorded_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f'{self.daily_plan_item} - {self.progress_status}'
@@ -86,10 +90,12 @@ class ProgressLog(models.Model):
 
 class RecoveryPlan(models.Model):
     exam = models.ForeignKey(
-        Exam,
+        'exams.Exam',
         on_delete=models.CASCADE,
         related_name='recovery_plans',
     )
+    # 같은 계산 시점에 생성된 분량유지형/핵심집중형 두 복구안을 묶어서 비교하기 위한 그룹 키
+    recovery_group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
     recovery_type = models.CharField(
         max_length=20, choices=RecoveryType.choices
     )
@@ -113,8 +119,8 @@ class RecoveryPlanItem(models.Model):
         related_name='items',
     )
     study_task = models.ForeignKey(
-        StudyTask,
-        on_delete=models.CASCADE,
+        'exams.StudyTask',
+        on_delete=models.PROTECT,
         related_name='recovery_items',
     )
     original_date = models.DateField(null=True, blank=True)
