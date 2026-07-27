@@ -12,8 +12,8 @@ from core.choices import (
 
 
 class DailyPlan(models.Model):
-    exam = models.ForeignKey(
-        'exams.Exam',
+    exam_period = models.ForeignKey(
+        'exams.ExamPeriod',
         on_delete=models.CASCADE,
         related_name='daily_plans',
     )
@@ -30,13 +30,13 @@ class DailyPlan(models.Model):
         ordering = ['date']
         constraints = [
             models.UniqueConstraint(
-                fields=['exam', 'date'],
-                name='unique_exam_daily_plan_date',
+                fields=['exam_period', 'date'],
+                name='unique_daily_plan_per_exam_period_date',
             )
         ]
 
     def __str__(self):
-        return f'{self.exam} - {self.date}'
+        return f'{self.exam_period} - {self.date}'
 
 
 class DailyPlanItem(models.Model):
@@ -89,8 +89,8 @@ class ProgressLog(models.Model):
 
 
 class RecoveryPlan(models.Model):
-    exam = models.ForeignKey(
-        'exams.Exam',
+    exam_period = models.ForeignKey(
+        'exams.ExamPeriod',
         on_delete=models.CASCADE,
         related_name='recovery_plans',
     )
@@ -109,7 +109,7 @@ class RecoveryPlan(models.Model):
     applied_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        return f'{self.exam} - {self.recovery_type}'
+        return f'{self.exam_period} - {self.recovery_type}'
 
 
 class RecoveryPlanItem(models.Model):
