@@ -44,3 +44,31 @@ class MaterialStatus(models.TextChoices):
     PROCESSING = 'processing', '처리 중'
     COMPLETED = 'completed', '완료'
     FAILED = 'failed', '실패'
+
+class DailyPlanStatus(models.TextChoices):
+    PLANNED = 'PLANNED', '계획됨'
+    IN_PROGRESS = 'IN_PROGRESS', '진행중'
+    COMPLETED = 'COMPLETED', '완료'
+    AT_RISK = 'AT_RISK', '위험'
+
+
+class ProgressStatus(models.TextChoices):
+    DONE = 'DONE', '완료'
+    PARTIAL = 'PARTIAL', '일부완료'
+    NOT_DONE = 'NOT_DONE', '못함'
+
+
+class RecoveryType(models.TextChoices):
+    MAINTAIN_VOLUME = 'MAINTAIN_VOLUME', '분량 유지형'
+    CORE_FOCUS = 'CORE_FOCUS', '핵심 집중형'
+
+
+class RecoveryPlanStatus(models.TextChoices):
+    PENDING = 'PENDING', '선택 대기'
+    APPLIED = 'APPLIED', '적용됨'
+    DISCARDED = 'DISCARDED', '미채택'
+
+
+class RecoveryActionType(models.TextChoices):
+    RESCHEDULE = 'RESCHEDULE', '재배치'
+    EXCLUDE = 'EXCLUDE', '제외'
