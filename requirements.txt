@@ -1,6 +1,20 @@
+# Django Framework 핵심
+Django>=5.0,<6.0
 asgiref==3.12.1
-Django==6.0.7
-pillow==12.3.0
-python-decouple==3.8
 sqlparse==0.5.5
 tzdata==2026.3
+
+# 환경변수 (.env) 관리 (SECRET_KEY, DB 설정 등)
+python-decouple==3.8
+
+# PDF 텍스트 추출 및 파싱 
+pdfplumber==0.11.10
+pdfminer.six==20260107
+pypdfium2==5.12.1
+pillow==12.3.0
+
+# PDF 파싱 처리용 암호화 및 C 바인딩 암시적 의존성
+cryptography==49.0.0
+cffi==2.1.0
+pycparser==3.0
+charset-normalizer==3.4.9

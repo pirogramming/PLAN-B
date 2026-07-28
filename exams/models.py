@@ -1,3 +1,214 @@
+from django.conf import settings
 from django.db import models
+from django.core.exceptions import ValidationError
 
-# Create your models here.
+from core.choices import (
+    ExamPeriodStatus,
+    MaterialStatus,
+    MaterialType,
+    PriorityLevel,
+    TaskDepth,
+    TaskDifficulty,
+    TaskType,
+)
+
+# =====================================================================
+
+class ExamPeriod(models.Model):
+    """
+    시험기간 전체 정보를 관리
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='exam_periods',
+        verbose_name="사용자"
+    )
+    title = models.CharField(max_length=100, verbose_name="시험기간명")  # 예: "2026 2학기 중간고사"
+    start_date = models.DateField(verbose_name="시작일")
+    end_date = models.DateField(verbose_name="종료일")
+    status = models.CharField(
+        max_length=20,
+        choices=ExamPeriodStatus.choices,
+        default=ExamPeriodStatus.DRAFT,
+        verbose_name="시험기간 상태"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="수정일시")
+
+    class Meta:
+        db_table = 'exam_periods'
+        verbose_name = '시험기간'
+        verbose_name_plural = '시험기간 목록'
+        ordering = ['-start_date']
+
+    def __str__(self):
+        return f"[{self.user}] {self.title} ({self.status})"
+
+
+class AvailableTime(models.Model):
+    """
+    시험기간 내 날짜별 전체 공부 가능시간 
+    """
+    exam_period = models.ForeignKey(
+        ExamPeriod,
+        on_delete=models.CASCADE,
+        related_name='available_times',
+        verbose_name="시험기간"
+    )
+    date = models.DateField(verbose_name="날짜")
+    available_minutes = models.PositiveIntegerField(default=0, verbose_name="공부 가능시간(분)")
+
+    class Meta:
+        db_table = 'available_times'
+        verbose_name = '날짜별 가용시간'
+        verbose_name_plural = '날짜별 가용시간 목록'
+        unique_together = ('exam_period', 'date')
+        ordering = ['date']
+
+    def __str__(self):
+        return f"{self.date}: {self.available_minutes}분"
+
+
+class Exam(models.Model):
+    """
+    개별 시험 과목 모델 
+    """
+    exam_period = models.ForeignKey(
+        ExamPeriod,
+        on_delete=models.CASCADE,
+        related_name='exams',
+        verbose_name="시험기간"
+    )
+    name = models.CharField(max_length=100, verbose_name="과목명")
+    exam_date = models.DateField(verbose_name="시험일")
+    priority = models.CharField(
+        max_length=10,
+        choices=PriorityLevel.choices,
+        default=PriorityLevel.MEDIUM,
+        verbose_name="과목 우선순위"
+    )
+    speed_factor = models.FloatField(default=1.0, verbose_name="공부 속도 보정계수")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
+
+    class Meta:
+        db_table = 'exams'
+        verbose_name = '시험 과목'
+        verbose_name_plural = '시험 과목 목록'
+        ordering = ['exam_date']
+
+    def __str__(self):
+        return f"{self.name} ({self.exam_date})"
+
+
+class StudyMaterial(models.Model):
+    """
+    과목별 시험 범위 학습 자료
+    """
+    exam = models.ForeignKey(
+        Exam,
+        on_delete=models.CASCADE,
+        related_name='study_materials',
+        verbose_name="시험 과목"
+    )
+    title = models.CharField(max_length=150, verbose_name="자료/범위명")
+    material_type = models.CharField(
+        max_length=10,
+        choices=MaterialType.choices,
+        default=MaterialType.TEXT,
+        verbose_name="자료 입력 유형"
+    )
+    file = models.FileField(upload_to='materials/%Y/%m/', null=True, blank=True, verbose_name="첨부 파일(PDF)")
+    extracted_text = models.TextField(null=True, blank=True, verbose_name="추출된 텍스트 내용")
+    status = models.CharField(
+        max_length=20,
+        choices=MaterialStatus.choices,
+        default=MaterialStatus.PENDING,
+        verbose_name="텍스트 추출 상태"
+    )
+    error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
+    class Meta:
+        db_table = 'study_materials'
+        verbose_name = '학습 자료'
+        verbose_name_plural = '학습 자료 목록'
+
+    def __str__(self):
+        return f"[{self.exam.name}] {self.title}"
+
+
+class StudyTask(models.Model):
+    """
+    하루 학습 분량 
+    """
+    exam = models.ForeignKey(
+        Exam,
+        on_delete=models.CASCADE,
+        related_name='study_tasks',
+        verbose_name="시험 과목"
+    )
+    study_material = models.ForeignKey(
+        StudyMaterial,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='study_tasks',
+        verbose_name="관련 학습 자료"
+    )
+    unit_name = models.CharField(max_length=100, null=True, blank=True, verbose_name="단원명")
+    title = models.CharField(max_length=200, verbose_name="학습 작업명")
+    task_type = models.CharField(
+        max_length=20,
+        choices=TaskType.choices,
+        default=TaskType.CONCEPT,
+        verbose_name="작업 유형"
+    )
+    importance = models.CharField(
+        max_length=10,
+        choices=PriorityLevel.choices,
+        default=PriorityLevel.MEDIUM,
+        verbose_name="중요도"
+    )
+    depth = models.CharField(
+        max_length=10,
+        choices=TaskDepth.choices,
+        default=TaskDepth.BASIC,
+        verbose_name="학습 깊이"
+    )
+    difficulty = models.CharField(
+        max_length=10,
+        choices=TaskDifficulty.choices,
+        default=TaskDifficulty.NORMAL,
+        verbose_name="난이도"
+    )
+    estimated_min_minutes = models.PositiveIntegerField(default=0, verbose_name="최소 예상시간(분)")
+    estimated_max_minutes = models.PositiveIntegerField(default=0, verbose_name="최대 예상시간(분)")
+    ai_reason = models.TextField(null=True, blank=True, verbose_name="AI 추천 이유")
+    is_user_modified = models.BooleanField(default=False, verbose_name="사용자 직접 수정 여부")
+    is_confirmed = models.BooleanField(default=False, verbose_name="작업 확정 여부")
+    order = models.PositiveIntegerField(default=1, verbose_name="작업 순서")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
+
+    class Meta:
+        db_table = 'study_tasks'
+        verbose_name = '학습 작업'
+        verbose_name_plural = '학습 작업 목록'
+        ordering = ['order', 'id']
+
+    def clean(self):
+        super().clean()
+        if self.study_material and self.study_material.exam_id != self.exam_id:
+            raise ValidationError({
+                'study_material': '선택한 학습 자료의 과목과 해당 학습 작업의 과목이 일치하지 않습니다.'
+            })
+        if self.estimated_min_minutes > self.estimated_max_minutes:
+            raise ValidationError({
+                'estimated_min_minutes': '최소 예상시간은 최대 예상시간보다 클 수 없습니다.'
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"[{self.exam.name}] {self.title}"
