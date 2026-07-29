@@ -169,7 +169,7 @@ def _call_ai(prompt: str) -> str:
             last_error = exc
             logger.warning("AI 호출 실패 (시도 %d/%d): %s", attempt, MAX_RETRIES + 1, exc)
 
-    raise AICallFailedError(f"AI 호출이 {MAX_RETRIES + 1}회 모두 실패했습니다: {last_error}")
+    raise AICallFailedError(f"AI 호출이 {MAX_RETRIES + 1}회 모두 실패했습니다: {last_error or '알 수 없는 에러'}")
 
 
 def _strip_code_fence(raw: str) -> str:
