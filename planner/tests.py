@@ -257,3 +257,136 @@ class AllocateTasksToDaysTests(TestCase):
         # 첫 작업이 40분 차지하면 남은 20분으로는 두 번째(40분) 작업이 못 들어감
         self.assertEqual(len(result["allocations"]), 1)
         self.assertEqual(result["unallocated_tasks"], [2])
+
+
+from planner.services.scheduler import (
+    generate_schedule,
+    ScheduleAlreadyExistsError,
+    UnallocatedTasksError,
+)
+from planner.models import DailyPlan, DailyPlanItem
+
+
+class GenerateScheduleTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pass1234"
+        )
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="테스트 시험기간",
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=date(2026, 8, 10),
+        )
+
+    def _make_task(self, exam=None, importance="high", order=1, estimated_max_minutes=60):
+        from exams.models import StudyTask
+        return StudyTask.objects.create(
+            exam=exam or self.exam,
+            title="테스트 작업",
+            importance=importance,
+            order=order,
+            estimated_min_minutes=estimated_max_minutes,
+            estimated_max_minutes=estimated_max_minutes,
+            is_confirmed=True,
+        )
+
+    def _fake_available_time(self, day, minutes):
+        class _AT:
+            pass
+        at = _AT()
+        at.date = day
+        at.available_minutes = minutes
+        return at
+
+    def test_saves_daily_plan_and_items(self):
+        tasks = [self._make_task()]
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        result = generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=tasks,
+            available_times=available_times,
+        )
+
+        self.assertEqual(result["created_item_count"], 1)
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 1)
+        self.assertEqual(DailyPlanItem.objects.count(), 1)
+
+    def test_raises_when_existing_and_replace_false(self):
+        tasks = [self._make_task()]
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=tasks,
+            available_times=available_times,
+        )
+
+        with self.assertRaises(ScheduleAlreadyExistsError):
+            generate_schedule(
+                exam_period=self.exam_period,
+                study_tasks=tasks,
+                available_times=available_times,
+                replace_existing=False,
+            )
+        self.assertEqual(DailyPlanItem.objects.count(), 1)
+
+    def test_replace_existing_true_clears_old_items(self):
+        task_v1 = self._make_task(importance="high", order=1)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task_v1],
+            available_times=available_times,
+        )
+
+        task_v2 = self._make_task(importance="low", order=2)
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task_v2],
+            available_times=available_times,
+            replace_existing=True,
+        )
+
+        items = DailyPlanItem.objects.all()
+        self.assertEqual(items.count(), 1)
+        self.assertEqual(items.first().study_task_id, task_v2.id)
+
+    def test_no_data_saved_when_unallocated_tasks_exist(self):
+        task = self._make_task(estimated_max_minutes=100)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        with self.assertRaises(UnallocatedTasksError):
+            generate_schedule(
+                exam_period=self.exam_period,
+                study_tasks=[task],
+                available_times=available_times,
+            )
+
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+        self.assertEqual(DailyPlanItem.objects.count(), 0)
+
+    def test_same_date_tasks_share_one_daily_plan(self):
+        task1 = self._make_task(order=1, estimated_max_minutes=30)
+        task2 = self._make_task(order=2, estimated_max_minutes=30)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task1, task2],
+            available_times=available_times,
+        )
+
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 1)
+        self.assertEqual(DailyPlanItem.objects.count(), 2)
