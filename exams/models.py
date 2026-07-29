@@ -80,7 +80,7 @@ class Exam(models.Model):
         related_name='exams',
         verbose_name="시험기간"
     )
-    name = models.CharField(max_length=100, verbose_name="과목명")
+    subject_name = models.CharField(max_length=100, verbose_name="과목명")
     exam_date = models.DateField(verbose_name="시험일")
     priority = models.CharField(
         max_length=10,
