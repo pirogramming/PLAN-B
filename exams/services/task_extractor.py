@@ -32,8 +32,11 @@ from exams.models import Exam, StudyMaterial, StudyTask
 
 logger = logging.getLogger(__name__)
 
-# AI 호출 실패 시 재시도 횟수 (최초 시도 포함 총 MAX_RETRIES + 1회 시도)
+# AI 호출(네트워크/API) 실패 시 재시도 횟수 (최초 시도 포함 총 MAX_RETRIES + 1회 시도)
 MAX_RETRIES = 2
+
+# AI 응답이 JSON 검증에 실패했을 때 self-correction 재요청 횟수
+MAX_VALIDATION_RETRIES = 1
 
 _VALID_TASK_TYPES = {c[0] for c in TaskType.choices}
 _VALID_IMPORTANCE = {c[0] for c in PriorityLevel.choices}
@@ -57,9 +60,14 @@ class ExtractedTask:
     ai_reason: str
 
 
-def build_prompt(exam_name: str, exam_date, source_text: str) -> str:
-    """시험 범위 원문 텍스트를 AI 프롬프트로 변환한다."""
-    return f"""너는 학생의 시험 범위를 학습 작업 단위로 쪼개는 도우미다.
+def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: str | None = None) -> str:
+    """
+    시험 범위 원문 텍스트를 AI 프롬프트로 변환한다.
+
+    previous_error가 주어지면, 직전 응답이 검증에 실패한 이유를 프롬프트에 덧붙여
+    AI가 스스로 형식을 고쳐 재응답하도록 유도한다 (self-correction).
+    """
+    prompt = f"""너는 학생의 시험 범위를 학습 작업 단위로 쪼개는 도우미다.
 
 과목명: {exam_name}
 시험일: {exam_date}
@@ -99,6 +107,14 @@ def build_prompt(exam_name: str, exam_date, source_text: str) -> str:
   ]
 }}
 """
+    if previous_error:
+        prompt += f"""
+
+[이전 응답 거부됨] 방금 전 응답이 다음 이유로 거부되었다:
+{previous_error}
+
+위 규칙과 JSON 형식을 다시 한번 정확히 지켜서, 순수 JSON만 응답하라."""
+    return prompt
 
 
 _MOCK_RESPONSE = """{
@@ -231,18 +247,55 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
       -> 0으로 남겨두고, 이후 BE1의 time_estimator 서비스가 채운다.
     - 생성된 StudyTask는 is_confirmed=False, is_user_modified=False 상태로 저장된다.
       사용자가 검토/수정/확정하기 전까지는 최종 계획에 사용되지 않는다.
+    - AI 응답이 JSON 검증에 실패하면, 실패 이유를 프롬프트에 덧붙여 최대
+      MAX_VALIDATION_RETRIES회 self-correction 재요청을 한다.
+    - 동일 StudyMaterial에 대해 다시 실행되면(재분석), 이전에 생성된 미확정·미수정
+      StudyTask는 삭제하고 새로 만든다 (사용자가 수정했거나 확정한 작업은 보존).
 
     실패 시 AIAnalysisError 계열 예외(AICallFailedError, AIResponseValidationError)를
-    발생시키며, 이 경우 StudyTask는 생성되지 않는다 (트랜잭션 롤백).
+    발생시키며, 이 경우 StudyTask는 생성/삭제되지 않는다 (트랜잭션 롤백).
     """
     if not study_material.extracted_text:
         raise AIResponseValidationError("StudyMaterial에 분석할 텍스트가 없습니다.")
 
     exam: Exam = study_material.exam
-    prompt = build_prompt(exam.name, exam.exam_date, study_material.extracted_text)
 
-    raw_response = _call_ai(prompt)
-    extracted_tasks = _parse_and_validate(raw_response)
+    # AI 응답이 검증에 실패하면, 실패 이유를 프롬프트에 덧붙여 최대 MAX_VALIDATION_RETRIES회
+    # 재요청한다 (self-correction). 그래도 실패하면 AIResponseValidationError를 던진다.
+    extracted_tasks = None
+    last_validation_error: str | None = None
+
+    for attempt in range(MAX_VALIDATION_RETRIES + 1):
+        prompt = build_prompt(
+            exam.subject_name,
+            exam.exam_date,
+            study_material.extracted_text,
+            previous_error=last_validation_error,
+        )
+        raw_response = _call_ai(prompt)
+        try:
+            extracted_tasks = _parse_and_validate(raw_response)
+            break
+        except AIResponseValidationError as exc:
+            last_validation_error = str(exc)
+            logger.warning(
+                "AI 응답 검증 실패 (재시도 %d/%d): %s",
+                attempt + 1, MAX_VALIDATION_RETRIES + 1, exc,
+            )
+
+    if extracted_tasks is None:
+        raise AIResponseValidationError(
+            f"AI 응답 검증이 {MAX_VALIDATION_RETRIES + 1}회 모두 실패했습니다: {last_validation_error}"
+        )
+
+    # 동일 StudyMaterial로 "AI 분석 다시 실행"을 하는 경우, 이전에 생성된 미확정/미수정
+    # StudyTask가 계속 누적되는 것을 방지하기 위해 먼저 정리한다.
+    # (사용자가 직접 수정했거나(is_user_modified) 확정한(is_confirmed) 작업은 건드리지 않는다)
+    StudyTask.objects.filter(
+        study_material=study_material,
+        is_confirmed=False,
+        is_user_modified=False,
+    ).delete()
 
     existing_max_order = (
         StudyTask.objects
@@ -276,5 +329,5 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
     # 여기서 만드는 값들은 이미 choices 검증을 마쳤고 min/max가 둘 다 0이라 문제없지만,
     # 추후 필드가 늘어나면 이 부분을 다시 확인할 것.
     StudyTask.objects.bulk_create(created_tasks)
-    logger.info("AI 분석 완료: exam=%s, 생성된 작업 %d개", exam.name, len(created_tasks))
+    logger.info("AI 분석 완료: exam=%s, 생성된 작업 %d개", exam.subject_name, len(created_tasks))
     return created_tasks
