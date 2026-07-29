@@ -18,3 +18,5 @@ cryptography==49.0.0
 cffi==2.1.0
 pycparser==3.0
 charset-normalizer==3.4.9
+
+anthropic==0.69.0

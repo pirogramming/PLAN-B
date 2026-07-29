@@ -127,3 +127,9 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 AUTH_USER_MODEL = 'accounts.User' 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+#AI 모델임시설정
+AI_MODEL_NAME = config('AI_MODEL_NAME', default='claude-haiku-4-5-20251001')
+# True면 실제 API를 호출하지 않고 고정 샘플 응답 사용 
+AI_MOCK_MODE = config('AI_MOCK_MODE', default=True, cast=bool)
