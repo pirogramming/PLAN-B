@@ -11,30 +11,26 @@ class CustomUserCreationForm(UserCreationForm):
     """
     class Meta(UserCreationForm.Meta):
         model = User
-        fields = ('username', 'nickname', 'email')
+        fields = ('email', 'nickname')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
         # 아이디 
-        if 'username' in self.fields:
-            self.fields['username'].widget.attrs.update({
+        if 'email' in self.fields:
+            self.fields['email'].required = True
+            self.fields['email'].widget.attrs.update({
                 'class': 'form-control',
-                'placeholder': '아이디를 입력하세요',
+                'placeholder': 'example@email.com',
+                'autofocus': True,
             })
             
         # 닉네임 
         if 'nickname' in self.fields:
+            self.fields['nickname'].required = True
             self.fields['nickname'].widget.attrs.update({
                 'class': 'form-control',
-                'placeholder': '닉네임을 입력하세요 (선택)',
-            })
-            
-        # 이메일 
-        if 'email' in self.fields:
-            self.fields['email'].widget.attrs.update({
-                'class': 'form-control',
-                'placeholder': 'example@email.com',
+                'placeholder': '닉네임을 입력하세요',
             })
             
         # 비밀번호 
@@ -56,12 +52,17 @@ class CustomAuthenticationForm(AuthenticationForm):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['username'].widget.attrs.update({
-            'class': 'form-control',
-            'placeholder': '아이디',
-            'autofocus': True,
-        })
-        self.fields['password'].widget.attrs.update({
-            'class': 'form-control',
-            'placeholder': '비밀번호',
-        })
+        
+        if 'username' in self.fields:
+            self.fields['username'].label = '이메일'
+            self.fields['username'].widget.attrs.update({
+                'class': 'form-control',
+                'placeholder': '이메일을 입력하세요',
+                'autofocus': True,
+            })
+            
+        if 'password' in self.fields:
+            self.fields['password'].widget.attrs.update({
+                'class': 'form-control',
+                'placeholder': '비밀번호',
+            })
