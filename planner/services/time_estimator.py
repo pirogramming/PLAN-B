@@ -1,9 +1,7 @@
-"""
-학습 작업의 예상 소요시간을 계산하는 순수 함수 모듈.
-DB 저장은 하지 않고, StudyTask 생성/수정 시 호출되어
-estimated_min_minutes, estimated_max_minutes 값을 산출하는 데 쓰인다.
-"""
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 # 작업 유형별 기준시간(분): (최소, 최대)
 TASK_TYPE_BASE_MINUTES = {
@@ -45,6 +43,17 @@ def estimate_task_minutes(
     Returns:
         (estimated_min_minutes, estimated_max_minutes)
     """
+    if task_type not in TASK_TYPE_BASE_MINUTES:
+        logger.warning(
+            "알 수 없는 task_type=%r 이 들어와 기본값(custom)으로 대체합니다.",
+            task_type,
+        )
+    if difficulty not in DIFFICULTY_MULTIPLIERS:
+        logger.warning(
+            "알 수 없는 difficulty=%r 이 들어와 기본값(normal)으로 대체합니다.",
+            difficulty,
+        )
+
     base_min, base_max = TASK_TYPE_BASE_MINUTES.get(
         task_type, DEFAULT_BASE_MINUTES
     )
