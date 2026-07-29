@@ -33,9 +33,9 @@ class StudyMaterialInline(admin.TabularInline):
 
 @admin.register(Exam)
 class ExamAdmin(admin.ModelAdmin):
-    list_display = ('id', 'exam_period', 'name', 'exam_date', 'priority')
+    list_display = ('id', 'exam_period', 'subject_name', 'exam_date', 'priority')
     list_filter = ('priority', 'exam_date')
-    search_fields = ('name', 'exam_period__title')
+    search_fields = ('subject_name', 'exam_period__title')
     inlines = [StudyMaterialInline]
 
 
