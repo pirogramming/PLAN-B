@@ -13,8 +13,8 @@ StudyTask의 예상시간이 나중에 재계산되어도 과거 진행 기록�
 """
 from core.choices import ProgressStatus
 
-MIN_SPEED_FACTOR = 0.5
-MAX_SPEED_FACTOR = 2.0
+MIN_SPEED_FACTOR = 0.7
+MAX_SPEED_FACTOR = 1.5
 BLEND_WEIGHT = 0.3  # 새 비율을 30% 반영
 
 
@@ -79,6 +79,11 @@ def recalculate_speed_factor(exam):
     recorded_at(auto_now)이 아니라 daily_plan.date로 정렬하는 이유:
     로그를 나중에 수정하면 recorded_at이 "지금"으로 갱신되어, 실제로는
     옛날 기록인데 최신 기록처럼 취급되는 문제가 있기 때문이다.
+
+    날짜만으로는 정렬 순서가 안 끝난다: 같은 날짜에 로그가 여러 개면
+    daily_plan_item__order(그날 안에서의 작업 순서) -> pk를 타이브레이커로
+    추가한다. EMA(지수이동평균) 방식은 로그를 적용하는 순서에 따라 최종
+    speed_factor가 달라질 수 있어서, 순서가 매번 안정적으로 결정돼야 한다.
     """
     from planner.models import ProgressLog
 
@@ -87,7 +92,11 @@ def recalculate_speed_factor(exam):
             daily_plan_item__study_task__exam=exam,
         )
         .select_related("daily_plan_item__daily_plan")
-        .order_by("daily_plan_item__daily_plan__date")
+        .order_by(
+            "daily_plan_item__daily_plan__date",
+            "daily_plan_item__order",
+            "pk",
+        )
     )
 
     exam.speed_factor = calculate_speed_factor(list(logs))

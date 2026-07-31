@@ -170,7 +170,12 @@ class CalculateSpeedFactorTests(TestCase):
     def test_result_is_clamped_within_bounds(self):
         logs = [self._log("done", 100, 1000)]  # 극단적으로 느림
         result = calculate_speed_factor(logs)
-        self.assertLessEqual(result, 2.0)
+        self.assertLessEqual(result, 1.5)
+
+    def test_result_is_clamped_at_lower_bound(self):
+        logs = [self._log("done", 100, 1)]  # 극단적으로 빠름
+        result = calculate_speed_factor(logs)
+        self.assertGreaterEqual(result, 0.7)
 
 
 from datetime import date
@@ -338,3 +343,89 @@ class RecordProgressTests(TestCase):
                 actual_minutes=20,
                 completion_percent=150,
             )
+
+class RecalculateSpeedFactorOrderingTests(TestCase):
+    """
+    같은 날짜에 ProgressLog가 여러 개일 때, EMA 계산 순서가
+    daily_plan_item__order 기준으로 결정적인지 확인한다.
+
+    recalculate_speed_factor()가 만약 date만으로 정렬하고 동률을
+    DB 기본 순서(보통 삽입/pk 순서)에 맡긴다면, 로그를 만드는 순서에
+    따라 결과가 달라진다. 이 테스트는 order=2인 항목의 로그를 먼저
+    만들어(pk가 더 작게) 일부러 "삽입 순서 != order 순서"인 상황을
+    만들고, 그래도 daily_plan_item__order 기준(1번 먼저 -> 2번 나중)
+    으로 계산됐는지를 정확한 기대값으로 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+        from planner.models import DailyPlan, DailyPlanItem
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="tester3", email="tester3@example.com", password="pass1234"
+        )
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="테스트 시험기간",
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=date(2026, 8, 10),
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=date(2026, 8, 1),
+            available_minutes=90,
+            planned_minutes=60,
+        )
+
+        def _make_item(order, planned_minutes):
+            task = StudyTask.objects.create(
+                exam=self.exam,
+                title=f"작업 {order}",
+                importance="high",
+                order=order,
+                estimated_min_minutes=planned_minutes,
+                estimated_max_minutes=planned_minutes,
+                is_confirmed=True,
+            )
+            return DailyPlanItem.objects.create(
+                daily_plan=self.daily_plan,
+                study_task=task,
+                planned_minutes=planned_minutes,
+                order=order,
+            )
+
+        self.item_order1 = _make_item(order=1, planned_minutes=30)
+        self.item_order2 = _make_item(order=2, planned_minutes=30)
+
+    def test_same_date_logs_processed_by_daily_plan_item_order(self):
+        from planner.services.speed_calibrator import recalculate_speed_factor
+
+        # 일부러 order=2 항목의 로그를 먼저 만든다 (pk가 더 작아짐).
+        # date만으로 정렬하면 이 pk 순서(2번 먼저)로 계산되지만,
+        # 올바른 기준은 daily_plan_item__order(1번 먼저)여야 한다.
+        ProgressLog.objects.create(
+            daily_plan_item=self.item_order2,
+            progress_status="done",
+            actual_minutes=60,      # ratio = 60/30 = 2.0
+            completion_percent=100,
+        )
+        ProgressLog.objects.create(
+            daily_plan_item=self.item_order1,
+            progress_status="done",
+            actual_minutes=15,      # ratio = 15/30 = 0.5
+            completion_percent=100,
+        )
+
+        result = recalculate_speed_factor(self.exam)
+
+        # order=1(ratio 0.5) 먼저 -> order=2(ratio 2.0) 나중 순서로 계산됐을 때
+        # 나오는 정확한 기대값. (1.0*0.7 + 0.5*0.3) = 0.85
+        # (0.85*0.7 + 2.0*0.3) = 1.195 -> clamp(0.7, 1.5) 안쪽이라 그대로.
+        self.assertEqual(result, 1.195)
