@@ -312,12 +312,40 @@ class AllocateTasksToDaysTests(TestCase):
         self.assertEqual(result["allocations"][0]["date"], date(2026, 8, 2))
 
 
+    def test_core_depth_scheduled_before_larger_non_core_task(self):
+        # 같은 시험일·중요도에서는 depth(core > basic > optional)가
+        # 크기(estimated_max_minutes)보다 우선한다. core 작업이 작아도
+        # optional의 큰 작업보다 먼저 자리를 차지해야 한다.
+        exam_date = date(2026, 8, 10)
+        tasks = [
+            TaskInput(id=1, exam_date=exam_date, importance="high", order=1, estimated_max_minutes=8, depth="optional"),
+            TaskInput(id=2, exam_date=exam_date, importance="high", order=2, estimated_max_minutes=3, depth="core"),
+        ]
+        available_times = [
+            AvailableTimeInput(date=date(2026, 8, 1), available_minutes=8),
+            AvailableTimeInput(date=date(2026, 8, 2), available_minutes=10),
+        ]
+        result = allocate_tasks_to_days(tasks, available_times)
+        self.assertEqual(
+            result["allocations"],
+            [
+                {"task_id": 2, "date": date(2026, 8, 1), "allocated_minutes": 3},
+                {"task_id": 1, "date": date(2026, 8, 2), "allocated_minutes": 8},
+            ],
+        )
+
+    def test_default_depth_is_basic_when_not_specified(self):
+        task = TaskInput(id=1, exam_date=date(2026, 8, 10), importance="high", order=1, estimated_max_minutes=10)
+        self.assertEqual(task.depth, "basic")
+
+
 from planner.services.schedule_generator import (
     generate_schedule,
     ScheduleAlreadyExistsError,
+    ScheduleHasProgressError,
     UnallocatedTasksError,
 )
-from planner.models import DailyPlan, DailyPlanItem
+from planner.models import DailyPlan, DailyPlanItem, ProgressLog
 
 
 class GenerateScheduleTests(TestCase):
@@ -415,6 +443,70 @@ class GenerateScheduleTests(TestCase):
         items = DailyPlanItem.objects.all()
         self.assertEqual(items.count(), 1)
         self.assertEqual(items.first().study_task_id, task_v2.id)
+
+    def test_replace_existing_blocked_when_progress_log_exists(self):
+        from core.choices import ProgressStatus
+
+        task_v1 = self._make_task(importance="high", order=1)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task_v1],
+            available_times=available_times,
+        )
+
+        recorded_item = DailyPlanItem.objects.get(study_task=task_v1)
+        progress_log = ProgressLog.objects.create(
+            daily_plan_item=recorded_item,
+            progress_status=ProgressStatus.DONE,
+            actual_minutes=60,
+            completion_percent=100,
+        )
+        progress_log_id = progress_log.id
+
+        task_v2 = self._make_task(importance="low", order=2)
+        with self.assertRaises(ScheduleHasProgressError):
+            generate_schedule(
+                exam_period=self.exam_period,
+                study_tasks=[task_v2],
+                available_times=available_times,
+                replace_existing=True,
+            )
+
+        # 기존 DailyPlanItem이 그대로 남아있어야 한다.
+        self.assertEqual(DailyPlanItem.objects.count(), 1)
+        self.assertEqual(DailyPlanItem.objects.first().study_task_id, task_v1.id)
+        # ProgressLog는 개수뿐 아니라 원래 기록 내용까지 그대로 보존돼야 한다.
+        self.assertTrue(
+            ProgressLog.objects.filter(
+                id=progress_log_id,
+                daily_plan_item=recorded_item,
+                actual_minutes=60,
+                completion_percent=100,
+            ).exists()
+        )
+
+    def test_replace_existing_still_works_when_no_progress_recorded(self):
+        task_v1 = self._make_task(importance="high", order=1)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task_v1],
+            available_times=available_times,
+        )
+
+        task_v2 = self._make_task(importance="low", order=2)
+        result = generate_schedule(
+            exam_period=self.exam_period,
+            study_tasks=[task_v2],
+            available_times=available_times,
+            replace_existing=True,
+        )
+        self.assertEqual(result["created_item_count"], 1)
+        self.assertEqual(DailyPlanItem.objects.count(), 1)
+        self.assertEqual(DailyPlanItem.objects.first().study_task_id, task_v2.id)
 
     def test_no_data_saved_when_unallocated_tasks_exist(self):
         task = self._make_task(estimated_max_minutes=100)

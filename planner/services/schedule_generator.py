@@ -35,6 +35,19 @@ class MismatchedExamPeriodError(Exception):
     pass
 
 
+class ScheduleHasProgressError(Exception):
+    """
+    이미 진행 기록(ProgressLog)이 존재하는 계획을 통째로 재생성하려 할 때
+    발생시킨다.
+
+    DailyPlanItem 삭제는 ProgressLog와 CASCADE로 연결돼 있어서, 이 검증
+    없이 replace_existing=True로 재생성하면 사용자가 이미 입력한 공부
+    기록이 조용히 사라진다. 학습 시작 이후의 일정 변경은 여기(전체 재생성)가
+    아니라 복구안(recovery) 기능으로 처리해야 한다.
+    """
+    pass
+
+
 def _validate_belongs_to_exam_period(study_tasks, available_times, exam_period):
     """study_tasks와 available_times가 모두 이 exam_period 소속인지 확인한다."""
     for task in study_tasks:
@@ -56,6 +69,7 @@ def _to_task_inputs(study_tasks):
             id=task.id,
             exam_date=task.exam.exam_date,
             importance=task.importance,
+            depth=task.depth,
             order=task.order,
             estimated_max_minutes=task.estimated_max_minutes,
         )
@@ -86,12 +100,18 @@ def generate_schedule(
         2. 배치 계산 (allocate_tasks_to_days) - DB 변경 없음
         3. 미배치 작업 검증 - 하나라도 있으면 즉시 중단, DB 미변경
         4. 기존 계획 처리 (동시성 잠금 포함, SQLite에서는 무의미함에 유의)
+           - 진행 기록(ProgressLog)이 하나라도 있으면 재생성 자체를 거부한다.
+             DailyPlanItem 삭제가 ProgressLog까지 CASCADE로 지워버리기 때문에,
+             학습 시작 이후에는 여기가 아니라 복구안(recovery) 기능으로
+             일정을 바꿔야 한다.
         5. 새 계획 저장
 
     Raises:
         MismatchedExamPeriodError: study_tasks/available_times가 다른 exam_period 소속일 때
         UnallocatedTasksError: 배치 못한 작업이 하나라도 있을 때
         ScheduleAlreadyExistsError: 기존 계획이 있고 replace_existing=False일 때
+        ScheduleHasProgressError: replace_existing=True로 전체 재생성을
+            요청했지만, 기존 계획에 진행 기록이 존재하는 경우
         DuplicateTaskAllocationError: 배치 결과에 같은 작업이 중복 등장할 때
     """
     _validate_belongs_to_exam_period(study_tasks, available_times, exam_period)
@@ -129,6 +149,16 @@ def generate_schedule(
     if existing_items.exists():
         if not replace_existing:
             raise ScheduleAlreadyExistsError()
+
+        # 진행 기록이 하나라도 있으면 replace_existing=True여도 재생성을
+        # 막는다. 여기서 막지 않으면 DailyPlanItem 삭제가 ProgressLog까지
+        # CASCADE로 조용히 지워버린다 (사용자 공부 기록 유실).
+        if existing_items.filter(progress_log__isnull=False).exists():
+            raise ScheduleHasProgressError(
+                "진행 기록이 존재하는 계획은 전체 재생성할 수 없습니다. "
+                "복구안(recovery) 기능을 사용해주세요."
+            )
+
         existing_items.delete()
         DailyPlan.objects.filter(exam_period=locked_exam_period).delete()
 
