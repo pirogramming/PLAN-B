@@ -258,6 +258,59 @@ class AllocateTasksToDaysTests(TestCase):
         self.assertEqual(len(result["allocations"]), 1)
         self.assertEqual(result["unallocated_tasks"], [2])
 
+    def test_best_fit_avoids_fragmentation_that_first_fit_would_miss(self):
+        # 2,2,7,7,7 / 하루 10분씩 3일: 7+2 / 7+2 / 7 로 전부 배치 가능한
+        # 조합이 존재하는데, 작은 작업부터 넣는 First-Fit은 공간을 파편화시켜
+        # 마지막 7분 작업 하나를 미배치로 만든다. Best-Fit Decreasing이면
+        # 전부 들어가야 한다.
+        exam_date = date(2026, 8, 10)
+        tasks = [
+            TaskInput(id=1, exam_date=exam_date, importance="medium", order=1, estimated_max_minutes=2),
+            TaskInput(id=2, exam_date=exam_date, importance="medium", order=2, estimated_max_minutes=2),
+            TaskInput(id=3, exam_date=exam_date, importance="medium", order=3, estimated_max_minutes=7),
+            TaskInput(id=4, exam_date=exam_date, importance="medium", order=4, estimated_max_minutes=7),
+            TaskInput(id=5, exam_date=exam_date, importance="medium", order=5, estimated_max_minutes=7),
+        ]
+        available_times = [
+            AvailableTimeInput(date=date(2026, 8, 1), available_minutes=10),
+            AvailableTimeInput(date=date(2026, 8, 2), available_minutes=10),
+            AvailableTimeInput(date=date(2026, 8, 3), available_minutes=10),
+        ]
+        result = allocate_tasks_to_days(tasks, available_times)
+        self.assertEqual(result["unallocated_tasks"], [])
+        self.assertEqual(len(result["allocations"]), 5)
+
+    def test_larger_task_scheduled_before_smaller_within_same_tier(self):
+        exam_date = date(2026, 8, 10)
+        tasks = [
+            TaskInput(id=1, exam_date=exam_date, importance="high", order=1, estimated_max_minutes=3),
+            TaskInput(id=2, exam_date=exam_date, importance="high", order=2, estimated_max_minutes=8),
+        ]
+        available_times = [
+            AvailableTimeInput(date=date(2026, 8, 1), available_minutes=8),
+            AvailableTimeInput(date=date(2026, 8, 2), available_minutes=10),
+        ]
+        result = allocate_tasks_to_days(tasks, available_times)
+        self.assertEqual(
+            result["allocations"],
+            [
+                {"task_id": 2, "date": date(2026, 8, 1), "allocated_minutes": 8},
+                {"task_id": 1, "date": date(2026, 8, 2), "allocated_minutes": 3},
+            ],
+        )
+        self.assertEqual(result["unallocated_tasks"], [])
+
+    def test_best_fit_prefers_day_with_less_remaining_time(self):
+        tasks = [
+            TaskInput(id=1, exam_date=date(2026, 8, 10), importance="high", order=1, estimated_max_minutes=5),
+        ]
+        available_times = [
+            AvailableTimeInput(date=date(2026, 8, 1), available_minutes=10),
+            AvailableTimeInput(date=date(2026, 8, 2), available_minutes=6),
+        ]
+        result = allocate_tasks_to_days(tasks, available_times)
+        self.assertEqual(result["allocations"][0]["date"], date(2026, 8, 2))
+
 
 from planner.services.schedule_generator import (
     generate_schedule,
