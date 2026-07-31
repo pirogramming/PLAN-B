@@ -121,19 +121,19 @@ class CalculateSpeedFactorTests(TestCase):
             self.estimated_max_minutes = estimated_max_minutes
 
     class _StubItem:
-        def __init__(self, study_task):
-            self.study_task = study_task
+        def __init__(self, planned_minutes):
+            self.planned_minutes = planned_minutes
 
     class _StubLog:
-        def __init__(self, progress_status, completion_percent, actual_minutes, task):
+        def __init__(self, progress_status, completion_percent, actual_minutes, planned_minutes):
             self.progress_status = progress_status
             self.completion_percent = completion_percent
             self.actual_minutes = actual_minutes
-            self.daily_plan_item = CalculateSpeedFactorTests._StubItem(task)
+            self.daily_plan_item = CalculateSpeedFactorTests._StubItem(planned_minutes)
 
-    def _log(self, status, percent, actual_minutes, min_m=20, max_m=40):
-        task = self._StubTask(min_m, max_m)
-        return self._StubLog(status, percent, actual_minutes, task)
+
+    def _log(self, status, percent, actual_minutes, planned_minutes=30):
+        return self._StubLog(status, percent, actual_minutes, planned_minutes)
 
     def test_no_logs_returns_default(self):
         self.assertEqual(calculate_speed_factor([]), 1.0)
