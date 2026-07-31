@@ -134,7 +134,7 @@ class StudyMaterial(models.Model):
         verbose_name_plural = '학습 자료 목록'
 
     def __str__(self):
-        return f"[{self.exam.name}] {self.title}"
+        return f"[{self.exam.subject_name}] {self.title}"
 
 
 class StudyTask(models.Model):
@@ -211,4 +211,4 @@ class StudyTask(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"[{self.exam.name}] {self.title}"
+        return f"[{self.exam.subject_name}] {self.title}"
