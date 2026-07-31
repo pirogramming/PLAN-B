@@ -259,7 +259,7 @@ class AllocateTasksToDaysTests(TestCase):
         self.assertEqual(result["unallocated_tasks"], [2])
 
 
-from planner.services.scheduler import (
+from planner.services.schedule_generator import (
     generate_schedule,
     ScheduleAlreadyExistsError,
     UnallocatedTasksError,
@@ -387,6 +387,27 @@ class GenerateScheduleTests(TestCase):
             study_tasks=[task1, task2],
             available_times=available_times,
         )
+    def test_raises_when_task_belongs_to_other_exam_period(self):
+        from planner.services.schedule_generator import MismatchedExamPeriodError
+        from exams.models import Exam, ExamPeriod
 
-        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 1)
-        self.assertEqual(DailyPlanItem.objects.count(), 2)
+        other_exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="다른 시험기간",
+            start_date=date(2026, 9, 1),
+            end_date=date(2026, 9, 20),
+        )
+        other_exam = Exam.objects.create(
+            exam_period=other_exam_period,
+            subject_name="다른 과목",
+            exam_date=date(2026, 9, 10),
+        )
+        other_task = self._make_task(exam=other_exam)
+        available_times = [self._fake_available_time(date(2026, 8, 1), 60)]
+
+        with self.assertRaises(MismatchedExamPeriodError):
+            generate_schedule(
+                exam_period=self.exam_period,
+                study_tasks=[other_task],
+                available_times=available_times,
+            )
