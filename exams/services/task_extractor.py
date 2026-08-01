@@ -6,6 +6,8 @@ BE3 담당 - AI 분석: 시험 범위 텍스트 -> 단원 분리 -> 학습 작�
 - AI에게 단원 분리, 학습 작업 생성, task_type/importance/depth/difficulty 추천,
   추천 이유(ai_reason) 생성을 요청
 - AI 응답 JSON 검증 및 실패 처리
+- 생성되는 각 StudyTask는 20~60분 크기로 쪼개지도록 유도
+  (BE1의 time_estimator가 "StudyTask 1개 = 20~60분" 전제로 계산하기 때문)
 
 담당하지 않는 것 (규칙 엔진의 몫 = BE1):
 - estimated_min_minutes / estimated_max_minutes 최종 계산
@@ -91,7 +93,11 @@ def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: st
    - difficulty: 다음 중 하나 - easy, normal, hard
    - ai_reason: 이 작업을 이렇게 분류한 이유를 1~2문장으로 설명
 3. 예상 학습 시간(분)은 계산하지 마라. 이 단계에서는 다루지 않는다.
-4. 반드시 아래 JSON 형식으로만 응답하라. 다른 설명, 마크다운 코드블록, 접두사를 붙이지 마라.
+4. 각 학습 작업은 일반적으로 20~60분 안에 완료할 수 있는 크기로 생성하라.
+   - 범위가 지나치게 큰 작업(예: "운영체제 전체 공부")은 여러 개의 작업으로 분할하라
+     (예: "프로세스와 스레드 개념 학습", "CPU 스케줄링 알고리즘 학습", "동기화 핵심 개념 복습").
+   - 단순히 시간을 맞추기 위해 서로 관련 없는 내용을 하나의 작업으로 합치지 마라.
+5. 반드시 아래 JSON 형식으로만 응답하라. 다른 설명, 마크다운 코드블록, 접두사를 붙이지 마라.
 
 {{
   "tasks": [
