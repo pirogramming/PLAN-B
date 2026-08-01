@@ -3,6 +3,7 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
+from django.db import transaction
 
 from core.choices import ExamPeriodStatus
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
@@ -88,20 +89,27 @@ def period_update(request, period_id):
     if request.method == 'POST':
         form = ExamPeriodForm(request.POST, instance=period)
         if form.is_valid():
-            updated = form.save()
-            # 기간이 늘어났으면 새로 생긴 날짜만 AvailableTime 추가 (기존 값 보존)
-            curr_date = updated.start_date
-            while curr_date <= updated.end_date:
-                AvailableTime.objects.get_or_create(
-                    exam_period=updated, date=curr_date, defaults={'available_minutes': 0}
-                )
-                curr_date += datetime.timedelta(days=1)
+            with transaction.atomic():
+                updated = form.save()
+
+                # 축소된 경우: 새 범위(start_date~end_date) 밖의 AvailableTime 삭제
+                AvailableTime.objects.filter(exam_period=updated).exclude(
+                    date__range=(updated.start_date, updated.end_date)
+                ).delete()
+
+                # 확장된 경우: 새로 생긴 날짜만 0분으로 채움 (기존 값은 안 건드림)
+                curr_date = updated.start_date
+                while curr_date <= updated.end_date:
+                    AvailableTime.objects.get_or_create(
+                        exam_period=updated, date=curr_date, defaults={'available_minutes': 0}
+                    )
+                    curr_date += datetime.timedelta(days=1)
+
             return redirect('exams:period_detail', period_id=period.id)
     else:
         form = ExamPeriodForm(instance=period)
 
     return render(request, 'exams/period_form.html', {'form': form, 'period': period})
-
 
 # =====================================================================
 # 시험기간 삭제 (exams:period_delete)
