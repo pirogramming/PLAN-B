@@ -25,6 +25,10 @@ class DailyPlan(models.Model):
         choices=DailyPlanStatus.choices,
         default=DailyPlanStatus.PLANNED,
     )
+    # 마감 여부는 status와 별개로 관리 (status는 진행 기록 입력 때마다 갱신되므로
+    # "마감됨"이라는 1회성 이벤트를 별도 필드로 분리)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+
 
     class Meta:
         ordering = ['date']
@@ -129,6 +133,7 @@ class RecoveryPlanItem(models.Model):
         max_length=20, choices=RecoveryActionType.choices
     )
     reason = models.TextField(null=True, blank=True)
-
+    remaining_minutes = models.PositiveIntegerField(default=0)
+    
     def __str__(self):
         return f'{self.recovery_plan} - {self.study_task} ({self.action_type})'
