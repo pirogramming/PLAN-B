@@ -15,6 +15,13 @@ from core.choices import RecoveryType
 from exams.models import AvailableTime
 from planner.services.progress_recorder import IncompleteProgressError
 from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
+
+from planner.services.recovery import (
+    apply_recovery_plan,
+    RecoveryPlanAlreadyProcessedError,
+    RecoveryPlanStaleError,
+)
+
 # Create your tests here.
 from planner.services.feasibility_checker import (
     calculate_feasibility,
@@ -1345,7 +1352,7 @@ class FinalizeDailyPlanTests(TestCase):
         for plan in plans:
             self.assertEqual(plan.exam_period_id, daily_plan.exam_period_id)
 
-# ── 17. 옵션 False면 기존처럼 IncompleteProgressError ──────
+    # ── 17. 옵션 False면 기존처럼 IncompleteProgressError ──────
     def test_finalize_without_auto_mark_still_raises_on_unrecorded(self):
         exam = self._make_exam(exam_date=self.today + timedelta(days=5))
         task = self._make_task(exam, importance="high", depth="core")
@@ -1435,3 +1442,196 @@ class FinalizeDailyPlanTests(TestCase):
         )
         daily_plan.refresh_from_db()
         self.assertIsNone(daily_plan.finalized_at)
+
+
+class ApplyRecoveryPlanTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="apply_tester", email="apply@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구 적용 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.protected_task = StudyTask.objects.create(
+            exam=self.exam, title="보호 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.low_task = StudyTask.objects.create(
+            exam=self.exam, title="제외 후보 작업", importance="low", depth="optional",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=80, planned_minutes=80,
+        )
+        self.protected_item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.protected_task,
+            planned_minutes=40, order=1,
+        )
+        self.low_item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.low_task,
+            planned_minutes=40, order=2,
+        )
+        record_progress(daily_plan_item=self.protected_item, status="not_done", actual_minutes=0)
+        record_progress(daily_plan_item=self.low_item, status="not_done", actual_minutes=0)
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=80,
+        )
+
+        result = finalize_daily_plan(self.daily_plan)
+        self.maintain_volume = result["recovery_plans"]["maintain_volume"]
+        self.core_focus = result["recovery_plans"]["core_focus"]
+        self.assertIsNotNone(self.maintain_volume)
+        self.assertIsNotNone(self.core_focus)
+
+    def test_apply_creates_daily_plan_item_on_changed_date(self):
+        reschedule_item = self.maintain_volume.items.get(
+            study_task=self.protected_task, action_type="reschedule"
+        )
+
+        apply_recovery_plan(self.maintain_volume)
+
+        new_daily_plan = DailyPlan.objects.get(
+            exam_period=self.exam_period, date=reschedule_item.changed_date
+        )
+        new_item = new_daily_plan.items.get(study_task=self.protected_task)
+        self.assertEqual(new_item.planned_minutes, reschedule_item.remaining_minutes)
+
+    def test_apply_does_not_create_item_for_excluded_task(self):
+        apply_recovery_plan(self.core_focus)
+
+        excluded_task_ids = set(
+            self.core_focus.items.filter(action_type="exclude")
+            .values_list("study_task_id", flat=True)
+        )
+        self.assertIn(self.low_task.id, excluded_task_ids)
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task=self.low_task, daily_plan__date__gt=self.today
+            ).exists()
+        )
+
+    def test_apply_marks_plan_applied_and_sibling_discarded(self):
+        from core.choices import RecoveryPlanStatus
+
+        apply_recovery_plan(self.maintain_volume)
+
+        self.maintain_volume.refresh_from_db()
+        self.core_focus.refresh_from_db()
+
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.APPLIED)
+        self.assertIsNotNone(self.maintain_volume.applied_at)
+        self.assertEqual(self.core_focus.status, RecoveryPlanStatus.DISCARDED)
+
+    def test_apply_twice_raises(self):
+        apply_recovery_plan(self.maintain_volume)
+
+        with self.assertRaises(RecoveryPlanAlreadyProcessedError):
+            apply_recovery_plan(self.maintain_volume)
+
+    def test_apply_sibling_after_one_applied_raises(self):
+        apply_recovery_plan(self.maintain_volume)
+
+        with self.assertRaises(RecoveryPlanAlreadyProcessedError):
+            apply_recovery_plan(self.core_focus)
+
+    def test_apply_discarded_plan_raises(self):
+        from core.choices import RecoveryPlanStatus
+
+        self.maintain_volume.status = RecoveryPlanStatus.DISCARDED
+        self.maintain_volume.save(update_fields=["status"])
+
+        with self.assertRaises(RecoveryPlanAlreadyProcessedError):
+            apply_recovery_plan(self.maintain_volume)
+
+    def test_apply_raises_stale_when_available_time_deleted(self):
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+        ).delete()
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(self.maintain_volume)
+
+        self.maintain_volume.refresh_from_db()
+        from core.choices import RecoveryPlanStatus
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.PENDING)
+
+    def test_apply_raises_stale_when_capacity_reduced(self):
+        available_time = AvailableTime.objects.get(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+        )
+        available_time.available_minutes = 10
+        available_time.save(update_fields=["available_minutes"])
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(self.maintain_volume)
+
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task__in=[self.protected_task, self.low_task],
+                daily_plan__date__gt=self.today,
+            ).exists()
+        )
+
+    def test_apply_rejects_past_changed_date(self):
+        recovery_item = self.maintain_volume.items.filter(action_type="reschedule").first()
+        recovery_item.changed_date = self.today
+        recovery_item.save(update_fields=["changed_date"])
+
+        AvailableTime.objects.get_or_create(
+            exam_period=self.exam_period, date=self.today,
+            defaults={"available_minutes": 80},
+        )
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(self.maintain_volume)
+
+    def test_apply_updates_existing_daily_plan_minutes_and_order(self):
+        tomorrow = self.today + timedelta(days=1)
+
+        existing_task = type(self.protected_task).objects.create(
+            exam=self.exam, title="기존 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=3,
+            estimated_min_minutes=20, estimated_max_minutes=20, is_confirmed=True,
+        )
+        future_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=tomorrow,
+            available_minutes=100, planned_minutes=20,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=future_plan, study_task=existing_task,
+            planned_minutes=20, order=3,
+        )
+
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date=tomorrow,
+        ).update(available_minutes=100)
+
+        apply_recovery_plan(self.core_focus)
+
+        future_plan.refresh_from_db()
+        orders = list(future_plan.items.order_by("order").values_list("order", flat=True))
+
+        self.assertEqual(
+            future_plan.planned_minutes,
+            sum(future_plan.items.values_list("planned_minutes", flat=True)),
+        )
+        self.assertEqual(orders, [3, 4])

@@ -4,13 +4,15 @@ finalize_daily_plan()에서 넘겨받은 미완료 작업(PARTIAL/NOT_DONE)을 �
 DailyPlan/DailyPlanItem은 건드리지 않는다 (사용자 승인 전까지 미적용).
 """
 import uuid
+from collections import defaultdict
 
+from django.db import models, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from core.choices import RecoveryType, RecoveryActionType, ProgressStatus
+from core.choices import RecoveryType, RecoveryActionType, ProgressStatus, RecoveryPlanStatus
 from exams.models import AvailableTime
-from planner.models import RecoveryPlan, RecoveryPlanItem, DailyPlanItem
+from planner.models import RecoveryPlan, RecoveryPlanItem, DailyPlanItem, DailyPlan
 from planner.services.scheduler import (
     TaskInput, AvailableTimeInput, allocate_tasks_to_days,
 )
@@ -271,3 +273,184 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
         'core_focus': core_focus,
         'core_focus_failure_reason': core_focus_failure_reason,
     }
+
+class RecoveryPlanAlreadyProcessedError(Exception):
+    pass
+
+
+class RecoveryPlanStaleError(Exception):
+    pass
+
+
+def _get_or_create_daily_plan(exam_period, date):
+    """
+    changed_date에 해당하는 DailyPlan을 가져오거나 새로 만든다.
+    이미 존재하는 DailyPlan이어도 available_minutes는 최신 AvailableTime
+    기준으로 동기화한다 (stale 검증이 최신 값을 기준으로 하므로 일관성 유지).
+    """
+    try:
+        available_time = AvailableTime.objects.get(
+            exam_period=exam_period, date=date
+        )
+    except AvailableTime.DoesNotExist as exc:
+        raise RecoveryPlanStaleError(
+            f"{date}의 가용시간이 더 이상 존재하지 않습니다."
+        ) from exc
+
+    daily_plan, created = DailyPlan.objects.get_or_create(
+        exam_period=exam_period,
+        date=date,
+        defaults={
+            'available_minutes': available_time.available_minutes,
+            'planned_minutes': 0,
+        },
+    )
+
+    if not created and daily_plan.available_minutes != available_time.available_minutes:
+        daily_plan.available_minutes = available_time.available_minutes
+        daily_plan.save(update_fields=['available_minutes'])
+
+    return daily_plan
+
+
+def _validate_not_stale(exam_period, items_by_date):
+    """
+    복구안 계산 이후 가용시간/기존 일정/시험일/날짜 경과 여부가 바뀌었을
+    수 있으므로 적용 직전에 changed_date별로 다시 검증한다.
+    문제가 있으면 RecoveryPlanStaleError를 발생시켜 전체 트랜잭션을 롤백시킨다.
+    """
+    today = timezone.localdate()
+
+    for changed_date, date_items in items_by_date.items():
+        if changed_date <= today:
+            raise RecoveryPlanStaleError(
+                f"{changed_date}는 이미 지난 배치 날짜입니다. 복구안을 다시 생성해주세요."
+            )
+
+        existing_daily_plan = (
+            DailyPlan.objects
+            .select_for_update()
+            .filter(exam_period=exam_period, date=changed_date)
+            .first()
+        )
+        if existing_daily_plan is not None and existing_daily_plan.finalized_at is not None:
+            raise RecoveryPlanStaleError(
+                f"{changed_date} 계획은 이미 마감되어 수정할 수 없습니다."
+            )
+
+        try:
+            available_time = AvailableTime.objects.get(
+                exam_period=exam_period, date=changed_date
+            )
+        except AvailableTime.DoesNotExist:
+            raise RecoveryPlanStaleError(
+                f"{changed_date}의 가용시간이 더 이상 존재하지 않습니다."
+            )
+
+        occupied = DailyPlanItem.objects.filter(
+            daily_plan__exam_period=exam_period,
+            daily_plan__date=changed_date,
+        ).aggregate(total=Sum('planned_minutes'))['total'] or 0
+
+        needed = sum(item.remaining_minutes for item in date_items)
+        remaining_capacity = available_time.available_minutes - occupied
+        if needed > remaining_capacity:
+            raise RecoveryPlanStaleError(
+                f"{changed_date}의 가용시간이 부족합니다 "
+                f"(필요: {needed}분, 남은 용량: {remaining_capacity}분)."
+            )
+
+        for item in date_items:
+            if item.study_task.exam.exam_date <= changed_date:
+                raise RecoveryPlanStaleError(
+                    f"{item.study_task}의 시험일이 지나 이 날짜에 배치할 수 없습니다."
+                )
+
+
+def apply_recovery_plan(recovery_plan) -> dict:
+    """
+    사용자가 선택한 복구안을 실제 일정에 반영한다.
+
+    - 같은 recovery_group_id의 모든 RecoveryPlan을 잠그고, 그룹 내에
+      이미 APPLIED된 안이 있으면 거부한다 (분량유지형/핵심집중형 동시 적용 방지)
+    - 선택한 복구안이 PENDING이 아니면 거부
+    - 적용 직전 changed_date별 가용시간/기존 배치/시험일을 재검증하고,
+      문제가 있으면 RecoveryPlanStaleError로 전체 롤백
+    - RESCHEDULE 항목만 changed_date의 DailyPlan에 새 DailyPlanItem으로 생성
+    - EXCLUDE 항목은 새 일정에 생성하지 않음
+    - 원본(과거) DailyPlanItem/ProgressLog는 건드리지 않고 그대로 보존
+    - 선택한 복구안은 APPLIED, 같은 그룹의 나머지 PENDING은 DISCARDED
+    """
+    with transaction.atomic():
+        group_id = recovery_plan.recovery_group_id
+        group_plans = list(
+            RecoveryPlan.objects
+            .select_for_update()
+            .filter(recovery_group_id=group_id)
+            .order_by('pk')
+        )
+        target = next(p for p in group_plans if p.pk == recovery_plan.pk)
+
+        if any(p.status == RecoveryPlanStatus.APPLIED for p in group_plans):
+            raise RecoveryPlanAlreadyProcessedError(
+                f"{group_id} 그룹에는 이미 적용된 복구안이 있습니다."
+            )
+        if target.status != RecoveryPlanStatus.PENDING:
+            raise RecoveryPlanAlreadyProcessedError(
+                f"{target}는 이미 처리된 복구안입니다."
+            )
+
+        items = list(target.items.select_related('study_task__exam'))
+        reschedule_items = [
+            item for item in items
+            if item.action_type == RecoveryActionType.RESCHEDULE
+        ]
+
+        items_by_date = defaultdict(list)
+        for item in reschedule_items:
+            if item.changed_date is None:
+                raise RecoveryPlanStaleError(
+                    f"{item.study_task}의 재배치 날짜가 없습니다."
+                )
+            if item.remaining_minutes <= 0:
+                raise RecoveryPlanStaleError(
+                    f"{item.study_task}의 남은 시간이 올바르지 않습니다."
+                )
+            items_by_date[item.changed_date].append(item)
+
+        _validate_not_stale(target.exam_period, items_by_date)
+
+        created_items = []
+        for changed_date, date_items in items_by_date.items():
+            daily_plan = _get_or_create_daily_plan(target.exam_period, changed_date)
+
+            next_order = (
+                daily_plan.items.aggregate(models.Max('order'))['order__max'] or 0
+            )
+            for item in date_items:
+                next_order += 1
+                new_item = DailyPlanItem.objects.create(
+                    daily_plan=daily_plan,
+                    study_task=item.study_task,
+                    planned_minutes=item.remaining_minutes,
+                    order=next_order,
+                )
+                created_items.append(new_item)
+
+            daily_plan.planned_minutes = (
+                daily_plan.items.aggregate(total=Sum('planned_minutes'))['total'] or 0
+            )
+            daily_plan.save(update_fields=['planned_minutes'])
+
+        target.status = RecoveryPlanStatus.APPLIED
+        target.applied_at = timezone.now()
+        target.save(update_fields=['status', 'applied_at'])
+
+        RecoveryPlan.objects.filter(
+            recovery_group_id=group_id, status=RecoveryPlanStatus.PENDING,
+        ).exclude(pk=target.pk).update(status=RecoveryPlanStatus.DISCARDED)
+
+        return {
+            'recovery_plan': target,
+            'created_daily_plan_items': created_items,
+        }
