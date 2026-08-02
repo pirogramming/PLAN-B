@@ -1303,3 +1303,43 @@ class FinalizeDailyPlanTests(TestCase):
         self.assertFalse(
             RecoveryPlan.objects.filter(exam_period=self.exam_period).exists()
         )
+
+# ── 15. RecoveryPlan에 source_daily_plan이 정확히 저장되는지 ──────
+    def test_recovery_plans_set_source_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+        recovery = result["recovery_plans"]
+
+        self.assertEqual(recovery["maintain_volume"].source_daily_plan, daily_plan)
+
+    # ── 16. RecoveryPlan.exam_period가 source_daily_plan.exam_period와 항상 일치 ──
+    def test_recovery_plan_exam_period_matches_source_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        finalize_daily_plan(daily_plan)
+
+        plans = RecoveryPlan.objects.filter(source_daily_plan=daily_plan)
+        self.assertTrue(plans.exists())
+        for plan in plans:
+            self.assertEqual(plan.exam_period_id, daily_plan.exam_period_id)

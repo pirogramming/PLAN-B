@@ -168,8 +168,13 @@ def _try_core_focus_exclusion(exam_period, from_date, items_with_remaining):
 
 
 def _create_recovery_plan(
-    exam_period, recovery_group_id, recovery_type,
-    items_with_remaining, allocation_result, excluded_items=None,
+    *,
+    source_daily_plan,
+    recovery_type,
+    recovery_group_id,
+    items_with_remaining,
+    allocation_result,
+    excluded_items=None,
 ):
     """
     이미 계산된 allocation_result를 그대로 저장만 한다 (재배치하지 않음).
@@ -180,7 +185,8 @@ def _create_recovery_plan(
         )
 
     recovery_plan = RecoveryPlan.objects.create(
-        exam_period=exam_period,
+        exam_period=source_daily_plan.exam_period,
+        source_daily_plan=source_daily_plan,
         recovery_group_id=recovery_group_id,
         recovery_type=recovery_type,
     )
@@ -234,8 +240,11 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
         maintain_volume_failure_reason = "남은 가용시간이 부족합니다."
     else:
         maintain_volume = _create_recovery_plan(
-            exam_period, recovery_group_id, RecoveryType.MAINTAIN_VOLUME,
-            items_with_remaining, maintain_volume_allocation,
+            source_daily_plan=daily_plan,
+            recovery_type=RecoveryType.MAINTAIN_VOLUME,
+            recovery_group_id=recovery_group_id,
+            items_with_remaining=items_with_remaining,
+            allocation_result=maintain_volume_allocation,
         )
 
     core_focus_result = _try_core_focus_exclusion(
@@ -246,9 +255,11 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
     core_focus_failure_reason = None
     if core_focus_result is not None:
         core_focus = _create_recovery_plan(
-            exam_period, recovery_group_id, RecoveryType.CORE_FOCUS,
-            core_focus_result['remaining'],
-            core_focus_result['allocation_result'],
+            source_daily_plan=daily_plan,
+            recovery_type=RecoveryType.CORE_FOCUS,
+            recovery_group_id=recovery_group_id,
+            items_with_remaining=core_focus_result['remaining'],
+            allocation_result=core_focus_result['allocation_result'],
             excluded_items=core_focus_result['excluded'],
         )
     else:
