@@ -155,19 +155,34 @@ class IncompleteProgressError(Exception):
             f"{len(unrecorded_items)}개 작업에 진행 기록이 입력되지 않았습니다."
         )
 
+def _mark_items_as_not_done(items):
+    """
+    미입력 DailyPlanItem들을 일괄 NOT_DONE으로 기록한다.
+    사용자의 명시적 동의(mark_unrecorded_as_not_done=True) 하에서만 호출되며,
+    record_progress()의 검증/속도재계산 경로를 반복하지 않기 위해 분리했다.
+    """
+    for item in items:
+        ProgressLog.objects.create(
+            daily_plan_item=item,
+            progress_status=ProgressStatus.NOT_DONE,
+            actual_minutes=0,
+            completion_percent=0,
+        )
+        item.status = PROGRESS_TO_ITEM_STATUS[ProgressStatus.NOT_DONE]
+        item.save(update_fields=['status'])
 
 @transaction.atomic
-def finalize_daily_plan(daily_plan) -> dict:
+def finalize_daily_plan(daily_plan, *, mark_unrecorded_as_not_done: bool = False) -> dict:
     """
     하루 계획을 마감한다.
 
-    - 미래 날짜 계획은 마감 불가 (과거/오늘은 허용 — 마감을 놓친 날도
-      나중에 복구할 수 있어야 하므로)
+    - 미래 날짜 계획은 마감 불가
     - 조건부 UPDATE로 finalized_at을 원자적으로 선점해 중복 마감을 막는다
       (select_for_update만으로는 SQLite에서 실제 잠금이 걸리지 않으므로 병행)
-    - 진행 기록(ProgressLog)이 없는 항목이 하나라도 있으면 IncompleteProgressError
-    - PARTIAL/NOT_DONE 항목이 있으면 복구안(생성만, 미적용)까지 트랜잭션 안에서 생성
-    - DailyPlanItem/ProgressLog는 건드리지 않고 과거 기록으로 보존
+    - 진행 기록이 없는 항목이 있으면:
+        mark_unrecorded_as_not_done=False -> IncompleteProgressError
+        mark_unrecorded_as_not_done=True  -> NOT_DONE으로 일괄 기록 후 DailyPlan.status 재계산
+    - PARTIAL/NOT_DONE(자동 기록 포함) 항목이 있으면 복구안 생성
     """
     if daily_plan.date > timezone.localdate():
         raise FutureDailyPlanFinalizeError("미래 계획은 마감할 수 없습니다.")
@@ -196,8 +211,22 @@ def finalize_daily_plan(daily_plan) -> dict:
     unrecorded_items = [
         item for item in items if not hasattr(item, 'progress_log')
     ]
+
+    auto_marked_not_done_count = 0
     if unrecorded_items:
-        raise IncompleteProgressError(unrecorded_items)
+        if not mark_unrecorded_as_not_done:
+            raise IncompleteProgressError(unrecorded_items)
+
+        _mark_items_as_not_done(unrecorded_items)
+        auto_marked_not_done_count = len(unrecorded_items)
+
+        items = list(
+            locked_plan.items.select_related('progress_log', 'study_task__exam')
+        )
+        locked_plan.status = determine_daily_plan_status(
+            [item.status for item in items]
+        )
+        locked_plan.save(update_fields=['status'])
 
     unfinished_items = [
         item for item in items
@@ -217,5 +246,6 @@ def finalize_daily_plan(daily_plan) -> dict:
         'daily_plan': locked_plan,
         'needs_recovery': bool(unfinished_items),
         'unfinished_items': unfinished_items,
+        'auto_marked_not_done_count': auto_marked_not_done_count,
         'recovery_plans': recovery_plans,
     }

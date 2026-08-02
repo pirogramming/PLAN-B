@@ -1,6 +1,7 @@
 from django.test import TestCase
 from datetime import timedelta
 from django.utils import timezone as django_timezone
+from unittest.mock import patch
 
 from planner.services.progress_recorder import (
     finalize_daily_plan,
@@ -1343,3 +1344,94 @@ class FinalizeDailyPlanTests(TestCase):
         self.assertTrue(plans.exists())
         for plan in plans:
             self.assertEqual(plan.exam_period_id, daily_plan.exam_period_id)
+
+# ── 17. 옵션 False면 기존처럼 IncompleteProgressError ──────
+    def test_finalize_without_auto_mark_still_raises_on_unrecorded(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        with self.assertRaises(IncompleteProgressError):
+            finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=False)
+
+    # ── 18. 옵션 True면 미입력 항목이 전부 NOT_DONE으로 기록됨 ──
+    def test_finalize_auto_marks_unrecorded_as_not_done(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        item.refresh_from_db()
+        self.assertEqual(item.progress_log.progress_status, "not_done")
+        self.assertEqual(item.progress_log.actual_minutes, 0)
+        self.assertEqual(item.progress_log.completion_percent, 0)
+        self.assertEqual(result["auto_marked_not_done_count"], 1)
+
+    # ── 19. 자동 기록 후 finalized_at 정상 저장 ────────────────
+    def test_finalize_auto_mark_still_saves_finalized_at(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        daily_plan.refresh_from_db()
+        self.assertIsNotNone(daily_plan.finalized_at)
+
+    # ── 20. 자동 기록된 항목이 복구 대상에 포함됨 ──────────────
+    def test_auto_marked_items_included_in_recovery(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
+        )
+
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        self.assertTrue(result["needs_recovery"])
+        self.assertIn(item, result["unfinished_items"])
+        self.assertIsNotNone(result["recovery_plans"])
+
+    # ── 21. 자동 기록 경로에서도 속도 재계산을 별도로 수행하지 않음 ──
+    # (기존 CalculateSpeedFactorTests.test_not_done_logs_excluded가
+    #  "NOT_DONE 로그 자체가 계산에서 제외됨"을 검증한다면,
+    #  이 테스트는 "자동 마감 경로를 타도 speed_factor가 아예 바뀌지 않는다"를 검증)
+    def test_auto_marked_not_done_does_not_affect_speed_factor(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        exam.refresh_from_db()
+        self.assertEqual(exam.speed_factor, 1.0)
+
+    # ── 22. 마감 처리 중 예외 발생 시 자동 생성 로그와 선점도 함께 롤백 ──
+    @patch(
+        "planner.services.progress_recorder.generate_recovery_options",
+        side_effect=RuntimeError("복구안 생성 실패"),
+    )
+    def test_finalize_rolls_back_auto_marked_logs_on_error(self, _mock):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        with self.assertRaises(RuntimeError):
+            finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        self.assertFalse(
+            ProgressLog.objects.filter(daily_plan_item=item).exists()
+        )
+        daily_plan.refresh_from_db()
+        self.assertIsNone(daily_plan.finalized_at)
