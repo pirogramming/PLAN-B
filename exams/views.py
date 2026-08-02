@@ -4,6 +4,7 @@ from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
 from django.db import transaction
+from planner.services.time_estimator import estimate_task_minutes
 
 from core.choices import ExamPeriodStatus
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
@@ -316,6 +317,15 @@ def study_task_create(request, exam_id):
         if form.is_valid():
             task = form.save(commit=False)
             task.exam = exam
+
+            estimated_min, estimated_max = estimate_task_minutes(
+                task_type=task.task_type,
+                difficulty=task.difficulty,
+                speed_factor=exam.speed_factor,
+            )
+            task.estimated_min_minutes = estimated_min
+            task.estimated_max_minutes = estimated_max
+
             task.is_user_modified = True
             task.save()
             return redirect('exams:task_review', exam_id=exam.id)
