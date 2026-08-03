@@ -1,5 +1,20 @@
 from django.test import TestCase
+from datetime import timedelta
+from django.utils import timezone as django_timezone
+from unittest.mock import patch
 
+from planner.services.progress_recorder import (
+    finalize_daily_plan,
+    record_progress,
+    DailyPlanAlreadyFinalizedError,
+    FutureDailyPlanFinalizeError,
+    FinalizedDailyPlanEditError,
+)
+from planner.models import RecoveryPlan
+from core.choices import RecoveryType
+from exams.models import AvailableTime
+from planner.services.progress_recorder import IncompleteProgressError
+from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
 # Create your tests here.
 from planner.services.feasibility_checker import (
     calculate_feasibility,
@@ -880,3 +895,543 @@ class GenerateScheduleTests(TestCase):
                 study_tasks=[other_task],
                 available_times=available_times,
             )
+
+class FinalizeDailyPlanTests(TestCase):
+    """
+    finalize_daily_plan()과 recovery.py 연동 테스트.
+    공통 셋업: 사용자 1명, 시험기간(오늘~오늘+10일), DailyPlan은 오늘 날짜로 생성.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="finalize_tester", email="finalize@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+        )
+
+    def _make_exam(self, exam_date):
+        from exams.models import Exam
+        return Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=exam_date,
+        )
+
+    def _make_task(self, exam, importance="high", depth="basic",
+                    task_type="concept", difficulty="normal", order=1):
+        from exams.models import StudyTask
+        return StudyTask.objects.create(
+            exam=exam,
+            title="복구 대상 작업",
+            importance=importance,
+            depth=depth,
+            task_type=task_type,
+            difficulty=difficulty,
+            order=order,
+            estimated_min_minutes=20,
+            estimated_max_minutes=40,
+            is_confirmed=True,
+        )
+
+    def _make_daily_plan(self, date, available_minutes=60, planned_minutes=40):
+        return DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=date,
+            available_minutes=available_minutes,
+            planned_minutes=planned_minutes,
+        )
+
+    def _make_item(self, daily_plan, task, planned_minutes=40, order=1):
+        return DailyPlanItem.objects.create(
+            daily_plan=daily_plan,
+            study_task=task,
+            planned_minutes=planned_minutes,
+            order=order,
+        )
+
+    def _record(self, item, status, actual_minutes=None, completion_percent=None):
+        record_progress(
+            daily_plan_item=item,
+            status=status,
+            actual_minutes=actual_minutes,
+            completion_percent=completion_percent,
+        )
+
+    # ── 1. 분량 유지형 성공 ──────────────────────────────
+    def test_maintain_volume_succeeds_when_capacity_enough(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+
+        self.assertTrue(result["needs_recovery"])
+        recovery = result["recovery_plans"]
+        self.assertIsNotNone(recovery["maintain_volume"])
+        self.assertEqual(
+            recovery["maintain_volume"].items.count(), 1
+        )
+
+    # ── 2. 분량 유지형 실패 시 Plan 미생성 ──────────────
+    def test_maintain_volume_fails_when_capacity_insufficient(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+        # 미래 가용시간을 아예 만들지 않음 -> 배치 불가
+
+        result = finalize_daily_plan(daily_plan)
+
+        recovery = result["recovery_plans"]
+        self.assertIsNone(recovery["maintain_volume"])
+        self.assertIsNotNone(recovery["maintain_volume_failure_reason"])
+        self.assertFalse(
+            RecoveryPlan.objects.filter(recovery_type=RecoveryType.MAINTAIN_VOLUME).exists()
+        )
+
+    # ── 3. 핵심 집중형에서 실제 제외 작업 1개 이상 생성 (보호 작업은 유지) ──
+    def test_core_focus_always_excludes_at_least_one_when_candidate_exists(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        low_task = self._make_task(exam, importance="low", depth="optional", order=1)
+        protected_task = self._make_task(exam, importance="high", depth="core", order=2)
+        daily_plan = self._make_daily_plan(self.today)
+        low_item = self._make_item(daily_plan, low_task, order=1)
+        protected_item = self._make_item(daily_plan, protected_task, order=2)
+        self._record(low_item, "not_done")
+        self._record(protected_item, "not_done")
+
+        # 두 작업(각 40분) 다 배치 가능한 넉넉한 용량 -> 분량유지형도 성공
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=80,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+        recovery = result["recovery_plans"]
+
+        self.assertIsNotNone(recovery["maintain_volume"])
+        self.assertIsNotNone(recovery["core_focus"])
+
+        excluded_task_ids = set(
+            recovery["core_focus"].items.filter(
+                action_type="exclude"
+            ).values_list("study_task_id", flat=True)
+        )
+        self.assertGreaterEqual(len(excluded_task_ids), 1)
+        self.assertIn(low_task.id, excluded_task_ids)
+        self.assertNotIn(protected_task.id, excluded_task_ids)
+        self.assertEqual(
+            recovery["maintain_volume"].recovery_group_id,
+            recovery["core_focus"].recovery_group_id,
+        )
+
+    # ── 4. 가까운 시험 작업이 보호되는지 확인 ────────────
+    def test_core_focus_protects_near_exam_excludes_far_exam_first(self):
+        near_exam = self._make_exam(exam_date=self.today + timedelta(days=3))
+        far_exam = self._make_exam(exam_date=self.today + timedelta(days=8))
+
+        near_task = self._make_task(
+            near_exam, importance="low", depth="optional", order=1
+        )
+        far_task = self._make_task(
+            far_exam, importance="low", depth="optional", order=2
+        )
+
+        daily_plan = self._make_daily_plan(self.today)
+        near_item = self._make_item(daily_plan, near_task, order=1)
+        far_item = self._make_item(daily_plan, far_task, order=2)
+        self._record(near_item, "not_done")
+        self._record(far_item, "not_done")
+
+        # 두 작업(각 40분) 다 배치하기엔 부족하지만, 하나만 빼면 충분한 용량
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+        core_focus = result["recovery_plans"]["core_focus"]
+
+        self.assertIsNotNone(core_focus)
+        excluded_tasks = set(
+            core_focus.items.filter(action_type="exclude").values_list(
+                "study_task_id", flat=True
+            )
+        )
+        rescheduled_tasks = set(
+            core_focus.items.filter(action_type="reschedule").values_list(
+                "study_task_id", flat=True
+            )
+        )
+        # 시험일이 먼 작업(far_task)이 제외되고, 가까운 작업(near_task)은 재배치돼야 함
+        self.assertIn(far_task.id, excluded_tasks)
+        self.assertIn(near_task.id, rescheduled_tasks)
+
+    # ── 5. 순차 중복 호출 시 복구 그룹이 추가 생성되지 않는지 확인 ───────
+    # (실제 동시 요청 레이스 컨디션은 여기서 검증하지 않음. MVP에서는
+    #  finalize_daily_plan() 내부 조건부 UPDATE로 방어하며, 실제 동시성
+    #  검증은 TransactionTestCase + 별도 스레드/PostgreSQL 환경이 필요함)
+    def test_finalize_twice_raises_and_does_not_duplicate_recovery(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        finalize_daily_plan(daily_plan)
+        recovery_group_count_after_first = RecoveryPlan.objects.values(
+            "recovery_group_id"
+        ).distinct().count()
+
+        daily_plan.refresh_from_db()
+        with self.assertRaises(DailyPlanAlreadyFinalizedError):
+            finalize_daily_plan(daily_plan)
+
+        recovery_group_count_after_second = RecoveryPlan.objects.values(
+            "recovery_group_id"
+        ).distinct().count()
+
+        self.assertEqual(
+            recovery_group_count_after_first, recovery_group_count_after_second
+        )
+
+    # ── 6. 마감 후 진행 기록 수정 거부 ────────────────────
+    def test_record_progress_rejected_after_finalize(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "done", actual_minutes=30)
+
+        finalize_daily_plan(daily_plan)
+
+        with self.assertRaises(FinalizedDailyPlanEditError):
+            record_progress(
+                daily_plan_item=item,
+                status="done",
+                actual_minutes=35,
+            )
+
+    # ── 7. 미래 계획은 마감 거부 (과거 계획은 허용) ───────
+    def test_finalize_rejects_future_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        future_plan = self._make_daily_plan(self.today + timedelta(days=1))
+        item = self._make_item(future_plan, task)
+        self._record(item, "done", actual_minutes=30)
+
+        with self.assertRaises(FutureDailyPlanFinalizeError):
+            finalize_daily_plan(future_plan)
+
+    def test_finalize_allows_past_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        past_plan = self._make_daily_plan(self.today - timedelta(days=1))
+        item = self._make_item(past_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(past_plan)
+
+        self.assertTrue(result["needs_recovery"])
+        # 복구 배치는 반드시 오늘 이후(내일부터)여야 한다
+        for item in result["recovery_plans"]["maintain_volume"].items.all():
+            if item.changed_date is not None:
+                self.assertGreater(item.changed_date, self.today)
+
+    # ── 8. (보너스) 완료 항목만 있으면 복구 없음 ─────────
+    def test_finalize_no_recovery_when_all_completed(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "done", actual_minutes=30)
+
+        result = finalize_daily_plan(daily_plan)
+
+        self.assertFalse(result["needs_recovery"])
+        self.assertIsNone(result["recovery_plans"])
+
+    # ── 9. 진행 기록 누락 시 finalized_at이 롤백되는지 확인 ─────
+    def test_finalize_with_unrecorded_item_rolls_back_claim(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+        # ProgressLog를 일부러 만들지 않는다.
+
+        with self.assertRaises(IncompleteProgressError):
+            finalize_daily_plan(daily_plan)
+
+        daily_plan.refresh_from_db()
+
+        self.assertIsNone(daily_plan.finalized_at)
+        self.assertFalse(
+            RecoveryPlan.objects.filter(exam_period=self.exam_period).exists()
+        )
+
+    # ── 10. PARTIAL 항목의 남은 시간이 estimated_max × 잔여비율로 계산되는지 ──
+    def test_partial_item_uses_latest_speed_factor_and_remaining_ratio(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(
+            exam, importance="high", depth="core",
+            task_type="concept", difficulty="normal",
+        )
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        self._record(item, "partial", actual_minutes=30, completion_percent=50)
+
+        exam.refresh_from_db()
+        _estimated_min, estimated_max = estimate_task_minutes(
+            task.task_type, task.difficulty, exam.speed_factor
+        )
+        expected_remaining = round_up_to_five(estimated_max * 0.5)
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=200,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+
+        recovery_item = (
+            result["recovery_plans"]["maintain_volume"].items.get(study_task=task)
+        )
+        self.assertEqual(recovery_item.remaining_minutes, expected_remaining)
+
+    # ── 11. NOT_DONE에 시간이 들어와도 0으로 고정되는지 (record_progress 저장까지) ──
+    def test_not_done_progress_stores_zero_minutes(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        result = record_progress(
+            daily_plan_item=item, status="not_done", actual_minutes=50,
+        )
+        self.assertEqual(result["progress_log"].actual_minutes, 0)
+
+    # ── 12. 미래 일정에 이미 배치된 작업이 복구 가용시간에서 차감되는지 ──
+    def test_existing_future_items_reduce_recovery_capacity(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+
+        unfinished_task = self._make_task(exam, importance="high", depth="core", order=1)
+        current_plan = self._make_daily_plan(self.today)
+        unfinished_item = self._make_item(current_plan, unfinished_task)
+        self._record(unfinished_item, "not_done")
+
+        tomorrow = self.today + timedelta(days=1)
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=tomorrow, available_minutes=60,
+        )
+
+        occupied_task = self._make_task(exam, importance="high", depth="core", order=2)
+        future_plan = self._make_daily_plan(tomorrow, available_minutes=60, planned_minutes=30)
+        self._make_item(future_plan, occupied_task, planned_minutes=30)
+
+        result = finalize_daily_plan(current_plan)
+
+        # 가용시간 60분 - 기존 작업 30분 = 30분만 남으므로,
+        # estimated_max 기준 40분짜리 미완료 작업은 들어갈 자리가 없어야 함
+        self.assertIsNone(result["recovery_plans"]["maintain_volume"])
+
+    # ── 13. 핵심 집중형이 유일한 작업까지 전부 제외하지 않는지 ──
+    def test_core_focus_does_not_exclude_every_task(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="low", depth="optional")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+        recovery = result["recovery_plans"]
+
+        self.assertIsNotNone(recovery["maintain_volume"])
+        self.assertIsNone(recovery["core_focus"])
+        self.assertIsNotNone(recovery["core_focus_failure_reason"])
+
+    # ── 14. 전체 완료 시 DB에도 복구안이 없고 finalized_at은 저장됨 ──
+    def test_finalize_no_recovery_when_all_completed_db_check(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "done", actual_minutes=30)
+
+        finalize_daily_plan(daily_plan)
+        daily_plan.refresh_from_db()
+
+        self.assertIsNotNone(daily_plan.finalized_at)
+        self.assertFalse(
+            RecoveryPlan.objects.filter(exam_period=self.exam_period).exists()
+        )
+
+# ── 15. RecoveryPlan에 source_daily_plan이 정확히 저장되는지 ──────
+    def test_recovery_plans_set_source_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        result = finalize_daily_plan(daily_plan)
+        recovery = result["recovery_plans"]
+
+        self.assertEqual(recovery["maintain_volume"].source_daily_plan, daily_plan)
+
+    # ── 16. RecoveryPlan.exam_period가 source_daily_plan.exam_period와 항상 일치 ──
+    def test_recovery_plan_exam_period_matches_source_daily_plan(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        finalize_daily_plan(daily_plan)
+
+        plans = RecoveryPlan.objects.filter(source_daily_plan=daily_plan)
+        self.assertTrue(plans.exists())
+        for plan in plans:
+            self.assertEqual(plan.exam_period_id, daily_plan.exam_period_id)
+
+# ── 17. 옵션 False면 기존처럼 IncompleteProgressError ──────
+    def test_finalize_without_auto_mark_still_raises_on_unrecorded(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        with self.assertRaises(IncompleteProgressError):
+            finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=False)
+
+    # ── 18. 옵션 True면 미입력 항목이 전부 NOT_DONE으로 기록됨 ──
+    def test_finalize_auto_marks_unrecorded_as_not_done(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        item.refresh_from_db()
+        self.assertEqual(item.progress_log.progress_status, "not_done")
+        self.assertEqual(item.progress_log.actual_minutes, 0)
+        self.assertEqual(item.progress_log.completion_percent, 0)
+        self.assertEqual(result["auto_marked_not_done_count"], 1)
+
+    # ── 19. 자동 기록 후 finalized_at 정상 저장 ────────────────
+    def test_finalize_auto_mark_still_saves_finalized_at(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        daily_plan.refresh_from_db()
+        self.assertIsNotNone(daily_plan.finalized_at)
+
+    # ── 20. 자동 기록된 항목이 복구 대상에 포함됨 ──────────────
+    def test_auto_marked_items_included_in_recovery(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
+        )
+
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        self.assertTrue(result["needs_recovery"])
+        self.assertIn(item, result["unfinished_items"])
+        self.assertIsNotNone(result["recovery_plans"])
+
+    # ── 21. 자동 기록 경로에서도 속도 재계산을 별도로 수행하지 않음 ──
+    # (기존 CalculateSpeedFactorTests.test_not_done_logs_excluded가
+    #  "NOT_DONE 로그 자체가 계산에서 제외됨"을 검증한다면,
+    #  이 테스트는 "자동 마감 경로를 타도 speed_factor가 아예 바뀌지 않는다"를 검증)
+    def test_auto_marked_not_done_does_not_affect_speed_factor(self):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        self._make_item(daily_plan, task)
+
+        finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        exam.refresh_from_db()
+        self.assertEqual(exam.speed_factor, 1.0)
+
+    # ── 22. 마감 처리 중 예외 발생 시 자동 생성 로그와 선점도 함께 롤백 ──
+    @patch(
+        "planner.services.progress_recorder.generate_recovery_options",
+        side_effect=RuntimeError("복구안 생성 실패"),
+    )
+    def test_finalize_rolls_back_auto_marked_logs_on_error(self, _mock):
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+
+        with self.assertRaises(RuntimeError):
+            finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+
+        self.assertFalse(
+            ProgressLog.objects.filter(daily_plan_item=item).exists()
+        )
+        daily_plan.refresh_from_db()
+        self.assertIsNone(daily_plan.finalized_at)

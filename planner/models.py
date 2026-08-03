@@ -1,7 +1,7 @@
 import uuid
 
 from django.db import models
-
+from django.core.exceptions import ValidationError
 from core.choices import (
     DailyPlanStatus,
     ProgressStatus,
@@ -25,6 +25,10 @@ class DailyPlan(models.Model):
         choices=DailyPlanStatus.choices,
         default=DailyPlanStatus.PLANNED,
     )
+    # 마감 여부는 status와 별개로 관리 (status는 진행 기록 입력 때마다 갱신되므로
+    # "마감됨"이라는 1회성 이벤트를 별도 필드로 분리)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+
 
     class Meta:
         ordering = ['date']
@@ -94,6 +98,11 @@ class RecoveryPlan(models.Model):
         on_delete=models.CASCADE,
         related_name='recovery_plans',
     )
+    source_daily_plan = models.ForeignKey(
+        'planner.DailyPlan',
+        on_delete=models.CASCADE,
+        related_name='recovery_plans',
+    )
     # 같은 계산 시점에 생성된 분량유지형/핵심집중형 두 복구안을 묶어서 비교하기 위한 그룹 키
     recovery_group_id = models.UUIDField(default=uuid.uuid4, db_index=True)
     recovery_type = models.CharField(
@@ -107,6 +116,29 @@ class RecoveryPlan(models.Model):
     summary = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['recovery_group_id'],
+                condition=models.Q(status=RecoveryPlanStatus.APPLIED),
+                name='unique_applied_recovery_plan_per_group',
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if not self.exam_period_id or not self.source_daily_plan_id:
+            return
+
+        if self.exam_period_id != self.source_daily_plan.exam_period_id:
+            raise ValidationError({
+                'source_daily_plan': (
+                    'source_daily_plan의 exam_period와 '
+                    'RecoveryPlan의 exam_period가 일치해야 합니다.'
+                )
+            })
 
     def __str__(self):
         return f'{self.exam_period} - {self.recovery_type}'
@@ -129,6 +161,7 @@ class RecoveryPlanItem(models.Model):
         max_length=20, choices=RecoveryActionType.choices
     )
     reason = models.TextField(null=True, blank=True)
-
+    remaining_minutes = models.PositiveIntegerField(default=0)
+    
     def __str__(self):
         return f'{self.recovery_plan} - {self.study_task} ({self.action_type})'

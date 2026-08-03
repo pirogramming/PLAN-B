@@ -1,18 +1,19 @@
 """
 학습 진행 결과(ProgressLog)를 저장하고, 관련 상태(DailyPlanItem, DailyPlan)와
-speed_factor를 갱신하는 모듈.
+speed_factor를 갱신하는 모듈. 하루 마감(finalize_daily_plan) 시
+복구 필요 여부를 판단하고 recovery.py에 복구안 생성을 위임한다.
 
-책임 범위는 여기까지다:
+책임 범위:
     ProgressLog 생성/수정 -> DailyPlanItem 상태 동기화
     -> speed_factor 재계산 -> DailyPlan 상태 재계산
-
-하루 마감 시 복구 필요 여부를 판단하는 로직(finalize_daily_plan)은
-별도 PR/모듈에서 다룬다. 여기서 복구 여부를 판단하지 않는다.
+    (마감 시) 미완료 항목 판단 -> recovery.generate_recovery_options() 호출
 """
-from django.db import transaction
 
+from django.db import transaction
+from django.utils import timezone
+from planner.services.recovery import generate_recovery_options
 from core.choices import DailyPlanStatus, ProgressStatus
-from planner.models import ProgressLog
+from planner.models import ProgressLog, DailyPlan
 from planner.services.speed_calibrator import recalculate_speed_factor
 
 PROGRESS_TO_ITEM_STATUS = {
@@ -48,7 +49,7 @@ def normalize_actual_minutes(status, actual_minutes):
     status에 따라 actual_minutes 값을 검증/보정한다.
 
     - done, partial: 필수, 0보다 커야 함
-    - not_done: 없으면 0으로 보정
+    - not_done: 입력값과 무관하게 항상 0으로 고정
     """
     if status in (ProgressStatus.DONE, ProgressStatus.PARTIAL):
         if actual_minutes is None or actual_minutes <= 0:
@@ -56,7 +57,9 @@ def normalize_actual_minutes(status, actual_minutes):
                 "완료/일부완료 상태에서는 actual_minutes가 0보다 커야 합니다."
             )
         return actual_minutes
-    return actual_minutes or 0
+    if status == ProgressStatus.NOT_DONE:
+        return 0
+    raise ValueError(f"알 수 없는 progress_status: {status}")
 
 
 def determine_daily_plan_status(item_statuses: list[str]) -> str:
@@ -85,6 +88,8 @@ def determine_daily_plan_status(item_statuses: list[str]) -> str:
 
     return DailyPlanStatus.PLANNED
 
+class FinalizedDailyPlanEditError(Exception):
+    pass
 
 @transaction.atomic
 def record_progress(
@@ -94,16 +99,17 @@ def record_progress(
     actual_minutes: int | None,
     completion_percent: int | None = None,
 ):
-    """
-    진행 결과를 저장하고 관련 상태를 갱신한다.
+    daily_plan = (
+        DailyPlan.objects
+        .select_for_update()
+        .get(pk=daily_plan_item.daily_plan_id)
+    )
 
-    처리 순서:
-        1. 입력값 검증/정규화
-        2. ProgressLog update_or_create (재제출 시 갱신)
-        3. DailyPlanItem.status 동기화
-        4. 해당 과목 speed_factor 재계산
-        5. DailyPlan 상태 재계산
-    """
+    if daily_plan.finalized_at is not None:
+        raise FinalizedDailyPlanEditError(
+            "마감된 계획의 진행 기록은 수정할 수 없습니다."
+        )
+
     normalized_percent = normalize_completion_percent(status, completion_percent)
     normalized_minutes = normalize_actual_minutes(status, actual_minutes)
 
@@ -122,7 +128,6 @@ def record_progress(
     exam = daily_plan_item.study_task.exam
     updated_speed_factor = recalculate_speed_factor(exam)
 
-    daily_plan = daily_plan_item.daily_plan
     item_statuses = list(
         daily_plan.items.values_list("status", flat=True)
     )
@@ -134,4 +139,113 @@ def record_progress(
         "daily_plan_item_status": daily_plan_item.status,
         "daily_plan_status": daily_plan.status,
         "updated_speed_factor": updated_speed_factor,
+    }
+
+
+class DailyPlanAlreadyFinalizedError(Exception):
+    pass
+
+class FutureDailyPlanFinalizeError(Exception):
+    pass
+
+class IncompleteProgressError(Exception):
+    def __init__(self, unrecorded_items):
+        self.unrecorded_items = unrecorded_items
+        super().__init__(
+            f"{len(unrecorded_items)}개 작업에 진행 기록이 입력되지 않았습니다."
+        )
+
+def _mark_items_as_not_done(items):
+    """
+    미입력 DailyPlanItem들을 일괄 NOT_DONE으로 기록한다.
+    사용자의 명시적 동의(mark_unrecorded_as_not_done=True) 하에서만 호출되며,
+    record_progress()의 검증/속도재계산 경로를 반복하지 않기 위해 분리했다.
+    """
+    for item in items:
+        ProgressLog.objects.create(
+            daily_plan_item=item,
+            progress_status=ProgressStatus.NOT_DONE,
+            actual_minutes=0,
+            completion_percent=0,
+        )
+        item.status = PROGRESS_TO_ITEM_STATUS[ProgressStatus.NOT_DONE]
+        item.save(update_fields=['status'])
+
+@transaction.atomic
+def finalize_daily_plan(daily_plan, *, mark_unrecorded_as_not_done: bool = False) -> dict:
+    """
+    하루 계획을 마감한다.
+
+    - 미래 날짜 계획은 마감 불가
+    - 조건부 UPDATE로 finalized_at을 원자적으로 선점해 중복 마감을 막는다
+      (select_for_update만으로는 SQLite에서 실제 잠금이 걸리지 않으므로 병행)
+    - 진행 기록이 없는 항목이 있으면:
+        mark_unrecorded_as_not_done=False -> IncompleteProgressError
+        mark_unrecorded_as_not_done=True  -> NOT_DONE으로 일괄 기록 후 DailyPlan.status 재계산
+    - PARTIAL/NOT_DONE(자동 기록 포함) 항목이 있으면 복구안 생성
+    """
+    if daily_plan.date > timezone.localdate():
+        raise FutureDailyPlanFinalizeError("미래 계획은 마감할 수 없습니다.")
+
+    now = timezone.now()
+    claimed = DailyPlan.objects.filter(
+        pk=daily_plan.pk, finalized_at__isnull=True,
+    ).update(finalized_at=now)
+
+    if claimed == 0:
+        already = DailyPlan.objects.get(pk=daily_plan.pk)
+        raise DailyPlanAlreadyFinalizedError(
+            f"{already}는 이미 {already.finalized_at}에 마감되었습니다."
+        )
+
+    locked_plan = (
+        DailyPlan.objects
+        .select_for_update()
+        .get(pk=daily_plan.pk)
+    )
+
+    items = list(
+        locked_plan.items.select_related('progress_log', 'study_task__exam')
+    )
+
+    unrecorded_items = [
+        item for item in items if not hasattr(item, 'progress_log')
+    ]
+
+    auto_marked_not_done_count = 0
+    if unrecorded_items:
+        if not mark_unrecorded_as_not_done:
+            raise IncompleteProgressError(unrecorded_items)
+
+        _mark_items_as_not_done(unrecorded_items)
+        auto_marked_not_done_count = len(unrecorded_items)
+
+        items = list(
+            locked_plan.items.select_related('progress_log', 'study_task__exam')
+        )
+        locked_plan.status = determine_daily_plan_status(
+            [item.status for item in items]
+        )
+        locked_plan.save(update_fields=['status'])
+
+    unfinished_items = [
+        item for item in items
+        if item.progress_log.progress_status in (
+            ProgressStatus.PARTIAL, ProgressStatus.NOT_DONE
+        )
+    ]
+
+    recovery_plans = None
+    if unfinished_items:
+        recovery_plans = generate_recovery_options(
+            daily_plan=locked_plan,
+            unfinished_items=unfinished_items,
+        )
+
+    return {
+        'daily_plan': locked_plan,
+        'needs_recovery': bool(unfinished_items),
+        'unfinished_items': unfinished_items,
+        'auto_marked_not_done_count': auto_marked_not_done_count,
+        'recovery_plans': recovery_plans,
     }
