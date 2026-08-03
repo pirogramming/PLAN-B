@@ -1,0 +1,104 @@
+"""
+과목별 speed_factor를 재계산하는 모듈.
+
+record_progress()가 로그를 저장/수정할 때마다 이 함수를 호출해
+"기존 값에 새 비율을 누적 반영"하지 않고, 해당 과목의 유효한
+ProgressLog 전체를 처음부터 다시 계산한다.
+(누적 방식은 로그를 수정할 때 이전 기록이 이중으로 반영되는 문제가 있다.)
+
+기준 예상시간은 StudyTask.estimated_min/max_minutes가 아니라
+DailyPlanItem.planned_minutes(배치 당시 스냅샷)를 사용한다.
+StudyTask의 예상시간이 나중에 재계산되어도 과거 진행 기록의
+속도 계산 결과가 흔들리지 않도록 하기 위함이다.
+"""
+from core.choices import ProgressStatus
+
+MIN_SPEED_FACTOR = 0.7
+MAX_SPEED_FACTOR = 1.5
+BLEND_WEIGHT = 0.3  # 새 비율을 30% 반영
+
+
+def _clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def _is_valid_log(log):
+    """speed_factor 계산에 쓸 수 있는 유효한 기록인지 확인한다."""
+    if log.progress_status == ProgressStatus.NOT_DONE:
+        return False
+    if not log.completion_percent or log.completion_percent <= 0:
+        return False
+    if not log.actual_minutes or log.actual_minutes <= 0:
+        return False
+    planned_minutes = log.daily_plan_item.planned_minutes
+    if not planned_minutes or planned_minutes <= 0:
+        return False
+    return True
+
+
+def _ratio_for_log(log):
+    planned_minutes = log.daily_plan_item.planned_minutes
+    expected_for_completed_part = planned_minutes * log.completion_percent / 100
+    if expected_for_completed_part <= 0:
+        return None
+    return log.actual_minutes / expected_for_completed_part
+
+
+def calculate_speed_factor(logs) -> float:
+    """
+    로그 목록(기록 시각 오름차순)을 받아 speed_factor를 처음부터 재계산하는
+    순수 함수. 유효 기록이 하나도 없으면 기본값 1.0을 반환한다.
+
+    극단값 하나가 중간 계산 전체를 왜곡하지 않도록, blend 할 때마다
+    즉시 clamp한다 (최종 결과에만 clamp하지 않음).
+    """
+    factor = 1.0
+    has_valid_log = False
+
+    for log in logs:
+        if not _is_valid_log(log):
+            continue
+        ratio = _ratio_for_log(log)
+        if ratio is None:
+            continue
+        blended = factor * (1 - BLEND_WEIGHT) + ratio * BLEND_WEIGHT
+        factor = _clamp(blended, MIN_SPEED_FACTOR, MAX_SPEED_FACTOR)
+        has_valid_log = True
+
+    if not has_valid_log:
+        return 1.0
+
+    return round(factor, 3)
+
+
+def recalculate_speed_factor(exam):
+    """
+    exam에 속한 모든 ProgressLog를, 실제 공부한 날짜(daily_plan.date)
+    오름차순으로 조회해 speed_factor를 재계산하고 exam에 저장한다.
+
+    recorded_at(auto_now)이 아니라 daily_plan.date로 정렬하는 이유:
+    로그를 나중에 수정하면 recorded_at이 "지금"으로 갱신되어, 실제로는
+    옛날 기록인데 최신 기록처럼 취급되는 문제가 있기 때문이다.
+
+    날짜만으로는 정렬 순서가 안 끝난다: 같은 날짜에 로그가 여러 개면
+    daily_plan_item__order(그날 안에서의 작업 순서) -> pk를 타이브레이커로
+    추가한다. EMA(지수이동평균) 방식은 로그를 적용하는 순서에 따라 최종
+    speed_factor가 달라질 수 있어서, 순서가 매번 안정적으로 결정돼야 한다.
+    """
+    from planner.models import ProgressLog
+
+    logs = (
+        ProgressLog.objects.filter(
+            daily_plan_item__study_task__exam=exam,
+        )
+        .select_related("daily_plan_item__daily_plan")
+        .order_by(
+            "daily_plan_item__daily_plan__date",
+            "daily_plan_item__order",
+            "pk",
+        )
+    )
+
+    exam.speed_factor = calculate_speed_factor(list(logs))
+    exam.save(update_fields=["speed_factor"])
+    return exam.speed_factor

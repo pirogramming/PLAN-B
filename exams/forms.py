@@ -108,9 +108,9 @@ AvailableTimeFormSet = modelformset_factory(
 class ExamForm(forms.ModelForm):
     class Meta:
         model = Exam
-        fields = ['name', 'exam_date', 'priority']
+        fields = ['subject_name', 'exam_date', 'priority']
         widgets = {
-            'name': forms.TextInput(attrs={
+            'subject_name': forms.TextInput(attrs={
                 'class': 'form-control',
                 'placeholder': '예: 신호및시스템, 공학수학'
             }),
