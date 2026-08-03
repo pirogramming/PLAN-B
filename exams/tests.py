@@ -17,6 +17,7 @@ from core.choices import (
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
     AnalysisNotSupportedError,
+    AnalysisPipelineError,
     DuplicateAnalysisRequestError,
     MAX_RETRY_COUNT,
     RetryLimitExceededError,
@@ -418,7 +419,9 @@ class AnalysisOrchestratorTestCase(TestCase):
         mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
         material = self._make_material()
 
-        with self.assertRaises(ValueError):
+        # 예기치 못한 예외(ValueError)는 AnalysisPipelineError로 변환되어 발생한다
+        # (View가 AIAnalysisError/AnalysisPipelineError만 알면 되도록 하기 위함)
+        with self.assertRaises(AnalysisPipelineError):
             analyze_and_estimate(material)
 
         material.refresh_from_db()
@@ -669,3 +672,57 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.client.force_login(self.other)
         response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
         self.assertEqual(response.status_code, 404)
+
+    # ---------- 예기치 못한 파이프라인 예외 처리 (PR #33 리뷰 반영) ----------
+
+    @patch("exams.services.analysis_orchestrator.estimate_task_minutes")
+    def test_analyze_unexpected_exception_redirects_instead_of_500(self, mock_estimate):
+        mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_analyze', args=[self.material.id]), follow=True
+        )
+
+        # 500이 아니라 자료 상세 화면으로 정상 리다이렉트되어야 한다
+        self.assertEqual(response.status_code, 200)
+        self.assertRedirects(
+            response, reverse('exams:material_detail', args=[self.material.id])
+        )
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("AI 분석에 실패했습니다" in str(m) for m in messages_list))
+
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(
+            self.material.analysis_error_message,
+            "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+        )
+
+    @patch("exams.services.analysis_orchestrator.estimate_task_minutes")
+    def test_retry_unexpected_exception_redirects_instead_of_500(self, mock_estimate):
+        mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_retry_count = 0
+        self.material.save(update_fields=["analysis_status", "analysis_retry_count"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_retry_analyze', args=[self.material.id]), follow=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertRedirects(
+            response, reverse('exams:material_detail', args=[self.material.id])
+        )
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("재시도한 AI 분석도 실패했습니다" in str(m) for m in messages_list))
+
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(
+            self.material.analysis_error_message,
+            "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+        )
+        # 재시도 자체는 시작됐으므로 retry_count는 증가한 상태로 남아야 한다
+        self.assertEqual(self.material.analysis_retry_count, 1)

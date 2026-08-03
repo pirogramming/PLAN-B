@@ -26,6 +26,7 @@ from .services.analysis_orchestrator import (
     DuplicateAnalysisRequestError,
     AnalysisNotSupportedError,
     RetryLimitExceededError,
+    AnalysisPipelineError,
 )
 from django.db import transaction
 
@@ -360,7 +361,7 @@ def material_analyze(request, material_id):
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
-    except AIAnalysisError:
+    except (AIAnalysisError, AnalysisPipelineError):
         # 실패 사유는 이미 material.analysis_error_message에 저장돼 있음
         messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -394,7 +395,7 @@ def material_retry_analyze(request, material_id):
     except RetryLimitExceededError as e:
         messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
-    except AIAnalysisError:
+    except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 

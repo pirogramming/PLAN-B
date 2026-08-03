@@ -17,6 +17,11 @@ BE3 담당 - AI 분석: 시험 범위 텍스트 -> 단원 분리 -> 학습 작�
 주의:
 - 여기서 생성한 StudyTask는 항상 is_confirmed=False, is_user_modified=False 상태로 저장된다.
   사용자가 검토/수정/확정하기 전까지는 최종 계획 계산에 사용하지 않는다 (기획 원칙 #14, #15).
+
+AI 제공사 (2026-08 기준):
+- Google Gemini API(google-genai SDK) 사용. 팀 예산상 무료/저비용으로 진행하기 위해
+  Anthropic 대신 Gemini로 전환했다 (기본 모델: gemini-3.1-flash-lite).
+- google.genai.errors.APIError를 잡아 재시도 처리한다.
 """
 from __future__ import annotations
 
@@ -24,7 +29,9 @@ import json
 import logging
 from dataclasses import dataclass
 
-from anthropic import Anthropic, APIError, APIConnectionError, APITimeoutError
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from django.conf import settings
 from django.db import transaction
 
@@ -97,7 +104,27 @@ def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: st
    - 범위가 지나치게 큰 작업(예: "운영체제 전체 공부")은 여러 개의 작업으로 분할하라
      (예: "프로세스와 스레드 개념 학습", "CPU 스케줄링 알고리즘 학습", "동기화 핵심 개념 복습").
    - 단순히 시간을 맞추기 위해 서로 관련 없는 내용을 하나의 작업으로 합치지 마라.
-5. 반드시 아래 JSON 형식으로만 응답하라. 다른 설명, 마크다운 코드블록, 접두사를 붙이지 마라.
+5. 사용자가 제공한 시험범위에 명시되지 않은 개념, 공식, 예제 또는 세부 주제를
+   새롭게 추가하지 마라. 선수 학습이 필요하다고 판단되더라도, 입력 내용 안에
+   실제로 언급된 것만으로 작업을 생성하라. (예: 입력에 "푸리에 급수의 개념"만
+   있으면 "직교성" 같은 세부 개념을 임의로 덧붙이지 않는다.)
+6. 동일한 단원에서 여러 작업을 생성할 경우, 각 작업은 서로 다른 학습 목표를
+   가져야 한다. 개념 이해, 비교·정리, 계산·적용, 문제 풀이, 최종 복습처럼 실제
+   수행 행동이 구분되어야 하며, 제목만 다르고 학습 내용이 유사한 작업을 중복
+   생성하지 마라. 학습 행동이 다르면 그에 맞는 task_type을 지정하라 - 다만
+   task_type을 서로 다르게 보이게 하려고 내용과 맞지 않는 유형을 억지로
+   지정하지는 마라 (예: 문제 풀이가 없는데 practice로 표시하지 않는다).
+   동일 단원에서 같은 task_type의 작업을 여러 개 생성할 수는 있지만, 그 경우
+   각각 다루는 세부 내용과 학습 결과가 명확히 달라야 한다. 구분이 어렵다면
+   하나의 작업으로 합쳐라. (예: "OSI 계층 구조 학습"과 "OSI 계층별 역할 비교"는
+   둘 다 concept이어도 다루는 내용이 다르면 괜찮지만, 사실상 같은 내용을
+   제목만 바꿔 두 번 만드는 것은 안 된다.)
+7. 시험범위 정보만으로 중요도를 확신하기 어려운 항목은 importance=medium,
+   depth=basic을 기본값으로 사용하라. 선수 개념이거나 문제 풀이의 핵심에
+   직접 연결되는 내용일 때만 importance=high, depth=core로 표시하라.
+   (모든 작업을 high/core로 분류하지 마라 - 상대적으로 덜 중요한 내용도
+   있다면 medium/low, basic/optional로 구분하라.)
+8. 반드시 아래 JSON 형식으로만 응답하라. 다른 설명, 마크다운 코드블록, 접두사를 붙이지 마라.
 
 {{
   "tasks": [
@@ -158,20 +185,25 @@ def _call_ai(prompt: str) -> str:
         logger.info("AI_MOCK_MODE 활성화 상태 - 실제 API 호출 없이 샘플 응답 사용")
         return _MOCK_RESPONSE
 
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client = genai.Client(api_key=settings.GOOGLE_API_KEY)
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_RETRIES + 2):
         try:
-            response = client.messages.create(
+            response = client.models.generate_content(
                 model=settings.AI_MODEL_NAME,
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    # 분류/구조화 작업이라 창의성보다 일관성이 중요함 -> 낮은 온도로 설정
+                    # (기본값 ~1.0은 매번 답이 크게 달라질 수 있어 분류 작업엔 부적합)
+                    temperature=0.2,
+                    # API 차원에서 JSON 형식을 강제 -> _strip_code_fence()로도 못 거르는
+                    # 이상 응답(코드블록 등) 자체를 줄여줌
+                    response_mime_type="application/json",
+                ),
             )
-            return "".join(
-                block.text for block in response.content if block.type == "text"
-            )
-        except (APIError, APIConnectionError, APITimeoutError) as exc:
+            return response.text
+        except genai_errors.APIError as exc:
             last_error = exc
             logger.warning("AI 호출 실패 (시도 %d/%d): %s", attempt, MAX_RETRIES + 1, exc)
 
