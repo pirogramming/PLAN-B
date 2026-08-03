@@ -45,6 +45,19 @@ class CustomUserCreationForm(UserCreationForm):
                 'placeholder': '비밀번호를 한번 더 입력하세요',
             })
 
+    def clean_email(self):
+        email = self.cleaned_data.get('email')
+        if User.objects.filter(email=email).exists():
+            raise forms.ValidationError('이미 가입된 이메일입니다.')
+        return email
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        user.username = self.cleaned_data['email']
+        if commit:
+            user.save()
+        return user
+
 
 class CustomAuthenticationForm(AuthenticationForm):
     """
