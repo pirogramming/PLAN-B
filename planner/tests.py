@@ -1444,7 +1444,7 @@ class FinalizeDailyPlanTests(TestCase):
         daily_plan.refresh_from_db()
         self.assertIsNone(daily_plan.finalized_at)
 
-def test_recovery_plan_creation_validates_exam_period_consistency(self):
+    def test_recovery_plan_creation_validates_exam_period_consistency(self):
         from django.core.exceptions import ValidationError
         from unittest.mock import patch
         from exams.models import ExamPeriod
