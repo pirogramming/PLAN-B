@@ -344,6 +344,13 @@ class TaskReviewTests(TestCase):
         )
 
 class AnalysisOrchestratorTestCase(TestCase):
+    """
+    analysis_orchestrator.py 리뷰 확정 사항 검증:
+    - 상태 필드 분리(status/error_message vs analysis_status/analysis_error_message)
+    - 최초 분석/재시도 상태 전이, 재시도 횟수 제한(최대 2회)
+    - 파이프라인 전체 예외 처리 및 롤백
+    - 빈 결과(0개) 실패 처리
+    """
 
     def setUp(self):
         self.user = User.objects.create_user(
@@ -542,3 +549,123 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(result["error_message"], "네트워크 오류")
         self.assertEqual(result["retry_count"], 1)
         self.assertEqual(result["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+
+class MaterialAnalysisViewTestCase(TestCase):
+    """
+    AI 분석 관련 View(material_analyze/material_retry_analyze/material_analysis_status) 검증.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="view_owner@example.com", email="view_owner@example.com", password="pass1234!"
+        )
+        self.other = User.objects.create_user(
+            username="view_other@example.com", email="view_other@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.owner, title="뷰 테스트 시험기간",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="뷰 테스트 과목", exam_date=datetime.date(2026, 8, 18),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", material_type=MaterialType.TEXT,
+            extracted_text="1장 개념 정리", status=MaterialStatus.COMPLETED,
+        )
+
+    def test_analyze_requires_login(self):
+        response = self.client.post(reverse('exams:material_analyze', args=[self.material.id]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login', response.url)
+
+    def test_other_user_cannot_trigger_analyze(self):
+        self.client.force_login(self.other)
+        response = self.client.post(reverse('exams:material_analyze', args=[self.material.id]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_analyze_rejected_when_extraction_not_completed(self):
+        self.material.status = MaterialStatus.PENDING
+        self.material.save(update_fields=["status"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_analyze', args=[self.material.id]), follow=True
+        )
+
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.PENDING)
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("텍스트 추출이 완료된 자료만" in str(m) for m in messages_list))
+
+    def test_analyze_success_redirects_to_task_review(self):
+        self.client.force_login(self.owner)
+        response = self.client.post(
+            reverse('exams:material_analyze', args=[self.material.id])
+        )
+
+        self.assertRedirects(response, reverse('exams:task_review', args=[self.exam.id]))
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertTrue(StudyTask.objects.filter(study_material=self.material).exists())
+
+    def test_analyze_duplicate_request_shows_info_message(self):
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["analysis_status"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_analyze', args=[self.material.id]), follow=True
+        )
+
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("이미 분석 중" in str(m) for m in messages_list))
+
+    def test_retry_from_failed_succeeds(self):
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_retry_count = 0
+        self.material.save(update_fields=["analysis_status", "analysis_retry_count"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_retry_analyze', args=[self.material.id])
+        )
+
+        self.assertRedirects(response, reverse('exams:task_review', args=[self.exam.id]))
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertEqual(self.material.analysis_retry_count, 1)
+
+    def test_retry_blocked_when_completed(self):
+        self.material.analysis_status = MaterialStatus.COMPLETED
+        self.material.save(update_fields=["analysis_status"])
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            reverse('exams:material_retry_analyze', args=[self.material.id]), follow=True
+        )
+
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("재분석을 지원하지 않습니다" in str(m) for m in messages_list))
+
+    def test_analysis_status_endpoint_returns_json(self):
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_error_message = "네트워크 오류"
+        self.material.analysis_retry_count = 1
+        self.material.save(update_fields=["analysis_status", "analysis_error_message", "analysis_retry_count"])
+        self.client.force_login(self.owner)
+
+        response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], MaterialStatus.FAILED)
+        self.assertEqual(data["error_message"], "네트워크 오류")
+        self.assertEqual(data["retry_count"], 1)
+        self.assertEqual(data["retry_remaining"], 1)
+
+    def test_other_user_cannot_view_analysis_status(self):
+        self.client.force_login(self.other)
+        response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
+        self.assertEqual(response.status_code, 404)

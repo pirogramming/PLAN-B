@@ -3,8 +3,10 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
+from django.http import JsonResponse
 
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
+from core.exceptions import AIAnalysisError
 from planner.services.time_estimator import estimate_task_minutes
 
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
@@ -17,6 +19,14 @@ from .forms import (
     StudyTaskFormSet,
 )
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from .services.analysis_orchestrator import (
+    analyze_and_estimate,
+    retry_analysis,
+    get_analysis_status,
+    DuplicateAnalysisRequestError,
+    AnalysisNotSupportedError,
+    RetryLimitExceededError,
+)
 from django.db import transaction
 
 
@@ -322,6 +332,91 @@ def material_delete(request, material_id):
     material.delete()
     messages.success(request, "학습자료가 삭제되었습니다.")
     return redirect('exams:period_detail', period_id=period_id)
+
+# =====================================================================
+# AI 분석 실행 (exams:material_analyze) - E-AI-01
+# =====================================================================
+@login_required
+@require_http_methods(["POST"])
+def material_analyze(request, material_id):
+    """
+    E-AI-01: AI 분석 요청.
+    analysis_status: PENDING -> PROCESSING -> COMPLETED/FAILED
+
+    텍스트 추출(status)이 아직 COMPLETED가 아니면 (PDF 추출 전, 실패 등)
+    분석 자체를 시작하지 않는다 - 추출 상태와 분석 상태는 별개 필드지만,
+    추출이 안 끝난 자료를 분석할 수는 없기 때문.
+    """
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+
+    if material.status != MaterialStatus.COMPLETED:
+        messages.error(request, "텍스트 추출이 완료된 자료만 AI 분석을 시작할 수 있습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    try:
+        analyze_and_estimate(material)
+    except DuplicateAnalysisRequestError:
+        messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except AIAnalysisError:
+        # 실패 사유는 이미 material.analysis_error_message에 저장돼 있음
+        messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    messages.success(request, "AI 분석이 완료되었습니다.")
+    return redirect('exams:task_review', exam_id=material.exam_id)
+
+
+# =====================================================================
+# AI 분석 재시도 (exams:material_retry_analyze) - E-AI-03
+# =====================================================================
+@login_required
+@require_http_methods(["POST"])
+def material_retry_analyze(request, material_id):
+    """
+    E-AI-03: AI 분석 재시도. FAILED 상태 + 재시도 횟수(2회) 남아있을 때만 허용.
+    조건에 안 맞으면 analysis_orchestrator가 던지는 예외를 그대로 사용자 메시지로 변환한다.
+    """
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+
+    try:
+        retry_analysis(material)
+    except DuplicateAnalysisRequestError:
+        messages.info(request, "이미 분석 중인 자료입니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except AnalysisNotSupportedError as e:
+        messages.error(request, str(e))
+        return redirect('exams:material_detail', material_id=material.id)
+    except RetryLimitExceededError as e:
+        messages.error(request, str(e))
+        return redirect('exams:material_detail', material_id=material.id)
+    except AIAnalysisError:
+        messages.error(request, "재시도한 AI 분석도 실패했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    messages.success(request, "AI 분석이 완료되었습니다.")
+    return redirect('exams:task_review', exam_id=material.exam_id)
+
+
+# =====================================================================
+# AI 분석 상태 조회 (exams:material_analysis_status) - E-AI-02
+# =====================================================================
+@login_required
+@require_http_methods(["GET"])
+def material_analysis_status(request, material_id):
+    """
+    E-AI-02: AI 분석 진행 상태 조회 (폴링용 JSON 엔드포인트).
+    "분석 중..." 화면에서 주기적으로 호출해 analysis_status 변화를 확인하는 용도.
+    """
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+    return JsonResponse(get_analysis_status(material))
+
 
 # =====================================================================
 # AI 작업 검토 (exams:task_review) 
