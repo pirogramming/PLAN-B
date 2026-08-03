@@ -48,7 +48,7 @@ class ExamPeriod(models.Model):
 
 class AvailableTime(models.Model):
     """
-    시험기간 내 날짜별 전체 공부 가능시간 
+    시험기간 내 날짜별 전체 공부 가능시간
     """
     exam_period = models.ForeignKey(
         ExamPeriod,
@@ -72,7 +72,7 @@ class AvailableTime(models.Model):
 
 class Exam(models.Model):
     """
-    개별 시험 과목 모델 
+    개별 시험 과목 모델
     """
     exam_period = models.ForeignKey(
         ExamPeriod,
@@ -98,7 +98,7 @@ class Exam(models.Model):
         ordering = ['exam_date']
 
     def __str__(self):
-        return f"{self.name} ({self.exam_date})"
+        return f"{self.subject_name} ({self.exam_date})"
 
 
 class StudyMaterial(models.Model):
@@ -127,19 +127,32 @@ class StudyMaterial(models.Model):
         verbose_name="텍스트 추출 상태"
     )
     error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
+
+    # AI 분석(E-AI-01/02/03) 상태 - 위 status/error_message(텍스트 추출)와는 별개 필드.
+    # 리뷰 확정 사항: 텍스트 추출 성공 여부와 AI 분석 성공 여부는 서로 다른 단계라 분리한다.
+    analysis_status = models.CharField(
+        max_length=20,
+        choices=MaterialStatus.choices,
+        default=MaterialStatus.PENDING,
+        verbose_name="AI 분석 상태"
+    )
+    analysis_error_message = models.TextField(null=True, blank=True, verbose_name="AI 분석 실패 사유")
+    analysis_retry_count = models.PositiveSmallIntegerField(default=0, verbose_name="AI 분석 사용자 재시도 횟수")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
+
     class Meta:
         db_table = 'study_materials'
         verbose_name = '학습 자료'
         verbose_name_plural = '학습 자료 목록'
 
     def __str__(self):
-        return f"[{self.exam.name}] {self.title}"
+        return f"[{self.exam.subject_name}] {self.title}"
 
 
 class StudyTask(models.Model):
     """
-    하루 학습 분량 
+    하루 학습 분량
     """
     exam = models.ForeignKey(
         Exam,
@@ -211,4 +224,4 @@ class StudyTask(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"[{self.exam.name}] {self.title}"
+        return f"[{self.exam.subject_name}] {self.title}"
