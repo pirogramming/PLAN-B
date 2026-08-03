@@ -192,7 +192,8 @@ def _create_recovery_plan(
         recovery_group_id=recovery_group_id,
         recovery_type=recovery_type,
     )
-
+    recovery_plan.full_clean()
+    
     items_by_id = {item.id: (item, remaining) for item, remaining in items_with_remaining}
 
     recovery_items = []
