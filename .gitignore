@@ -83,4 +83,4 @@ temp/
 *.tmp
 *.bak
 
-echo "test_*.py" >> .gitignore
+test_real_api_3subjects.py

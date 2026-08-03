@@ -82,6 +82,20 @@ class AnalysisNotSupportedError(Exception):
     """COMPLETED 상태처럼, 정책상 이 상태에서는 (재)분석을 지원하지 않을 때"""
 
 
+class AnalysisPipelineError(Exception):
+    """
+    분석 파이프라인(task_extractor/time_estimator/bulk_update 등)에서
+    AIAnalysisError가 아닌 예기치 못한 예외가 발생했을 때 이 타입으로 변환해서 던진다.
+
+    View 등 호출부가 "AIAnalysisError만 알면 되는" 상태를 유지할 수 있도록,
+    예상 가능한 실패(AIAnalysisError)와 예상 못한 실패를 이 예외 하나로
+    구분 없이 잡을 수 있게 한다. analysis_status=FAILED와 사용자용 일반
+    오류 메시지는 이 예외가 발생하기 전에 이미 저장이 끝난 상태이며,
+    이 예외의 메시지 자체도 사용자에게 그대로 노출해도 안전한 일반 문구다
+    (내부 예외의 상세 내용/스택트레이스는 로그에만 남긴다).
+    """
+
+
 @transaction.atomic
 def _run_analysis_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
@@ -155,16 +169,14 @@ def _execute_analysis(study_material: StudyMaterial) -> list[StudyTask]:
             "AI 분석 실패: study_material_id=%s, 사유=%s", study_material.id, exc,
         )
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "AI 분석 파이프라인에서 예기치 못한 오류: study_material_id=%s",
             study_material.id,
         )
-        _finish_failure(
-            study_material,
-            "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
-        )
-        raise
+        message = "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        _finish_failure(study_material, message)
+        raise AnalysisPipelineError(message) from exc
 
     if not tasks:
         message = "분석 결과 학습 작업이 생성되지 않았습니다."
@@ -264,7 +276,7 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
         if status == MaterialStatus.FAILED:
             # FAILED인데도 전이 실패했다는 건 재시도 횟수를 이미 다 썼다는 뜻
             raise RetryLimitExceededError(
-                "재시도 횟수(최대 2회)를 모두 사용했습니다. 시험 범위를 직접 입력해주세요."
+                "재시도 횟수(최대 2회)를 모두 사용했습니다. 학습 작업을 직접 추가해주세요."
             )
         raise DuplicateAnalysisRequestError(
             f"재시도할 수 없는 상태입니다 (현재 analysis_status: {status})."
