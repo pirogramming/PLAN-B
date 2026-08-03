@@ -3,10 +3,10 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
-from django.db import transaction
+
+from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from planner.services.time_estimator import estimate_task_minutes
 
-from core.choices import ExamPeriodStatus
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
 from .forms import (
     ExamPeriodForm,
@@ -16,6 +16,8 @@ from .forms import (
     StudyTaskForm,
     StudyTaskFormSet,
 )
+from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from django.db import transaction
 
 
 # =====================================================================
@@ -233,13 +235,14 @@ def material_create(request, exam_id):
         if form.is_valid():
             material = form.save(commit=False)
             material.exam = exam
+            if material.material_type == MaterialType.TEXT:
+                material.status = MaterialStatus.COMPLETED
             material.save()
-            return redirect('exams:material_detail', material_id=material.id)  # 표: 연동화면=자료 상세
+            return redirect('exams:material_detail', material_id=material.id)
     else:
         form = StudyMaterialForm()
 
     return render(request, 'exams/material_form.html', {'form': form, 'exam': exam})
-
 
 # =====================================================================
 # 자료 상세 (exams:material_detail)
@@ -259,9 +262,51 @@ def material_detail(request, material_id):
 @login_required
 @require_http_methods(["POST"])
 def material_extract(request, material_id):
-    material = get_object_or_404(StudyMaterial, id=material_id, exam__exam_period__user=request.user)
-    # TODO: status=PROCESSING → 추출 → SUCCESS(+extracted_text) / FAILED(+error_message)
-    messages.info(request, "PDF 텍스트 추출 기능은 준비 중입니다.")
+    """
+    D-MAT-03: PDF 텍스트 추출
+    - status: PENDING/FAILED → PROCESSING → COMPLETED(+extracted_text) / FAILED(+error_message)
+    """
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+
+    if material.material_type != MaterialType.PDF:
+        messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    if not material.file:
+        messages.error(request, "첨부된 PDF 파일이 없습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    if material.status == MaterialStatus.PROCESSING:
+        messages.info(request, "이미 분석 중인 자료입니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    material.status = MaterialStatus.PROCESSING
+    material.error_message = None
+    material.save(update_fields=['status', 'error_message'])
+
+    try:
+        extracted = extract_text_from_pdf(material.file)
+    except PdfExtractionError as e:
+        material.status = MaterialStatus.FAILED
+        material.error_message = str(e)
+        material.save(update_fields=['status', 'error_message'])
+        messages.error(request, "PDF 텍스트 추출에 실패했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    if not extracted:
+        material.status = MaterialStatus.FAILED
+        material.error_message = "텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다."
+        material.save(update_fields=['status', 'error_message'])
+        messages.warning(request, "텍스트를 추출하지 못했습니다. 스캔 이미지 PDF일 수 있어요.")
+        return redirect('exams:material_detail', material_id=material.id)
+
+    material.status = MaterialStatus.COMPLETED
+    material.extracted_text = extracted
+    material.error_message = None
+    material.save(update_fields=['status', 'extracted_text', 'error_message'])
+    messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
     return redirect('exams:material_detail', material_id=material.id)
 
 
