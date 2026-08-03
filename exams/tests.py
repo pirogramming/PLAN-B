@@ -277,3 +277,58 @@ class StudyTaskCreateTests(TestCase):
             difficulty=TaskDifficulty.NORMAL,
             speed_factor=1.2,
         )
+
+class TaskReviewTests(TestCase):
+    """작업 수정 시 예상시간 재계산 확인"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='u6@example.com', email='u6@example.com', password='pass1234!'
+        )
+        self.client.force_login(self.user)
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title='기간',
+            start_date=datetime.date(2026, 10, 1), end_date=datetime.date(2026, 10, 10),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name='과목',
+            exam_date=datetime.date(2026, 10, 5), speed_factor=1.0,
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam, unit_name='1장', title='개념 정리',
+            task_type=TaskType.CONCEPT, difficulty=TaskDifficulty.EASY,
+            estimated_min_minutes=20, estimated_max_minutes=30,
+        )
+
+    @patch('exams.views.estimate_task_minutes')
+    def test_task_update_recalculates_estimated_time(self, mock_estimate):
+        # difficulty를 EASY→HARD로 바꾸면 더 큰 값이 반환된다고 가정
+        mock_estimate.return_value = (80, 120)
+
+        management_form_data = {
+            'form-TOTAL_FORMS': '1',
+            'form-INITIAL_FORMS': '1',
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+            'form-0-id': self.task.id,
+            'form-0-unit_name': self.task.unit_name,
+            'form-0-title': self.task.title,
+            'form-0-task_type': TaskType.CONCEPT,
+            'form-0-importance': 'medium',
+            'form-0-depth': 'basic',
+            'form-0-difficulty': TaskDifficulty.HARD,  # EASY → HARD로 수정
+        }
+        response = self.client.post(
+            reverse('exams:task_review', args=[self.exam.id]), management_form_data
+        )
+        self.assertEqual(response.status_code, 302)
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.difficulty, TaskDifficulty.HARD)
+        self.assertEqual(self.task.estimated_min_minutes, 80)
+        self.assertEqual(self.task.estimated_max_minutes, 120)
+        mock_estimate.assert_called_once_with(
+            task_type=TaskType.CONCEPT,
+            difficulty=TaskDifficulty.HARD,
+            speed_factor=1.0,
+        )

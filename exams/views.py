@@ -339,6 +339,15 @@ def task_review(request, exam_id):
             for instance in instances:
                 instance.exam = exam
                 instance.is_user_modified = True
+
+                estimated_min, estimated_max = estimate_task_minutes(
+                    task_type=instance.task_type,
+                    difficulty=instance.difficulty,
+                    speed_factor=exam.speed_factor,
+                )
+                instance.estimated_min_minutes = estimated_min
+                instance.estimated_max_minutes = estimated_max
+
                 instance.save()
             for obj in formset.deleted_objects:
                 obj.delete()
@@ -347,7 +356,6 @@ def task_review(request, exam_id):
         formset = StudyTaskFormSet(queryset=queryset)
 
     return render(request, 'exams/task_review.html', {'formset': formset, 'exam': exam})
-
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 
