@@ -281,6 +281,14 @@ class RecoveryPlanAlreadyProcessedError(Exception):
 class RecoveryPlanStaleError(Exception):
     pass
 
+class RecoveryPlanInvalidDataError(Exception):
+    """
+    복구안 자체의 계산 결과가 유효하지 않은 경우 (예: remaining_minutes <= 0).
+    RecoveryPlanStaleError와 달리 '시점 경과로 인한 불일치'가 아니라
+    생성 당시부터 잘못된 값이 저장됐을 가능성을 가리킨다.
+    """
+    pass
+
 
 def _get_or_create_daily_plan(exam_period, date):
     """
@@ -380,7 +388,12 @@ def apply_recovery_plan(recovery_plan) -> dict:
     - EXCLUDE 항목은 새 일정에 생성하지 않음
     - 원본(과거) DailyPlanItem/ProgressLog는 건드리지 않고 그대로 보존
     - 선택한 복구안은 APPLIED, 같은 그룹의 나머지 PENDING은 DISCARDED
+    
+    ...(기존 docstring)...
+    잠금 순서 컨벤션: RecoveryPlan → DailyPlan 순으로 잠근다.
+    다른 서비스 함수를 추가할 때도 이 순서를 지켜야 데드락을 피할 수 있다.
     """
+
     with transaction.atomic():
         group_id = recovery_plan.recovery_group_id
         group_plans = list(
@@ -413,8 +426,9 @@ def apply_recovery_plan(recovery_plan) -> dict:
                     f"{item.study_task}의 재배치 날짜가 없습니다."
                 )
             if item.remaining_minutes <= 0:
-                raise RecoveryPlanStaleError(
-                    f"{item.study_task}의 남은 시간이 올바르지 않습니다."
+                raise RecoveryPlanInvalidDataError(
+                    f"{item.study_task}의 remaining_minutes가 {item.remaining_minutes}로 "
+                    f"유효하지 않습니다. 복구안 생성 로직을 확인해야 합니다."
                 )
             items_by_date[item.changed_date].append(item)
 

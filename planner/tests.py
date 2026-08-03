@@ -2,6 +2,7 @@ from django.test import TestCase
 from datetime import timedelta
 from django.utils import timezone as django_timezone
 from unittest.mock import patch
+from planner.services.recovery import RecoveryPlanInvalidDataError
 
 from planner.services.progress_recorder import (
     finalize_daily_plan,
@@ -1635,3 +1636,13 @@ class ApplyRecoveryPlanTests(TestCase):
             sum(future_plan.items.values_list("planned_minutes", flat=True)),
         )
         self.assertEqual(orders, [3, 4])
+
+    def test_apply_raises_invalid_data_when_remaining_minutes_not_positive(self):
+        from planner.services.recovery import RecoveryPlanInvalidDataError
+
+        recovery_item = self.maintain_volume.items.filter(action_type="reschedule").first()
+        recovery_item.remaining_minutes = 0
+        recovery_item.save(update_fields=["remaining_minutes"])
+
+        with self.assertRaises(RecoveryPlanInvalidDataError):
+            apply_recovery_plan(self.maintain_volume)
