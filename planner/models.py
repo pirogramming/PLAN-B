@@ -126,6 +126,7 @@ class RecoveryPlan(models.Model):
             )
         ]
 
+
     def clean(self):
         super().clean()
 
