@@ -1,4 +1,6 @@
 import datetime
+import io
+import pypdf
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -25,6 +27,9 @@ from exams.services.analysis_orchestrator import (
     get_analysis_status,
     retry_analysis,
 )
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
 User = get_user_model()
 
@@ -726,3 +731,92 @@ class MaterialAnalysisViewTestCase(TestCase):
         )
         # 재시도 자체는 시작됐으므로 retry_count는 증가한 상태로 남아야 한다
         self.assertEqual(self.material.analysis_retry_count, 1)
+
+
+class PdfExtractorTestCase(TestCase):
+
+    def test_extract_text_success(self):
+        """[3번] 정상적인 텍스트 PDF에서 텍스트가 올바르게 추출되는지 검증"""
+        # pypdf를 사용하여 텍스트가 포함된 PDF 메모리 상에 동적 생성
+        # 1페이지짜리 샘플 PDF 세팅 (텍스트 포함)
+        # Note: pypdf로 텍스트 오브젝트 직접 주입이 안 될 수 있어 표준 Stream 방식을 사용하거나
+        # ReportLab 등이 없는 환경을 고려한 기본 텍스트 포함 1페이지 생성
+        raw_pdf_data = b"""%PDF-1.4
+1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
+2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj
+3 0 obj <</Type /Page /Parent 2 0 R /Resources <</Font <</F1 4 0 R>>>> /MediaBox [0 0 612 792] /Contents 5 0 R>> endobj
+4 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj
+5 0 obj <</Length 55>> stream
+BT
+/F1 12 Tf
+100 700 Td
+(Hello Plan B PDF Text Extraction) Tj
+ET
+endstream endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000231 00000 n 
+0000000300 00000 n 
+trailer <</Size 6 /Root 1 0 R>>
+startxref
+406
+%%EOF"""
+
+        dummy_file = SimpleUploadedFile("valid_sample.pdf", raw_pdf_data, content_type="application/pdf")
+
+        # 텍스트 추출 실행
+        extracted_text = extract_text_from_pdf(dummy_file)
+
+        # 검증
+        self.assertIn("Hello Plan B PDF Text Extraction", extracted_text)
+
+    def test_extract_text_encrypted_with_empty_password(self):
+        """[4번] 빈 비밀번호("")로 해제 가능한 암호화 PDF 처리 검증"""
+        writer = pypdf.PdfWriter()
+        page = writer.add_blank_page(width=100, height=100)
+        
+        # 빈 비밀번호("")로 읽기 암호화 설정
+        writer.encrypt(user_password="", owner_password="")
+
+        pdf_buffer = io.BytesIO()
+        writer.write(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        dummy_file = SimpleUploadedFile("encrypted_empty_pass.pdf", pdf_buffer.read(), content_type="application/pdf")
+
+        # 빈 비밀번호 해제 시도 후 텍스트 추출 동작 시도 (내용이 없으므로 빈 PDF 예외 혹은 정상 통과 확인)
+        # 빈 페이지이므로 PdfExtractionError("PDF에서 텍스트를 추출할 수 없습니다...")가 발생해야 decrypt("") 단계를 무사히 통과한 것임
+        with self.assertRaises(PdfExtractionError) as context:
+            extract_text_from_pdf(dummy_file)
+
+        # "암호화된 PDF 파일은 지원하지 않습니다"가 아닌, decrypt 통과 후 "텍스트를 추출할 수 없습니다" 메시지가 나와야 성공!
+        self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+
+    def test_extract_text_from_invalid_pdf(self):
+        """손상되었거나 일반 텍스트 파일 입력 시 예외 검증"""
+        dummy_file = SimpleUploadedFile("invalid.pdf", b"Not a PDF content", content_type="application/pdf")
+
+        with self.assertRaises(PdfExtractionError) as context:
+            extract_text_from_pdf(dummy_file)
+
+        self.assertIn("올바른 PDF 형식이 아니거나 손상된 파일입니다", str(context.exception))
+
+    def test_extract_text_from_empty_pdf_or_image(self):
+        """텍스트 레이어가 없는 빈/스캔 PDF일 때 예외 처리 검증"""
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+
+        pdf_buffer = io.BytesIO()
+        writer.write(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        dummy_file = SimpleUploadedFile("blank.pdf", pdf_buffer.read(), content_type="application/pdf")
+
+        with self.assertRaises(PdfExtractionError) as context:
+            extract_text_from_pdf(dummy_file)
+
+        self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))

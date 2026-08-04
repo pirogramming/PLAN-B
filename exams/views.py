@@ -268,7 +268,6 @@ def material_detail(request, material_id):
 
 # =====================================================================
 # PDF 텍스트 추출 (exams:material_extract) 
-# TODO: 실제 추출 로직(pypdf/pdfplumber)은 별도 작업으로 구현 예정
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
