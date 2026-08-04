@@ -3,11 +3,10 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
-from django.db import transaction
-from core.choices import MaterialStatus, MaterialType
-from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
-from core.choices import ExamPeriodStatus
+from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
+from planner.services.time_estimator import estimate_task_minutes
+
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
 from .forms import (
     ExamPeriodForm,
@@ -17,6 +16,8 @@ from .forms import (
     StudyTaskForm,
     StudyTaskFormSet,
 )
+from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from django.db import transaction
 
 
 # =====================================================================
@@ -234,13 +235,14 @@ def material_create(request, exam_id):
         if form.is_valid():
             material = form.save(commit=False)
             material.exam = exam
+            if material.material_type == MaterialType.TEXT:
+                material.status = MaterialStatus.COMPLETED
             material.save()
-            return redirect('exams:material_detail', material_id=material.id)  # 표: 연동화면=자료 상세
+            return redirect('exams:material_detail', material_id=material.id)
     else:
         form = StudyMaterialForm()
 
     return render(request, 'exams/material_form.html', {'form': form, 'exam': exam})
-
 
 # =====================================================================
 # 자료 상세 (exams:material_detail)
@@ -261,8 +263,7 @@ def material_detail(request, material_id):
 def material_extract(request, material_id):
     """
     D-MAT-03: PDF 텍스트 추출
-    - material_type이 PDF가 아니면 처리 대상 아님
-    - status: PENDING/FAILED → PROCESSING → SUCCESS(+extracted_text) / FAILED(+error_message)
+    - status: PENDING/FAILED → PROCESSING → COMPLETED(+extracted_text) / FAILED(+error_message)
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
@@ -294,14 +295,13 @@ def material_extract(request, material_id):
         return redirect('exams:material_detail', material_id=material.id)
 
     if not extracted:
-        # 스캔 이미지형 PDF → 예외조건: 실패 사유와 함께 FAILED 저장
         material.status = MaterialStatus.FAILED
         material.error_message = "텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다."
         material.save(update_fields=['status', 'error_message'])
         messages.warning(request, "텍스트를 추출하지 못했습니다. 스캔 이미지 PDF일 수 있어요.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    material.status = MaterialStatus.SUCCESS
+    material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
     material.save(update_fields=['status', 'extracted_text', 'error_message'])
@@ -338,6 +338,15 @@ def task_review(request, exam_id):
             for instance in instances:
                 instance.exam = exam
                 instance.is_user_modified = True
+
+                estimated_min, estimated_max = estimate_task_minutes(
+                    task_type=instance.task_type,
+                    difficulty=instance.difficulty,
+                    speed_factor=exam.speed_factor,
+                )
+                instance.estimated_min_minutes = estimated_min
+                instance.estimated_max_minutes = estimated_max
+
                 instance.save()
             for obj in formset.deleted_objects:
                 obj.delete()
@@ -346,7 +355,6 @@ def task_review(request, exam_id):
         formset = StudyTaskFormSet(queryset=queryset)
 
     return render(request, 'exams/task_review.html', {'formset': formset, 'exam': exam})
-
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 
@@ -361,6 +369,15 @@ def study_task_create(request, exam_id):
         if form.is_valid():
             task = form.save(commit=False)
             task.exam = exam
+
+            estimated_min, estimated_max = estimate_task_minutes(
+                task_type=task.task_type,
+                difficulty=task.difficulty,
+                speed_factor=exam.speed_factor,
+            )
+            task.estimated_min_minutes = estimated_min
+            task.estimated_max_minutes = estimated_max
+
             task.is_user_modified = True
             task.save()
             return redirect('exams:task_review', exam_id=exam.id)

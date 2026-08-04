@@ -46,3 +46,42 @@ class SignupTests(TestCase):
         self.assertFormError(
             response.context['form'], 'email', '이미 가입된 이메일입니다.'
         )
+
+class LoginRedirectTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='redirect@example.com', email='redirect@example.com', password='StrongPass123!'
+        )
+
+    def test_login_redirects_to_default_when_no_next(self):
+        response = self.client.post(reverse('accounts:login'), {
+            'username': 'redirect@example.com',
+            'password': 'StrongPass123!',
+        })
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+    def test_login_redirects_to_safe_next(self):
+        next_url = reverse('exams:period_list')
+        response = self.client.post(
+            f"{reverse('accounts:login')}?next={next_url}",
+            {'username': 'redirect@example.com', 'password': 'StrongPass123!', 'next': next_url},
+        )
+        self.assertRedirects(response, next_url)
+
+    def test_login_rejects_open_redirect(self):
+        malicious_next = 'https://evil-phishing-site.com/'
+        response = self.client.post(
+            reverse('accounts:login'),
+            {
+                'username': 'redirect@example.com',
+                'password': 'StrongPass123!',
+                'next': malicious_next,
+            },
+        )
+        # 외부 도메인은 차단되고 기본 리다이렉트로 fallback 되어야 함
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+    def test_authenticated_user_redirected_from_login_page(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('accounts:login'))
+        self.assertRedirects(response, reverse('exams:period_list'))
