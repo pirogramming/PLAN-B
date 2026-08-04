@@ -59,10 +59,18 @@ AI 호출과 DB 저장 사이의 입력 변경 경쟁 상태 (리뷰 반영):
   추출해서 extracted_text가 바뀌는 경우). 이 경우를 대비해 _save_tasks_with_estimates()가
   저장 직전에 StudyMaterial을 다시 조회해서 다음을 재검증한다.
     1. analysis_status가 여전히 PROCESSING인지
-    2. extracted_text가 AI 호출 당시와 동일한지 (analyzed_text로 전달받아 비교)
-  둘 중 하나라도 달라졌으면 StaleAnalysisRequestError를 던지고 아무것도 저장하지 않는다.
+    2. status(텍스트 추출 상태)가 COMPLETED인지 - PDF 재추출이 진행 중(status가
+       PROCESSING/FAILED/PENDING으로 바뀜)이면, 아직 extracted_text 자체는 안
+       바뀌었더라도 곧 바뀔 수 있는 불안정한 상태이므로 저장을 포기한다. (텍스트
+       비교만으로는 "재추출이 시작됐지만 아직 안 끝난" 시점을 못 걸러내기 때문에
+       별도로 확인이 필요했다.)
+    3. extracted_text가 AI 호출 당시와 동일한지 (analyzed_text로 전달받아 비교)
+  하나라도 어긋나면 StaleAnalysisRequestError를 던지고 아무것도 저장하지 않는다.
 - 같은 이유로 예상시간 계산에 쓰는 exam.speed_factor도, AI 호출 전에 로드해둔 오래된
   객체가 아니라 저장 시점에 다시 조회한 최신 값을 사용한다.
+- material_extract()(exams/views.py, BE2 담당) 쪽에도 analysis_status가 PROCESSING/
+  COMPLETED인 자료의 재추출을 조건부 UPDATE로 원자적으로 막는 방어를 추가했다
+  (Python에서 조회 후 검사하는 방식은 그 자체로 동시 요청 사이의 경쟁 상태가 남는다).
 """
 from __future__ import annotations
 
@@ -165,8 +173,10 @@ def _save_tasks_with_estimates(
     저장 직전에 StudyMaterial을 다시 조회해서(select_for_update로 잠그면서),
     AI 호출 이후 상태가 바뀌지 않았는지 재검증한다:
         - analysis_status가 여전히 PROCESSING인지
+        - status(텍스트 추출 상태)가 COMPLETED인지 (재추출이 진행 중이면 아직
+          extracted_text 자체는 안 바뀌었어도 불안정한 상태로 간주)
         - extracted_text가 analyzed_text(AI 호출에 실제로 쓴 텍스트)와 같은지
-    둘 중 하나라도 어긋나면 StaleAnalysisRequestError를 던지고 아무것도 쓰지 않는다.
+    하나라도 어긋나면 StaleAnalysisRequestError를 던지고 아무것도 쓰지 않는다.
     (select_for_update는 SQLite에서 실제 잠금이 걸리지는 않지만, 재조회 자체는
     트랜잭션 안에서 최신 값을 가져오므로 최소한의 방어 역할은 한다.)
 
@@ -184,6 +194,16 @@ def _save_tasks_with_estimates(
         raise StaleAnalysisRequestError(
             f"저장 시점에 analysis_status가 PROCESSING이 아닙니다 "
             f"(현재: {current.analysis_status}). study_material_id={study_material.pk}"
+        )
+
+    if current.status != MaterialStatus.COMPLETED:
+        # material_extract()가 PDF를 재추출 중이면 status가 PROCESSING/FAILED/PENDING으로
+        # 바뀐다. 아직 extracted_text 자체는 안 바뀐 시점이라 아래 텍스트 비교만으로는
+        # 못 걸러내므로, 추출 상태 자체도 별도로 확인한다 (재추출 완료 시점에 텍스트가
+        # 바뀌기 전에 이 실행이 먼저 저장해버리는 걸 막기 위함).
+        raise StaleAnalysisRequestError(
+            f"저장 시점에 텍스트 추출 상태가 COMPLETED가 아닙니다 "
+            f"(현재: {current.status}). study_material_id={study_material.pk}"
         )
 
     if current.extracted_text != analyzed_text:

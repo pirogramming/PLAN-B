@@ -288,13 +288,34 @@ def material_extract(request, material_id):
         messages.error(request, "첨부된 PDF 파일이 없습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    if material.status == MaterialStatus.PROCESSING:
-        messages.info(request, "이미 분석 중인 자료입니다.")
+    # 아래 세 조건 중 하나라도 걸리면 재추출을 막는다.
+    #   - status(추출 상태)가 이미 PROCESSING (다른 요청이 추출 중)
+    #   - analysis_status가 PROCESSING (AI 분석 진행 중 - 어느 텍스트 기준인지 꼬임)
+    #   - analysis_status가 COMPLETED (이미 이 텍스트 기준으로 분석 결과가 있음)
+    # 조회 후 파이썬에서 검사하는 방식은 동시 요청 사이의 경쟁 상태가 남으므로,
+    # 조건부 UPDATE 하나로 "확인 + PROCESSING 전이"를 원자적으로 처리한다
+    # (analysis_orchestrator._save_tasks_with_estimates()의 재검증과 짝을 이루는 방어).
+    updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
+        status=MaterialStatus.PROCESSING
+    ).exclude(
+        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    ).update(status=MaterialStatus.PROCESSING, error_message=None)
+
+    if not updated_count:
+        material.refresh_from_db(fields=['status', 'analysis_status'])
+        if material.status == MaterialStatus.PROCESSING:
+            messages.info(request, "이미 분석 중인 자료입니다.")
+        elif material.analysis_status == MaterialStatus.PROCESSING:
+            messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
+        else:
+            messages.error(
+                request,
+                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 "
+                "화면에서 확인해주세요.",
+            )
         return redirect('exams:material_detail', material_id=material.id)
 
-    material.status = MaterialStatus.PROCESSING
-    material.error_message = None
-    material.save(update_fields=['status', 'error_message'])
+    material.refresh_from_db(fields=['status', 'error_message'])
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -315,7 +336,17 @@ def material_extract(request, material_id):
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
-    material.save(update_fields=['status', 'extracted_text', 'error_message'])
+    # 재추출 성공은 곧 "새로운 분석 대상"이 됐다는 뜻이다. 이전 텍스트를 기준으로
+    # 쌓였던 AI 분석 상태(특히 FAILED 사유, 재시도 횟수)는 새 텍스트와 무관하므로
+    # 초기화해서, 사용자가 새 텍스트로 최초 분석부터 다시 시작할 수 있게 한다.
+    # (추출 실패 케이스에서는 extracted_text 자체가 안 바뀌므로 여기서 건드리지 않는다.)
+    material.analysis_status = MaterialStatus.PENDING
+    material.analysis_error_message = None
+    material.analysis_retry_count = 0
+    material.save(update_fields=[
+        'status', 'extracted_text', 'error_message',
+        'analysis_status', 'analysis_error_message', 'analysis_retry_count',
+    ])
     messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
     return redirect('exams:material_detail', material_id=material.id)
 
