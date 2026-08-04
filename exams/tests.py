@@ -3,7 +3,8 @@ import io
 import pypdf
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.db import connection
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -29,6 +30,7 @@ from exams.services.analysis_orchestrator import (
 )
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
 User = get_user_model()
@@ -406,7 +408,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(material.status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.error_message)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_ai_analysis_failure_sets_failed_and_rolls_back(self, mock_analyze):
         mock_analyze.side_effect = AICallFailedError("AI 서버 연결 실패")
         material = self._make_material()
@@ -435,7 +437,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertNotIn("예상시간 계산 중 알 수 없는 오류", material.analysis_error_message or "")
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_empty_result_is_treated_as_failure(self, mock_analyze):
         mock_analyze.return_value = []
         material = self._make_material()
@@ -484,7 +486,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         material.save(update_fields=["analysis_status", "analysis_retry_count"])
 
         # 1차 재시도는 실패시킨다
-        with patch("exams.services.analysis_orchestrator.analyze_study_material") as mock_analyze:
+        with patch("exams.services.analysis_orchestrator.fetch_extracted_tasks") as mock_analyze:
             mock_analyze.side_effect = AICallFailedError("1차 재시도 실패")
             with self.assertRaises(AICallFailedError):
                 retry_analysis(material)
@@ -820,3 +822,62 @@ startxref
             extract_text_from_pdf(dummy_file)
 
         self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+
+class AITransactionIsolationTestCase(TransactionTestCase):
+    """
+    이슈: task_extractor.analyze_study_material()가 통째로 @transaction.atomic이라,
+    그 안에서 벌어지는 AI 네트워크 호출이 DB 트랜잭션을 물고 있는 채로 실행되던 문제.
+
+    fetch_extracted_tasks()(네트워크, 트랜잭션 없음)와 save_extracted_tasks()/
+    _save_tasks_with_estimates()(DB 쓰기, 짧은 트랜잭션)로 분리한 뒤,
+    AI 호출 시점에 실제로 열려있는 DB 트랜잭션이 없는지 직접 검증한다.
+
+    TestCase가 아니라 TransactionTestCase를 쓰는 이유: 일반 TestCase는 테스트
+    하나하나를 자체적으로 큰 트랜잭션으로 감싸서 롤백하기 때문에, 그 안에서는
+    connection.in_atomic_block이 항상 True로 나와 이 검증 자체가 무의미해진다.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tx_tester@example.com", email="tx_tester@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="트랜잭션 격리 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="테스트과목", exam_date=datetime.date(2026, 8, 18),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", extracted_text="1장 개념 정리",
+        )
+
+    def test_call_ai_runs_without_open_transaction(self):
+        observed_in_atomic_block = []
+
+        original_call_ai = task_extractor._call_ai
+
+        def spy_call_ai(prompt):
+            observed_in_atomic_block.append(connection.in_atomic_block)
+            return original_call_ai(prompt)
+
+        with patch("exams.services.task_extractor._call_ai", side_effect=spy_call_ai):
+            analyze_and_estimate(self.material)
+
+        self.assertEqual(len(observed_in_atomic_block), 1)
+        self.assertFalse(
+            observed_in_atomic_block[0],
+            "AI 네트워크 호출(_call_ai) 시점에 DB 트랜잭션이 열려있으면 안 된다.",
+        )
+
+    def test_studytask_creation_still_rolls_back_on_db_failure(self):
+        """
+        네트워크 호출을 트랜잭션 밖으로 뺐어도, DB 저장 단계 자체의 원자성은
+        여전히 보장되어야 한다 (StudyTask 생성 + 예상시간 반영이 한 단위로 롤백).
+        """
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)

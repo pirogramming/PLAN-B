@@ -46,11 +46,12 @@ BE3 담당 - AI 분석과 예상시간 계산을 이어붙이는 오케스트레
   - 그 외 예기치 못한 예외: 상세 내용은 로그에만 남기고, 사용자용 메시지는
     일반적인 문구로 저장 (내부 구현 노출 방지)
 
-알려진 한계 (이번 PR 범위 밖, 후속 리팩터링 이슈로 분리):
-- task_extractor.analyze_study_material()가 @transaction.atomic이라, 그 안에서
-  이뤄지는 AI 네트워크 호출이 DB 트랜잭션을 물고 있는 상태로 실행된다.
-  외부 네트워크 호출을 트랜잭션 안에 두는 것은 이상적이지 않지만, task_extractor
-  구조 자체를 바꿔야 하는 사안이라 이 PR에서는 다루지 않는다.
+해결된 이슈:
+- (과거) task_extractor.analyze_study_material()가 @transaction.atomic이라 그 안의
+  AI 네트워크 호출이 DB 트랜잭션을 물고 있었음 -> task_extractor를
+  fetch_extracted_tasks()(네트워크, 트랜잭션 없음)와 save_extracted_tasks()(DB 쓰기,
+  짧은 트랜잭션)로 분리했고, 이 파일도 analyze_study_material() 대신
+  fetch_extracted_tasks()를 직접 호출해서 AI 호출이 트랜잭션 밖에서 실행되도록 함.
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ from django.db.models import F
 from core.choices import MaterialStatus
 from core.exceptions import AIAnalysisError, AIResponseValidationError
 from exams.models import StudyMaterial, StudyTask
-from exams.services.task_extractor import analyze_study_material
+from exams.services.task_extractor import fetch_extracted_tasks, save_extracted_tasks
 from planner.services.time_estimator import estimate_task_minutes
 
 logger = logging.getLogger(__name__)
@@ -96,21 +97,45 @@ class AnalysisPipelineError(Exception):
     """
 
 
-@transaction.atomic
 def _run_analysis_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
     AI 분석(task_extractor)과 예상시간 계산(time_estimator)을 순서대로 실행한다.
     analysis_status는 건드리지 않는다 (상태 관리는 호출하는 쪽이 담당).
 
     처리 순서:
-        1. analyze_study_material()로 StudyTask 생성 (estimated_min/max_minutes=0)
-        2. 생성된 각 StudyTask에 대해 BE1의 estimate_task_minutes() 호출
-        3. 계산된 예상시간을 한 번에 bulk_update로 반영
+        1. fetch_extracted_tasks()로 AI 호출 + 파싱 + 검증 (네트워크, 트랜잭션 없음)
+        2. _save_tasks_with_estimates()로 StudyTask 생성과 예상시간 계산을
+           하나의 짧은 트랜잭션으로 저장 (DB 쓰기만 있어서 커넥션을 오래 안 붙잡음)
 
-    실패 시 이 함수 전체가 @transaction.atomic이므로 생성된 StudyTask도 함께
-    롤백된다. "예상시간 없는 StudyTask"가 DB에 남지 않는다.
+    이렇게 나눈 이유: AI 네트워크 호출은 재시도 포함 최대 수십 초가 걸릴 수 있는데,
+    이걸 DB 트랜잭션 안에 두면 그동안 커넥션을 계속 점유하게 된다. 네트워크 호출을
+    트랜잭션 밖으로 완전히 빼서, DB 트랜잭션은 실제 DB 쓰기 구간(순식간에 끝남)만
+    감싸도록 했다.
+
+    실패 시:
+        - 1단계(AI 호출) 실패: 애초에 트랜잭션이 시작도 안 되므로 DB에는 아무
+          변화도 없다.
+        - 2단계(DB 저장) 실패: _save_tasks_with_estimates()가 @transaction.atomic이므로
+          그 안에서 생성된 StudyTask도 함께 롤백된다. "예상시간 없는 StudyTask"가
+          DB에 남지 않는다.
     """
-    tasks = analyze_study_material(study_material)
+    if not study_material.extracted_text:
+        raise AIResponseValidationError("StudyMaterial에 분석할 텍스트가 없습니다.")
+
+    exam = study_material.exam
+    extracted_tasks = fetch_extracted_tasks(exam, study_material.extracted_text)
+
+    return _save_tasks_with_estimates(study_material, extracted_tasks)
+
+
+@transaction.atomic
+def _save_tasks_with_estimates(study_material: StudyMaterial, extracted_tasks) -> list[StudyTask]:
+    """
+    AI가 추출한 결과를 StudyTask로 저장하고, 곧바로 예상시간까지 채운다.
+    DB 쓰기만 하고 네트워크 호출은 전혀 없어서, 트랜잭션으로 묶어도 커넥션을
+    오래 점유하지 않는다.
+    """
+    tasks = save_extracted_tasks(study_material, extracted_tasks)
 
     if not tasks:
         return tasks
