@@ -738,9 +738,6 @@ class PdfExtractorTestCase(TestCase):
     def test_extract_text_success(self):
         """[3번] 정상적인 텍스트 PDF에서 텍스트가 올바르게 추출되는지 검증"""
         # pypdf를 사용하여 텍스트가 포함된 PDF 메모리 상에 동적 생성
-        writer = pypdf.PdfWriter()
-        page = writer.add_blank_page(width=200, height=200)
-        
         # 1페이지짜리 샘플 PDF 세팅 (텍스트 포함)
         # Note: pypdf로 텍스트 오브젝트 직접 주입이 안 될 수 있어 표준 Stream 방식을 사용하거나
         # ReportLab 등이 없는 환경을 고려한 기본 텍스트 포함 1페이지 생성
