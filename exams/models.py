@@ -128,7 +128,7 @@ class StudyMaterial(models.Model):
     )
     error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
 
-    # AI 분석(E-AI-01/02/03) 상태 - 위 status/error_message(텍스트 추출)와는 별개 필드.
+    # AI 분석 상태 - 위 status/error_message(텍스트 추출)와는 별개 필드.
     # 리뷰 확정 사항: 텍스트 추출 성공 여부와 AI 분석 성공 여부는 서로 다른 단계라 분리한다.
     analysis_status = models.CharField(
         max_length=20,
@@ -138,6 +138,10 @@ class StudyMaterial(models.Model):
     )
     analysis_error_message = models.TextField(null=True, blank=True, verbose_name="AI 분석 실패 사유")
     analysis_retry_count = models.PositiveSmallIntegerField(default=0, verbose_name="AI 분석 사용자 재시도 횟수")
+    # PROCESSING으로 전이된 시각. 서버가 분석 도중 비정상 종료되면 이 값이 오래된
+    # 채로 PROCESSING 상태가 영원히 유지될 수 있어서, 일정 시간 경과 여부를 판단하는
+    # 기준으로 쓴다 (analysis_orchestrator.PROCESSING_TIMEOUT_SECONDS 참고).
+    analysis_started_at = models.DateTimeField(null=True, blank=True, verbose_name="AI 분석 시작 시각")
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
 

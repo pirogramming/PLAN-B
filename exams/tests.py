@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -22,6 +23,7 @@ from exams.services.analysis_orchestrator import (
     AnalysisPipelineError,
     DuplicateAnalysisRequestError,
     MAX_RETRY_COUNT,
+    PROCESSING_TIMEOUT_SECONDS,
     RetryLimitExceededError,
     analyze_and_estimate,
     get_analysis_status,
@@ -557,6 +559,113 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(result["error_message"], "네트워크 오류")
         self.assertEqual(result["retry_count"], 1)
         self.assertEqual(result["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+
+class ProcessingTimeoutTestCase(TestCase):
+    """
+    이슈: 서버가 AI 분석 도중 비정상 종료되면 analysis_status가 PROCESSING으로
+    영원히 남아, 이후 어떤 분석/재시도 요청도 거부되는(좀비 상태) 문제 검증.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="timeout_tester@example.com", email="timeout_tester@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="타임아웃 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="테스트과목", exam_date=datetime.date(2026, 8, 18),
+        )
+
+    def _make_material(self, text="1장 개념 정리"):
+        return StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", extracted_text=text,
+        )
+
+    def test_start_processing_records_started_at(self):
+        material = self._make_material()
+        before = timezone.now()
+
+        analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertIsNotNone(material.analysis_started_at)
+        self.assertGreaterEqual(material.analysis_started_at, before)
+
+    def test_fresh_processing_still_blocks_duplicate_request(self):
+        """방금 시작된 PROCESSING(좀비 아님)은 그대로 중복 요청을 거부해야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = timezone.now()
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+    def test_zombie_processing_can_be_rescued_via_initial_analysis(self):
+        """타임아웃을 넘긴 PROCESSING은 최초 분석 경로로도 다시 시작할 수 있어야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        tasks = analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertTrue(len(tasks) > 0)
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+
+    def test_zombie_processing_can_be_rescued_via_retry(self):
+        """타임아웃을 넘긴 PROCESSING은 재시도 경로로도 다시 시작할 수 있고,
+        재시도 횟수도 정상적으로 증가해야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_retry_count = 0
+        material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        material.save(update_fields=["analysis_status", "analysis_retry_count", "analysis_started_at"])
+
+        tasks = retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertTrue(len(tasks) > 0)
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.analysis_retry_count, 1)
+
+    def test_get_analysis_status_reports_is_stale_true_when_zombie(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        result = get_analysis_status(material)
+
+        self.assertTrue(result["is_stale"])
+
+    def test_get_analysis_status_reports_is_stale_false_when_fresh(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = timezone.now()
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["is_stale"])
+
+    def test_get_analysis_status_reports_is_stale_false_when_not_processing(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PENDING
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["is_stale"])
 
 
 class MaterialAnalysisViewTestCase(TestCase):

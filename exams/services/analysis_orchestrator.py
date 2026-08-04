@@ -57,7 +57,8 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
+from django.utils import timezone
 
 from core.choices import MaterialStatus
 from core.exceptions import AIAnalysisError, AIResponseValidationError
@@ -68,6 +69,11 @@ from planner.services.time_estimator import estimate_task_minutes
 logger = logging.getLogger(__name__)
 
 MAX_RETRY_COUNT = 2
+
+# PROCESSING 상태가 이 시간(초)보다 오래 지속되면 "좀비 상태"로 간주하고,
+# 새 분석/재시도 요청이 이 자리를 대신 차지할 수 있게 허용한다.
+# (서버가 분석 도중 크래시/강제종료되면 PROCESSING이 영원히 안 바뀔 수 있어서 생긴 문제)
+PROCESSING_TIMEOUT_SECONDS = 300  # 5분
 
 
 class DuplicateAnalysisRequestError(Exception):
@@ -194,10 +200,17 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
     """
     analysis_status를 PROCESSING으로 원자적으로 전이시킨다.
 
-    - is_retry=False (최초 분석): 현재 analysis_status가 PENDING일 때만 전이
+    - is_retry=False (최초 분석): 현재 analysis_status가 PENDING일 때, 또는
+      PROCESSING이지만 PROCESSING_TIMEOUT_SECONDS 이상 경과한 "좀비 상태"일 때 전이
     - is_retry=True  (재시도):    현재 analysis_status가 FAILED이고
-                                  analysis_retry_count < MAX_RETRY_COUNT일 때만 전이,
+                                  analysis_retry_count < MAX_RETRY_COUNT일 때, 또는
+                                  마찬가지로 좀비 상태인 PROCESSING일 때 전이,
                                   전이와 동시에 analysis_retry_count를 1 증가시킨다.
+
+    좀비 상태 처리: 서버가 분석 도중 크래시하거나 강제 종료되면 analysis_status가
+    PROCESSING으로 영원히 남아, 이후 어떤 요청도 거부되는 상태가 될 수 있다.
+    analysis_started_at을 기준으로 PROCESSING_TIMEOUT_SECONDS 이상 지난 PROCESSING은
+    "좀비"로 간주하고, 정상적인 PENDING/FAILED와 동등하게 새 시도를 허용한다.
 
     DB 조건부 UPDATE 하나로 "확인 + 변경"을 원자적으로 처리하기 때문에,
     동시에 같은 요청이 여러 번 들어와도 정확히 하나만 성공한다.
@@ -206,28 +219,42 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
         True: 전이에 성공함 (study_material 인스턴스도 최신값으로 갱신됨)
         False: 조건이 안 맞아 전이하지 못함 (이미 처리중/조건 불충족 등)
     """
+    now = timezone.now()
+    stale_cutoff = now - timezone.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS)
+    is_zombie_processing = Q(
+        analysis_status=MaterialStatus.PROCESSING,
+        analysis_started_at__lt=stale_cutoff,
+    )
+
     if is_retry:
-        updated_count = StudyMaterial.objects.filter(
-            pk=study_material.pk,
+        eligible = Q(
             analysis_status=MaterialStatus.FAILED,
             analysis_retry_count__lt=MAX_RETRY_COUNT,
+        ) | is_zombie_processing
+        updated_count = StudyMaterial.objects.filter(
+            Q(pk=study_material.pk) & eligible
         ).update(
             analysis_status=MaterialStatus.PROCESSING,
             analysis_error_message=None,
             analysis_retry_count=F("analysis_retry_count") + 1,
+            analysis_started_at=now,
         )
     else:
+        eligible = Q(analysis_status=MaterialStatus.PENDING) | is_zombie_processing
         updated_count = StudyMaterial.objects.filter(
-            pk=study_material.pk,
-            analysis_status=MaterialStatus.PENDING,
+            Q(pk=study_material.pk) & eligible
         ).update(
             analysis_status=MaterialStatus.PROCESSING,
             analysis_error_message=None,
+            analysis_started_at=now,
         )
 
     if updated_count:
         study_material.refresh_from_db(
-            fields=["analysis_status", "analysis_error_message", "analysis_retry_count"]
+            fields=[
+                "analysis_status", "analysis_error_message",
+                "analysis_retry_count", "analysis_started_at",
+            ]
         )
         return True
     return False
@@ -295,8 +322,17 @@ def get_analysis_status(study_material: StudyMaterial) -> dict:
             "error_message": str | None,       # FAILED가 아니면 항상 None
             "retry_count": int,                # 지금까지 사용자가 재시도한 횟수
             "retry_remaining": int,             # 남은 재시도 가능 횟수 (0~2)
+            "is_stale": bool,                  # PROCESSING인데 타임아웃을 넘겨 "좀비" 상태인지
         }
     """
+    is_stale = False
+    if (
+        study_material.analysis_status == MaterialStatus.PROCESSING
+        and study_material.analysis_started_at is not None
+    ):
+        elapsed = timezone.now() - study_material.analysis_started_at
+        is_stale = elapsed.total_seconds() >= PROCESSING_TIMEOUT_SECONDS
+
     return {
         "status": study_material.analysis_status,
         "error_message": (
@@ -306,4 +342,5 @@ def get_analysis_status(study_material: StudyMaterial) -> dict:
         ),
         "retry_count": study_material.analysis_retry_count,
         "retry_remaining": max(0, MAX_RETRY_COUNT - study_material.analysis_retry_count),
+        "is_stale": is_stale,
     }
