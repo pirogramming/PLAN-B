@@ -14,7 +14,6 @@
 
   <div class="main">
     <header class="topbar">
-      {# 사이드바가 접혔을 때 다시 여는 버튼 #}
       <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
         <svg class="ico"><use href="#i-menu"/></svg>
       </button>
@@ -24,18 +23,30 @@
     <div class="content">
 
     {% if not exam_period %}
-      {# ===== 시험기간이 없을 때 ===== #}
+      {# ===== 1단계 : 시험기간 없음 ===== #}
       <div class="card">
         {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 등록된 시험기간이 없습니다" desc="시험기간을 만들고 과목과 공부 가능시간을 입력하면, PLAN B가 날짜별 계획을 대신 계산해 드립니다." btn_label="시험기간 만들기" show_steps=True %}
       </div>
 
+    {% elif not has_plan %}
+      {# ===== 2단계 : 시험기간은 있지만 계획이 아직 없음 ===== #}
+      <div class="page-head">
+        <div>
+          <h1>{{ exam_period.title }}</h1>
+          <div class="sub">{{ exam_period.start_date|date:"n월 j일" }} ~ {{ exam_period.end_date|date:"n월 j일" }}</div>
+        </div>
+      </div>
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 계획이 만들어지지 않았습니다" desc="과목과 시험 범위를 입력하고 학습 작업을 확정하면 계획을 생성할 수 있습니다." btn_label=next_step_label btn_url=next_step_url %}
+      </div>
+
     {% else %}
-      {# ===== 평소 대시보드 ===== #}
+      {# ===== 3단계 : 평소 대시보드 ===== #}
       <div class="page-head">
         <div>
           <h1>{{ today|date:"n월 j일 l" }}</h1>
           <div class="sub">
-            시험까지 남은 공부 가능일 <b class="num">{{ remaining_days }}일</b>
+            공부할 수 있는 날 <b class="num">{{ remaining_days }}일</b> 남음
             · 오늘 배정 <b class="num">{{ today_minutes }}분</b>
           </div>
         </div>
@@ -54,7 +65,7 @@
                지금 계획은 <b>{{ overall.status_label }}</b> 상태 그대로입니다.</p>
           </div>
           <div class="actions">
-            <button class="btn btn-ghost btn-sm" type="button">나중에</button>
+            {# TODO: 복구안 비교 화면 URL 로 교체 (pending_recovery.group_id 사용) #}
             <a class="btn btn-accent btn-sm" href="#">복구안 보기</a>
           </div>
         </div>
@@ -75,7 +86,7 @@
             </span>
           </div>
 
-          {% include "planner/includes/fit_bar.html" with status=overall.status min_pct=overall.min_pct band_pct=overall.band_pct mark_pct=overall.mark_pct min_minutes=overall.min_minutes max_minutes=overall.max_minutes available_minutes=overall.available_minutes axis_max=overall.axis_max %}
+          {% include "planner/includes/fit_bar.html" with status=overall.status min_pct=overall.min_pct band_pct=overall.band_pct mark_pct=overall.mark_pct need_label_pct=overall.need_label_pct min_minutes=overall.min_minutes max_minutes=overall.max_minutes available_minutes=overall.available_minutes axis_max=overall.axis_max %}
 
           <div class="grid-4" style="margin-top:26px;padding-top:24px;border-top:1px solid var(--neutral4)">
             <div>
@@ -103,43 +114,44 @@
         </div>
       </div>
 
-      {# ---- 과목별 판정 ---- #}
+      {% comment %}
+        과목 목록
+        과목별 가용시간은 ExamPeriod 단위라 배분 정책 없이는 계산할 수 없습니다.
+        그래서 과목별 Fit Bar와 판정 배지는 넣지 않고
+        시험일 / 남은 예상시간 / 남은 작업 수만 보여줍니다.
+      {% endcomment %}
       <div class="section-head">
-        <div class="row">
-          <h3>과목별 판정</h3>
-          <span class="note">같은 눈금 · 0~{{ subject_axis_max }}분</span>
-        </div>
+        <h3>과목</h3>
+        {# TODO: {% url 'planner:calendar' %} 로 교체 #}
         <a class="btn btn-ghost btn-sm" href="#">
           전체 계획 보기<svg class="ico"><use href="#i-chevron-right"/></svg>
         </a>
       </div>
 
-      <div class="grid-3">
-        {% for s in subject_status %}
-          <div class="card card-pad">
-            <div class="row" style="justify-content:space-between;margin-bottom:7px">
-              <b style="font-size:15.5px;color:var(--neutral10)">{{ s.subject_name }}</b>
-              <span class="badge badge-{{ s.status }}">
-                <i class="dot dot-{{ s.status }}"></i>{{ s.status_label }}
-              </span>
+      <div class="card" style="margin-bottom:32px">
+        {% for s in subject_summary %}
+          <div class="subject-card">
+            <span class="dday {% if s.is_near %}near{% endif %}">D-{{ s.d_day }}</span>
+            <div style="flex:1;min-width:0">
+              <div class="name">{{ s.subject_name }}</div>
+              <div class="date">시험 {{ s.exam_date|date:"n월 j일" }}</div>
             </div>
-            <div class="num" style="font-size:11.5px;color:var(--neutral7);margin-bottom:22px">
-              시험 {{ s.exam_date|date:"n/j" }} · D-{{ s.d_day }}
+            <div class="left">
+              <div class="v num">{{ s.remaining_minutes }}분</div>
+              <div class="l">남은 예상시간</div>
             </div>
-
-            {% include "planner/includes/fit_bar.html" with compact=True status=s.status min_pct=s.min_pct band_pct=s.band_pct mark_pct=s.mark_pct %}
-
-            <div class="row" style="justify-content:space-between;margin-top:14px;font-size:12px;color:var(--neutral7)">
-              <span>필요 <b class="num" style="color:var(--neutral9)">{{ s.min_minutes }}~{{ s.max_minutes }}분</b></span>
-              <span>가능 <b class="num" style="color:var(--neutral10)">{{ s.available_minutes }}분</b></span>
+            <div class="left">
+              <div class="v num">{{ s.remaining_task_count }}개</div>
+              <div class="l">남은 작업</div>
             </div>
           </div>
         {% endfor %}
       </div>
 
       {# ---- 진행 상황 ---- #}
-      <div class="section-head" style="margin-top:32px">
+      <div class="section-head">
         <h3>진행 상황</h3>
+        <span class="note">완료 환산 기준</span>
       </div>
 
       <div class="grid-3">
@@ -160,11 +172,7 @@
         <div class="card card-pad">
           <div class="kpi-label">남은 CORE 작업</div>
           <div class="kpi-value">{{ progress.core_left }}<small>개</small></div>
-          <div class="row" style="gap:6px;margin-top:13px;flex-wrap:wrap">
-            {% for c in progress.core_by_subject %}
-              <span class="tag">{{ c.name }} {{ c.count }}</span>
-            {% endfor %}
-          </div>
+          <div class="kpi-sub">필수 학습만 남긴 기준</div>
         </div>
       </div>
     {% endif %}
