@@ -4,7 +4,7 @@ import pypdf
 from unittest.mock import patch
 
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -852,14 +852,16 @@ class AITransactionIsolationTestCase(TransactionTestCase):
             exam=self.exam, title="테스트 자료", extracted_text="1장 개념 정리",
         )
 
+    @override_settings(AI_MOCK_MODE=True)
     def test_call_ai_runs_without_open_transaction(self):
         observed_in_atomic_block = []
 
-        original_call_ai = task_extractor._call_ai
-
         def spy_call_ai(prompt):
+            # 이 테스트의 목적은 트랜잭션 유무 확인이지 실제 AI 응답 확인이 아니므로,
+            # 테스트 실행 환경에서 AI_MOCK_MODE가 어쩌다 False로 덮어써져도 실제
+            # Gemini API를 호출하지 않도록 고정 응답을 직접 반환한다.
             observed_in_atomic_block.append(connection.in_atomic_block)
-            return original_call_ai(prompt)
+            return task_extractor._MOCK_RESPONSE
 
         with patch("exams.services.task_extractor._call_ai", side_effect=spy_call_ai):
             analyze_and_estimate(self.material)
@@ -870,6 +872,7 @@ class AITransactionIsolationTestCase(TransactionTestCase):
             "AI 네트워크 호출(_call_ai) 시점에 DB 트랜잭션이 열려있으면 안 된다.",
         )
 
+    @override_settings(AI_MOCK_MODE=True)
     def test_studytask_creation_still_rolls_back_on_db_failure(self):
         """
         네트워크 호출을 트랜잭션 밖으로 뺐어도, DB 저장 단계 자체의 원자성은
@@ -881,3 +884,78 @@ class AITransactionIsolationTestCase(TransactionTestCase):
                 analyze_and_estimate(self.material)
 
         self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_stale_extracted_text_discards_result(self):
+        """
+        AI 호출 시작 이후 저장 시점 사이에 extracted_text가 바뀌면(예: 다른 요청이
+        PDF를 재추출), 그 사이 받은 AI 결과는 저장하지 않고 버려야 한다.
+        """
+        def fake_fetch(exam, extracted_text):
+            # AI 응답을 기다리는 동안 다른 요청이 텍스트를 바꿔치기했다고 가정
+            StudyMaterial.objects.filter(pk=self.material.pk).update(
+                extracted_text="다른 요청이 재추출한 새 텍스트"
+            )
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        # 텍스트 자체는 다른 요청이 바꾼 값 그대로 남아있어야 한다 (이 실행이 덮어쓰면 안 됨)
+        self.assertEqual(self.material.extracted_text, "다른 요청이 재추출한 새 텍스트")
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_speed_factor_uses_latest_value_at_save_time(self):
+        """
+        예상시간 계산은 AI 호출 전에 로드해둔 오래된 exam 객체가 아니라, 저장
+        시점에 다시 조회한 최신 speed_factor를 사용해야 한다.
+        """
+        def fake_fetch(exam, extracted_text):
+            # AI 응답을 기다리는 동안 progress 기록으로 speed_factor가 갱신됐다고 가정
+            Exam.objects.filter(pk=self.exam.pk).update(speed_factor=2.0)
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            tasks = analyze_and_estimate(self.material)
+
+        from planner.services.time_estimator import estimate_task_minutes
+
+        first_task = tasks[0]
+        expected_min, expected_max = estimate_task_minutes(
+            task_type=first_task.task_type,
+            difficulty=first_task.difficulty,
+            speed_factor=2.0,  # 저장 시점의 최신값
+        )
+        self.assertEqual(first_task.estimated_min_minutes, expected_min)
+        self.assertEqual(first_task.estimated_max_minutes, expected_max)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_existing_unconfirmed_task_preserved_when_save_rolls_back(self):
+        """
+        save_extracted_tasks()는 기존 미확정 작업을 삭제하고 새로 만드는데, 그
+        직후(예상시간 계산) 실패로 트랜잭션이 롤백되면 기존 작업 삭제도 함께
+        되돌려져서 그대로 남아있어야 한다.
+        """
+        old_task = StudyTask.objects.create(
+            exam=self.exam, study_material=self.material, title="기존 작업",
+            task_type="concept", importance="medium", depth="basic",
+            difficulty="normal", estimated_min_minutes=10, estimated_max_minutes=20,
+            order=1,
+        )
+
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertTrue(
+            StudyTask.objects.filter(pk=old_task.pk, title="기존 작업").exists()
+        )
