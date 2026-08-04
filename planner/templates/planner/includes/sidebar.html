@@ -1,0 +1,48 @@
+<aside class="side">
+  {# 로고를 누르면 사이드바가 접힙니다 (planner.js) #}
+  <button class="brand" id="toggleSide" type="button">PLAN <em>B</em></button>
+
+  <nav>
+    <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="#">
+      <svg class="ico"><use href="#i-dashboard"/></svg>대시보드
+    </a>
+    <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
+      <svg class="ico"><use href="#i-today"/></svg>오늘의 공부
+      {% if today_count %}<span class="count">{{ today_count }}</span>{% endif %}
+    </a>
+    <a class="nav-i {% if nav == 'calendar' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
+      <svg class="ico"><use href="#i-calendar"/></svg>전체 계획
+    </a>
+  </nav>
+
+  {% if pending_recovery %}
+    <div class="side-label">상태</div>
+    <div class="side-box alert">
+      <h4><svg class="ico"><use href="#i-alert"/></svg>복구안 대기 중</h4>
+      <p>선택 전까지 계획은 그대로입니다</p>
+    </div>
+  {% endif %}
+
+  <div class="side-label">시험기간</div>
+  {% if exam_period %}
+    <div class="side-box">
+      <h4>{{ exam_period.title }}</h4>
+      <p class="num">{{ exam_period.start_date|date:"m.d" }} ~ {{ exam_period.end_date|date:"m.d" }}</p>
+      <div class="meter" style="margin-top:12px">
+        <i style="width:{{ exam_period.progress_percent|default:0 }}%"></i>
+      </div>
+    </div>
+  {% else %}
+    <div class="side-box dashed">
+      <p>진행 중인<br>시험기간이 없습니다</p>
+    </div>
+  {% endif %}
+
+  <div class="side-foot">
+    {# TODO: {% url 'accounts:logout' %} 로 교체 #}
+    <a class="nav-i" href="#">
+      <svg class="ico"><use href="#i-user"/></svg>
+      {% if user.is_authenticated %}{{ user.username }}{% else %}로그인{% endif %}
+    </a>
+  </div>
+</aside>

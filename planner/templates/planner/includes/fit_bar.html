@@ -1,0 +1,17 @@
+<div class="fit {% if compact %}compact{% endif %}">
+  <div class="fit-scale">
+    <div class="fit-band {{ status }}" style="left:{{ min_pct }}%;width:{{ band_pct }}%"></div>
+    <div class="fit-min {{ status }}" style="width:{{ min_pct }}%"></div>
+  </div>
+  <div class="fit-mark" style="left:{{ mark_pct }}%">
+    {% if not compact %}<span>가능 {{ available_minutes }}분</span>{% endif %}
+  </div>
+</div>
+
+{% if not compact %}
+  <div class="fit-caption">
+    <span class="start">0분</span>
+    <span class="need" style="left:{{ mark_pct }}%">필요 {{ min_minutes }} ~ {{ max_minutes }}분</span>
+    <span class="end">{{ axis_max }}분</span>
+  </div>
+{% endif %}
