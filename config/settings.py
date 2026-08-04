@@ -131,9 +131,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = 'accounts:login'
 LOGIN_REDIRECT_URL = 'exams:period_list'
 LOGOUT_REDIRECT_URL = 'accounts:login'
-ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+GOOGLE_API_KEY = config('GOOGLE_API_KEY', default='')
+ 
 
 #AI 모델임시설정
-AI_MODEL_NAME = config('AI_MODEL_NAME', default='claude-haiku-4-5-20251001')
+AI_MODEL_NAME = config('AI_MODEL_NAME', default='gemini-3.1-flash-lite')
 # True면 실제 API를 호출하지 않고 고정 샘플 응답 사용 
 AI_MOCK_MODE = config('AI_MOCK_MODE', default=True, cast=bool)

@@ -20,4 +20,4 @@ cffi==2.1.0
 pycparser==3.0
 charset-normalizer==3.4.9
 
-anthropic==0.69.0
+google-genai==2.16.0
