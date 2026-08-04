@@ -1444,6 +1444,40 @@ class FinalizeDailyPlanTests(TestCase):
         daily_plan.refresh_from_db()
         self.assertIsNone(daily_plan.finalized_at)
 
+    def test_recovery_plan_creation_validates_exam_period_consistency(self):
+        from django.core.exceptions import ValidationError
+        from unittest.mock import patch
+        from exams.models import ExamPeriod
+
+        exam = self._make_exam(exam_date=self.today + timedelta(days=5))
+        task = self._make_task(exam, importance="high", depth="core")
+        daily_plan = self._make_daily_plan(self.today)
+        item = self._make_item(daily_plan, task)
+        self._record(item, "not_done")
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=40,
+        )
+
+        # source_daily_plan.exam_period와 다른 exam_period를 강제로 넣도록 create를 패치
+        other_exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="다른 시험기간",
+            start_date=self.today,
+            end_date=self.today + timedelta(days=10),
+        )
+
+        original_create = RecoveryPlan.objects.create
+        def broken_create(*args, **kwargs):
+            kwargs['exam_period'] = other_exam_period
+            return original_create(*args, **kwargs)
+
+        with patch.object(RecoveryPlan.objects, 'create', side_effect=broken_create):
+            with self.assertRaises(ValidationError):
+                finalize_daily_plan(daily_plan)
+
 
 class ApplyRecoveryPlanTests(TestCase):
     def setUp(self):
