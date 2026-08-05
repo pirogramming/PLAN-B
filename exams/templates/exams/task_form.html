@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}작업 추가 - PLAN B{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
+
+{% block content %}
+{% include "exams/_topbar.html" %}
+
+<div class="container" style="max-width:480px; margin:20px auto; padding-bottom:60px;">
+    <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
+        <a href="{% url 'exams:task_review' exam.id %}" style="color:inherit; text-decoration:none;">{{
+            exam.subject_name }} 학습 작업</a> &nbsp;›&nbsp; 추가
+    </div>
+    <div class="page-title">학습 작업 추가하기</div>
+    <div class="page-sub">직접 작업을 추가할 수 있어요</div>
+
+    {% if form.non_field_errors %}<div class="form-error-box">{{ form.non_field_errors|striptags }}</div>{% endif %}
+
+    <div class="card">
+        <form method="post" novalidate>
+            {% csrf_token %}
+
+            <div class="form-group">
+                <label class="form-label" for="{{ form.unit_name.id_for_label }}">단원명</label>
+                {{ form.unit_name }}
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="{{ form.title.id_for_label }}">작업명</label>
+                {{ form.title }}
+                {% if form.title.errors %}<div class="field-error">{{ form.title.errors|striptags }}</div>{% endif %}
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="{{ form.task_type.id_for_label }}">작업 유형</label>
+                {{ form.task_type }}
+            </div>
+
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:1;">
+                    <label class="form-label" for="{{ form.importance.id_for_label }}">중요도</label>
+                    {{ form.importance }}
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label class="form-label" for="{{ form.depth.id_for_label }}">깊이</label>
+                    {{ form.depth }}
+                </div>
+                <div class="form-group" style="flex:1;">
+                    <label class="form-label" for="{{ form.difficulty.id_for_label }}">난이도</label>
+                    {{ form.difficulty }}
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-brand btn-block">추가하기</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
