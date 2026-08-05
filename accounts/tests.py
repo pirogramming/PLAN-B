@@ -1,6 +1,8 @@
-from django.test import TestCase
+from django.test import TestCase, RequestFactory
 from django.urls import reverse
 from django.contrib.auth import get_user_model
+from allauth.socialaccount.models import SocialAccount, SocialLogin
+from accounts.adapters import CustomSocialAccountAdapter
 
 User = get_user_model()
 
@@ -85,3 +87,29 @@ class LoginRedirectTests(TestCase):
         self.client.force_login(self.user)
         response = self.client.get(reverse('accounts:login'))
         self.assertRedirects(response, reverse('exams:period_list'))
+
+
+class SocialAccountAdapterTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.request = self.factory.get('/')
+
+    def test_populate_user_sets_username_to_email(self):
+        adapter = CustomSocialAccountAdapter()
+        
+        # 1. SocialLogin 객체 사전 생성
+        sociallogin = SocialLogin(
+            account=SocialAccount(provider='google', uid='12345')
+        )
+        
+        # 2. adapter.new_user()에 request와 sociallogin을 함께 전달
+        user = adapter.new_user(self.request, sociallogin)
+        sociallogin.user = user
+
+        data = {'email': 'googleuser@example.com', 'username': 'RandomGoogleName'}
+
+        # 3. populate_user 호출
+        user = adapter.populate_user(self.request, sociallogin, data)
+
+        # 4. username이 email과 동일하게 들어갔는지 확인
+        self.assertEqual(user.username, 'googleuser@example.com')
