@@ -1,0 +1,68 @@
+{% comment %}
+  학습 결과 입력 모달.
+  화면에 하나만 두고 JS(planner.js)가 작업 정보를 채워 넣습니다.
+  전송 방식(POST URL, 필드명)은 BE 확정 후 연결합니다.
+{% endcomment %}
+
+<div class="modal-bg" id="resultModal" hidden>
+  <div class="modal">
+
+    <div class="modal-head">
+      <div style="flex:1">
+        <div class="task-tags" id="rmTags"></div>
+        <h3 id="rmTitle"></h3>
+        <div class="meta" id="rmMeta"></div>
+      </div>
+      <button class="icon-btn js-close" type="button" aria-label="닫기">
+        <svg class="ico"><use href="#i-close"/></svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="field-label">오늘 이 작업을 어떻게 했나요?</div>
+      <div class="pick" id="rmPick">
+        <button class="pick-item" type="button" data-value="done">
+          <svg class="ico"><use href="#i-done"/></svg><b>완료</b><span>다 했어요</span>
+        </button>
+        <button class="pick-item" type="button" data-value="partial">
+          <svg class="ico"><use href="#i-partial"/></svg><b>일부완료</b><span>하다 말았어요</span>
+        </button>
+        <button class="pick-item" type="button" data-value="not_done">
+          <svg class="ico"><use href="#i-not-done"/></svg><b>못함</b><span>손도 못 댔어요</span>
+        </button>
+      </div>
+
+      {# ---- 완료 / 일부완료일 때 ---- #}
+      <div class="fieldset" id="rmTime" hidden>
+        <div class="fieldset-head"><span class="no">1</span>실제 공부한 시간</div>
+        <div class="time-input">
+          <div class="unit"><input class="box" id="rmHour" type="number" min="0" max="23" value="0" inputmode="numeric"><span>시간</span></div>
+          <div class="unit"><input class="box" id="rmMin" type="number" min="0" max="59" value="0" inputmode="numeric"><span>분</span></div>
+          <div class="total"><div class="cap">합계</div><div class="val num" id="rmTotal">0분</div></div>
+        </div>
+        <p class="field-hint" id="rmTimeHint">공부한 시간을 입력해 주세요</p>
+      </div>
+
+      {# ---- 일부완료일 때만 ---- #}
+      <div class="fieldset alert" id="rmPercent" hidden>
+        <div class="fieldset-head"><span class="no">2</span>어디까지 했나요</div>
+        <div class="percent-input">
+          <input class="box" id="rmPct" type="number" min="1" max="99" placeholder="50" inputmode="numeric">
+          <span>%</span>
+        </div>
+        <p class="field-hint" id="rmPctHint">1~99 사이로 입력해 주세요 (0%는 못함, 100%는 완료를 선택해 주세요)</p>
+      </div>
+
+      {# ---- 못함일 때 ---- #}
+      <div class="fieldset dashed" id="rmNone" hidden>
+        <b>추가로 입력할 내용이 없습니다</b>
+        <p>이 작업은 복구 대상에 포함되어, 하루 마감 후 복구안을 선택하면 일정이 조정됩니다</p>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <button class="btn btn-ghost js-close" type="button">취소</button>
+      <button class="btn btn-primary ml-auto" id="rmSubmit" type="button" disabled>기록하기</button>
+    </div>
+  </div>
+</div>

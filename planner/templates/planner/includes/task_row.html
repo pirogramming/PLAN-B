@@ -1,0 +1,72 @@
+{% comment %}
+  학습 작업 한 줄.
+  오늘의 공부 / 전체 계획 / 복구 미리보기에서 같이 씁니다.
+
+  {% include "planner/includes/task_row.html" with task=item editable=True %}
+
+  status (core/choices.py ProgressStatus)
+    done      완료
+    partial   일부완료
+    not_done  못함
+    (없음)    아직 결과 입력 전
+
+  상태는 색이 아니라 아이콘 모양으로 구분합니다.
+{% endcomment %}
+
+<div class="task is-{{ task.status|default:'pending' }}">
+
+  <svg class="ico ico-lg task-state">
+    {% if task.status == 'done' %}<use href="#i-done"/>
+    {% elif task.status == 'partial' %}<use href="#i-partial"/>
+    {% elif task.status == 'not_done' %}<use href="#i-not-done"/>
+    {% else %}<use href="#i-circle"/>{% endif %}
+  </svg>
+
+  <div class="task-main">
+    <div class="task-tags">
+      <span class="tag tag-subject">{{ task.subject_name }}</span>
+      {% if task.depth == 'core' %}<span class="tag tag-core">CORE</span>
+      {% elif task.depth == 'basic' %}<span class="tag">BASIC</span>
+      {% elif task.depth == 'optional' %}<span class="tag tag-optional">OPTIONAL</span>{% endif %}
+    </div>
+
+    <div class="task-title">{{ task.title }}</div>
+
+    {% if task.status == 'partial' %}
+      <div class="task-bar">
+        <div class="meter"><i class="warn" style="width:{{ task.completion_percent }}%"></i></div>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="task-time">
+    {% if task.status == 'done' %}
+      <div class="v">{{ task.actual_minutes }}분</div>
+      <div class="l">완료 · 계획 {{ task.planned_minutes }}분</div>
+    {% elif task.status == 'partial' %}
+      <div class="v">{{ task.actual_minutes }}분</div>
+      <div class="l">{{ task.completion_percent }}% 완료 · 계획 {{ task.planned_minutes }}분</div>
+    {% elif task.status == 'not_done' %}
+      <div class="v">0분</div>
+      <div class="l">못함 · 하루 마감 시 복구 대상</div>
+    {% else %}
+      <div class="v">{{ task.planned_minutes }}분</div>
+      <div class="l">예정</div>
+    {% endif %}
+  </div>
+
+  {% if editable %}
+    {% if task.status %}
+      <button class="btn btn-ghost btn-sm js-result" type="button"
+              data-id="{{ task.id }}" data-status="{{ task.status }}"
+              data-minutes="{{ task.actual_minutes|default:0 }}"
+              data-percent="{{ task.completion_percent|default:'' }}">
+        <svg class="ico"><use href="#i-edit"/></svg>수정
+      </button>
+    {% else %}
+      <button class="btn btn-secondary btn-sm js-result" type="button" data-id="{{ task.id }}">
+        결과 입력
+      </button>
+    {% endif %}
+  {% endif %}
+</div>
