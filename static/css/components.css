@@ -2,352 +2,117 @@
    forms.py 의 widget class(form-control, form-select 등)와 이름을 맞춰뒀음.
    tokens.css 의 변수만 사용 — 새 색상 임의로 추가하지 말 것. */
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 44px;
-  padding: 0 20px;
-  border-radius: 10px;
-  background: var(--neutral11);
-  color: var(--neutral1);
-  font-size: 14px;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  height:44px; padding:0 20px; border-radius:10px;
+  background:var(--neutral11); color:var(--neutral1); font-size:14px; font-weight:600;
+  border:none; cursor:pointer;
+}
+.btn:hover{ background:var(--neutral10); }
+.btn:disabled{ background:var(--neutral6); cursor:not-allowed; }
+.btn.btn-brand{ background:var(--brand4); }
+.btn.btn-brand:hover{ background:var(--brand5); }
+.btn.btn-ghost{ background:var(--neutral1); color:var(--neutral11); border:1px solid var(--neutral5); }
+.btn.btn-block{ width:100%; }
+
+.card{
+  background:var(--neutral1); border:1px solid var(--neutral4); border-radius:16px;
+  padding:24px 26px;
 }
 
-.btn:hover {
-  background: var(--neutral10);
+.form-group{ margin-bottom:16px; }
+.form-label{ display:block; font-size:13px; font-weight:600; color:var(--neutral9); margin-bottom:6px; }
+
+.form-control, .form-select, .textarea-input{
+  width:100%; height:44px; padding:0 14px; border-radius:10px;
+  border:1px solid var(--neutral5); background:var(--neutral2);
+  font-family:var(--ui); font-size:14px; color:var(--neutral10);
+}
+.textarea-input{ height:auto; padding:12px 14px; resize:vertical; }
+.form-control:focus, .form-select:focus, .textarea-input:focus{
+  outline:none; border-color:var(--brand4); background:var(--neutral1);
+}
+.file-input{ padding:10px 14px; height:auto; background:var(--neutral2); }
+.number-input{ text-align:center; }
+
+.field-error{ color:var(--judge3); font-size:12px; margin-top:5px; }
+.form-error-box{
+  background:var(--judge3-bg); border:1px solid var(--judge3-line); color:var(--judge3);
+  border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
 }
 
-.btn:disabled {
-  background: var(--neutral6);
-  cursor: not-allowed;
-}
-
-.btn.btn-brand {
-  background: var(--brand4);
-}
-
-.btn.btn-brand:hover {
-  background: var(--brand5);
-}
-
-.btn.btn-ghost {
-  background: var(--neutral1);
-  color: var(--neutral11);
-  border: 1px solid var(--neutral5);
-}
-
-.btn.btn-block {
-  width: 100%;
-}
-
-.card {
-  background: var(--neutral1);
-  border: 1px solid var(--neutral4);
-  border-radius: 16px;
-  padding: 24px 26px;
-}
-
-.form-group {
-  margin-bottom: 16px;
-}
-
-.form-label {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--neutral9);
-  margin-bottom: 6px;
-}
-
-.form-control,
-.form-select,
-.textarea-input {
-  width: 100%;
-  height: 44px;
-  padding: 0 14px;
-  border-radius: 10px;
-  border: 1px solid var(--neutral5);
-  background: var(--neutral2);
-  font-family: var(--ui);
-  font-size: 14px;
-  color: var(--neutral10);
-}
-
-.textarea-input {
-  height: auto;
-  padding: 12px 14px;
-  resize: vertical;
-}
-
-.form-control:focus,
-.form-select:focus,
-.textarea-input:focus {
-  outline: none;
-  border-color: var(--brand4);
-  background: var(--neutral1);
-}
-
-.file-input {
-  padding: 10px 14px;
-  height: auto;
-  background: var(--neutral2);
-}
-
-.number-input {
-  text-align: center;
-}
-
-.field-error {
-  color: var(--judge3);
-  font-size: 12px;
-  margin-top: 5px;
-}
-
-.form-error-box {
-  background: var(--judge3-bg);
-  border: 1px solid var(--judge3-line);
-  color: var(--judge3);
-  border-radius: 10px;
-  padding: 10px 14px;
-  font-size: 13px;
-  margin-bottom: 16px;
-}
-
-.page-title {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--neutral11);
-  margin-bottom: 6px;
-}
-
-.page-sub {
-  font-size: 13px;
-  color: var(--neutral7);
-  margin-bottom: 20px;
-}
+.page-title{ font-size:34px; font-weight:700; color:var(--neutral11); margin-bottom:8px; }
+.page-sub{ font-size:13px; color:var(--neutral7); margin-bottom:20px; }
 
 /* 판정 뱃지 (가능/위험/불가능) — planner/feasibility 등에서 재사용 */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 999px;
-}
-
-.badge::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-
-.badge.badge-possible {
-  background: var(--judge1-bg);
-  color: var(--judge1);
-  border: 1px solid var(--judge1-line);
-}
-
-.badge.badge-possible::before {
-  background: var(--judge1);
-}
-
-.badge.badge-risky {
-  background: var(--judge2-bg);
-  color: var(--judge2);
-  border: 1px solid var(--judge2-line);
-}
-
-.badge.badge-risky::before {
-  background: var(--judge2);
-}
-
-.badge.badge-impossible {
-  background: var(--judge3-bg);
-  color: var(--judge3);
-  border: 1px solid var(--judge3-line);
-}
-
-.badge.badge-impossible::before {
-  background: var(--judge3);
-}
+.badge{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; }
+.badge::before{ content:""; width:6px; height:6px; border-radius:50%; }
+.badge.badge-possible{ background:var(--judge1-bg); color:var(--judge1); border:1px solid var(--judge1-line); }
+.badge.badge-possible::before{ background:var(--judge1); }
+.badge.badge-risky{ background:var(--judge2-bg); color:var(--judge2); border:1px solid var(--judge2-line); }
+.badge.badge-risky::before{ background:var(--judge2); }
+.badge.badge-impossible{ background:var(--judge3-bg); color:var(--judge3); border:1px solid var(--judge3-line); }
+.badge.badge-impossible::before{ background:var(--judge3); }
 
 /* 과목 우선순위 원형 배지 (H/M/L) — Figma 브랜드 블루 계층 그대로 사용 */
-.priority-dot {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10.5px;
-  font-weight: 800;
+.priority-dot{
+  width:26px; height:26px; border-radius:50%; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10.5px; font-weight:800;
 }
-
-.priority-dot.priority-high {
-  background: var(--brand4);
-  color: var(--neutral1);
-}
-
-.priority-dot.priority-medium {
-  background: var(--brand3);
-  color: var(--neutral10);
-}
-
-.priority-dot.priority-low {
-  background: var(--brand2);
-  color: var(--neutral9);
-}
+.priority-dot.priority-high{ background:var(--brand4); color:var(--neutral1); }
+.priority-dot.priority-medium{ background:var(--brand3); color:var(--neutral10); }
+.priority-dot.priority-low{ background:var(--brand2); color:var(--neutral9); }
 
 /* 탭바 — 실제로는 페이지 이동 링크(<a>)지만 시각적으로는 탭처럼 보이게 */
-.tabbar {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
+.tabbar{ display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+.tabbar a.tab{
+  padding:8px 16px; border-radius:9px; background:var(--neutral2); color:var(--neutral8);
+  font-size:12px; font-weight:600; text-decoration:none; display:inline-block;
 }
-
-.tabbar a.tab {
-  padding: 8px 16px;
-  border-radius: 9px;
-  background: var(--neutral2);
-  color: var(--neutral8);
-  font-size: 12px;
-  font-weight: 600;
-  text-decoration: none;
-  display: inline-block;
-}
-
-.tabbar a.tab.active {
-  background: var(--neutral11);
-  color: var(--neutral1);
-}
-
-.auth-wrap {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-
-.auth-card {
-  width: 380px;
-}
-
-.auth-link {
-  text-align: center;
-  font-size: 13px;
-  color: var(--neutral8);
-  margin-top: 16px;
-}
-
-.auth-link a {
-  color: var(--brand4);
-  font-weight: 700;
-  text-decoration: none;
-}
+.tabbar a.tab.active{ background:var(--neutral11); color:var(--neutral1); }
+.auth-wrap{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+.auth-card{ width:380px; }
+.auth-link{ text-align:center; font-size:13px; color:var(--neutral8); margin-top:16px; }
+.auth-link a{ color:var(--brand4); font-weight:700; text-decoration:none; }
 
 /* 2열 레이아웃 (subject_form 등) */
-.two-col {
-  display: flex;
-  gap: 20px;
-  align-items: flex-start;
-}
-
-.two-col>* {
-  flex: 1;
-  min-width: 0;
-}
-
-.grow {
-  flex: 1;
-  min-width: 0;
-}
+.two-col{ display:flex; gap:20px; align-items:flex-start; }
+.two-col > *{ flex:1; min-width:0; }
+.grow{ flex:1; min-width:0; }
 
 /* 리스트 카드 한 줄 (등록된 과목 등) */
-.list-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
-  border-radius: 11px;
-  background: var(--neutral2);
-  margin-bottom: 8px;
-  font-size: 12.5px;
+.list-card{
+  display:flex; align-items:center; gap:10px;
+  padding:11px 14px; border-radius:11px; background:var(--neutral2);
+  margin-bottom:8px; font-size:12.5px;
 }
 
 /* 범용 필/탭 배지 — .tabbar 밖에서 단독으로도 씀 (task_review의 과목/깊이 태그 등) */
-.tab {
-  padding: 8px 16px;
-  border-radius: 9px;
-  background: var(--neutral2);
-  color: var(--neutral8);
-  font-size: 12px;
-  font-weight: 600;
-  display: inline-block;
+.tab{
+  padding:8px 16px; border-radius:9px; background:var(--neutral2); color:var(--neutral8);
+  font-size:12px; font-weight:600; display:inline-block;
 }
-
-.tab.active {
-  background: var(--neutral11);
-  color: var(--neutral1);
-}
+.tab.active{ background:var(--neutral11); color:var(--neutral1); }
 
 /* 세그먼트 선택형 (중요도/깊이/난이도) — 작업 수정 모달에서 사용 */
-.segment {
-  display: flex;
-  gap: 6px;
+.segment{ display:flex; gap:6px; }
+.segment .opt{
+  flex:1; text-align:center; padding:9px 0; border-radius:9px;
+  font-size:11.5px; font-weight:700; background:var(--neutral2); color:var(--neutral8);
+  border:none; cursor:pointer; font-family:var(--ui);
 }
-
-.segment .opt {
-  flex: 1;
-  text-align: center;
-  padding: 9px 0;
-  border-radius: 9px;
-  font-size: 11.5px;
-  font-weight: 700;
-  background: var(--neutral2);
-  color: var(--neutral8);
-  border: none;
-  cursor: pointer;
-  font-family: var(--ui);
-}
-
-.segment .opt.sel {
-  background: var(--neutral11);
-  color: var(--neutral1);
-}
+.segment .opt.sel{ background:var(--neutral11); color:var(--neutral1); }
 
 /* 모달 — 작업 수정 화면에서 사용 */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(20, 25, 35, .35);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
+.modal-backdrop{
+  position:fixed; inset:0; background:rgba(20,25,35,.35);
+  display:none; align-items:center; justify-content:center; z-index:50;
 }
-
-.modal-backdrop.open {
-  display: flex;
-}
-
-.modal {
-  width: 480px;
-  max-width: 92vw;
-  background: var(--neutral1);
-  border-radius: 18px;
-  padding: 30px 30px 26px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, .2);
+.modal-backdrop.open{ display:flex; }
+.modal{
+  width:480px; max-width:92vw; background:var(--neutral1); border-radius:18px;
+  padding:30px 30px 26px; box-shadow:0 10px 40px rgba(0,0,0,.2);
 }
 
 /* 학습 작업 확인 화면 전용 */
@@ -356,34 +121,28 @@
   margin: 0 auto;
   padding-bottom: 60px;
 }
-
 .crumb-text {
   font-size: 11.5px;
   color: var(--neutral7);
   margin-bottom: 10px;
 }
-
 .task-review-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
   margin-bottom: 24px;
 }
-
 .task-review-body {
   display: flex;
   gap: 24px;
   align-items: flex-start;
 }
-
 .task-nav-col {
   flex: 0 0 200px;
 }
-
 .task-nav-card {
   padding: 18px;
 }
-
 .task-nav-title {
   font-size: 11px;
   font-weight: 700;
@@ -391,65 +150,54 @@
   letter-spacing: 0.03em;
   margin-bottom: 10px;
 }
-
 .task-list-col {
   flex: 1;
   min-width: 0;
 }
-
 .task-empty-card {
   text-align: center;
   padding: 48px 20px;
   color: var(--neutral7);
   font-size: 13px;
 }
-
 .task-item-card {
   margin-bottom: 14px;
   padding: 22px 24px;
   border-left: 3px solid var(--neutral5);
 }
-
 .task-item-card.priority-high {
   border-left-color: var(--brand4);
 }
-
 .task-item-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
 }
-
 .task-unit-label {
   font-size: 11px;
   font-weight: 700;
   color: var(--neutral7);
   letter-spacing: 0.02em;
 }
-
 .task-readonly-input {
   background: var(--neutral3) !important;
   color: var(--neutral8) !important;
   cursor: not-allowed;
   margin-bottom: 14px;
 }
-
 .task-field-group {
   margin-bottom: 14px;
 }
-
 .task-select-row {
   display: flex;
   gap: 10px;
   margin-bottom: 16px;
 }
-
 .task-select-item {
   flex: 1;
   min-width: 0;
 }
-
 .task-item-footer {
   display: flex;
   justify-content: space-between;
@@ -457,7 +205,6 @@
   padding-top: 14px;
   border-top: 1px solid var(--neutral4);
 }
-
 .task-time-pill {
   background: var(--neutral2);
   padding: 5px 12px;
@@ -466,48 +213,39 @@
   font-weight: 700;
   color: var(--neutral10);
 }
-
 .task-action-row {
   display: flex;
   gap: 10px;
   margin-top: 4px;
 }
-
 .task-action-row .btn {
   flex: 1;
 }
-
 .task-confirm-btn {
   background: var(--neutral11);
   color: var(--neutral1);
 }
-
 .task-delete-hidden {
   display: none;
 }
-
 .delete-confirm-box {
   width: 360px;
   text-align: center;
 }
-
 .delete-confirm-title {
   font-size: 15px;
   font-weight: 700;
   margin-bottom: 8px;
 }
-
 .delete-confirm-body {
   font-size: 13px;
   color: var(--neutral7);
   margin-bottom: 20px;
 }
-
 .delete-confirm-actions {
   display: flex;
   gap: 8px;
 }
-
 .delete-confirm-actions .btn {
   flex: 1;
 }
@@ -518,15 +256,12 @@
   margin: 0 auto;
   padding-bottom: 60px;
 }
-
 .material-form-card {
   padding: 32px;
 }
-
 .material-upload-panel input[type="file"] {
   display: none;
 }
-
 .material-upload-box {
   display: flex;
   flex-direction: column;
@@ -539,24 +274,20 @@
   background: var(--neutral2);
   cursor: pointer;
 }
-
 .material-upload-icon {
   font-size: 30px;
   color: var(--neutral6);
 }
-
 .material-upload-text {
   font-size: 13px;
   color: var(--neutral8);
 }
-
 .material-upload-hint {
   font-size: 11.5px;
   color: var(--neutral7);
   text-align: center;
   margin-top: 10px;
 }
-
 #text-panel textarea {
   width: 100%;
   min-height: 280px;
@@ -569,7 +300,6 @@
   color: var(--neutral10);
   resize: vertical;
 }
-
 .material-submit-btn {
   margin-top: 20px;
   height: 48px;
@@ -581,13 +311,11 @@
   margin: 0 auto;
   padding-bottom: 60px;
 }
-
 .section-label {
   font-size: 13px;
   font-weight: 700;
   margin-bottom: 10px;
 }
-
 .extracted-text-box {
   margin-top: 10px;
   max-height: 140px;
@@ -599,16 +327,13 @@
   padding: 10px 12px;
   white-space: pre-wrap;
 }
-
 .delete-material-btn {
   color: var(--judge3);
   border-color: var(--judge3-line);
 }
-
 .hidden-auto-form {
   display: none;
 }
-
 .auto-loading-overlay {
   display: none;
   position: fixed;
@@ -618,16 +343,13 @@
   justify-content: center;
   z-index: 60;
 }
-
 .auto-loading-overlay.open {
   display: flex;
 }
-
 .auto-loading-box {
   width: 320px;
   text-align: center;
 }
-
 .auto-loading-spinner {
   width: 44px;
   height: 44px;
@@ -637,18 +359,13 @@
   margin: 0 auto 16px;
   animation: spin 0.9s linear infinite;
 }
-
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
-
 .auto-loading-text {
   font-size: 13px;
   font-weight: 700;
 }
-
 .auto-loading-sub {
   font-size: 11.5px;
   color: var(--neutral7);
@@ -661,37 +378,31 @@
   margin: 0 auto;
   padding-bottom: 60px;
 }
-
 .avail-body {
   display: flex;
   gap: 20px;
   align-items: flex-start;
 }
-
 .avail-cal-col {
   flex: 1.6;
 }
-
 .avail-cal-title {
   font-size: 14px;
   font-weight: 700;
   margin-bottom: 4px;
 }
-
 .avail-cal-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 8px;
   margin-top: 14px;
 }
-
 .avail-weekday {
   font-size: 11px;
   color: var(--neutral7);
   text-align: center;
   padding-bottom: 2px;
 }
-
 .avail-day {
   height: 46px;
   border-radius: 9px;
@@ -707,13 +418,11 @@
   cursor: pointer;
   position: relative;
 }
-
 .avail-day.exam-day {
   background: var(--neutral3);
   color: var(--neutral6);
   cursor: not-allowed;
 }
-
 .avail-day.has-value::after {
   content: "";
   position: absolute;
@@ -724,49 +433,214 @@
   border-radius: 50%;
   background: var(--judge1);
 }
-
 .avail-day.sel {
   background: var(--brand4);
   color: var(--neutral1);
 }
-
 .avail-side-col {
   flex: 1;
   position: sticky;
   top: 16px;
 }
-
 .avail-side-col.disabled {
   opacity: 0.45;
   pointer-events: none;
 }
-
 .avail-side-date {
   font-size: 15px;
   font-weight: 700;
   margin-bottom: 2px;
 }
-
 .avail-side-caption {
   font-size: 11.5px;
   color: var(--neutral7);
   margin-bottom: 16px;
 }
-
 .avail-side-hint {
   font-size: 11px;
   color: var(--neutral7);
   margin-top: 4px;
 }
-
 .avail-save-btn {
   margin-top: 14px;
 }
-
 .avail-next-btn {
   margin-top: 18px;
 }
-
 .formset-hidden {
   display: none;
+}
+
+/* period_detail.html 전용 (시험기간 상세 허브 화면) */
+.period-detail-wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding-bottom: 60px;
+}
+.period-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 22px;
+}
+.period-date-range {
+  margin-bottom: 0;
+}
+.period-avail-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.period-avail-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--neutral11);
+}
+.period-avail-caption {
+  font-size: 12px;
+  color: var(--neutral7);
+  margin-top: 3px;
+}
+.period-subject-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.period-subject-count {
+  font-size: 14px;
+  font-weight: 700;
+}
+.period-add-subject-btn {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+.period-empty-card {
+  text-align: center;
+  padding: 36px 20px;
+  color: var(--neutral7);
+  font-size: 13px;
+}
+.period-subject-card {
+  margin-bottom: 12px;
+}
+.period-subject-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.period-subject-name {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--neutral11);
+}
+.period-subject-meta {
+  font-size: 12px;
+  color: var(--neutral7);
+  margin-top: 3px;
+}
+.period-subject-actions {
+  display: flex;
+  gap: 6px;
+}
+.period-inline-form {
+  margin: 0;
+}
+.period-small-btn {
+  height: 32px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+.period-delete-btn {
+  color: var(--judge3);
+  border-color: var(--judge3-line);
+}
+.period-subject-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--neutral4);
+}
+.period-link-btn {
+  flex: 1;
+  justify-content: center;
+  font-size: 12px;
+}
+
+/* 시험범위 등록 - 에러 강조 */
+.material-upload-box.error {
+  border-color: var(--judge3);
+  background: var(--judge3-bg);
+}
+.material-upload-error {
+  margin-bottom: 14px;
+}
+
+/* task_form.html 전용 */
+.task-form-wrap {
+  max-width: 480px;
+  margin: 20px auto;
+  padding-bottom: 60px;
+}
+.task-form-select-row {
+  display: flex;
+  gap: 10px;
+}
+.task-form-select-row .form-group {
+  flex: 1;
+}
+
+/* 오래 걸릴 때 안내 (안전장치) */
+.auto-loading-stuck {
+  display: none;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--neutral4);
+}
+.auto-loading-stuck.show {
+  display: block;
+}
+.auto-loading-stuck-text {
+  font-size: 11.5px;
+  color: var(--neutral7);
+  margin-bottom: 10px;
+}
+
+/* 학습 작업 화면 좌측 과목 리스트 - 진짜 버튼처럼 */
+.nav-row-link {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 13px 14px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--neutral10);
+  background: var(--neutral2);
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+}
+.nav-row-link:hover {
+  background: var(--brand1);
+  border-color: var(--brand3);
+}
+.nav-row-link.active {
+  background: var(--neutral11);
+  color: var(--neutral1);
+  font-weight: 700;
+}
+.nav-row-link.active .num {
+  color: var(--neutral1) !important;
+}
+
+/* 컴팩트 타이틀 (인증 화면, 학습자료 상세처럼 작은 카드용) */
+.page-title-sm {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--neutral11);
+  margin-bottom: 8px;
 }
