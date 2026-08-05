@@ -71,6 +71,18 @@ AI 호출과 DB 저장 사이의 입력 변경 경쟁 상태 (리뷰 반영):
 - material_extract()(exams/views.py, BE2 담당) 쪽에도 analysis_status가 PROCESSING/
   COMPLETED인 자료의 재추출을 조건부 UPDATE로 원자적으로 막는 방어를 추가했다
   (Python에서 조회 후 검사하는 방식은 그 자체로 동시 요청 사이의 경쟁 상태가 남는다).
+
+PDF 추출 시작과 AI 분석 시작이 동시에 성공하는 경쟁 상태 (리뷰 반영):
+- 위 저장 시점 재검증만으로는 못 막는 경우가 있었다: View가 material.status==
+  COMPLETED를 파이썬에서 확인한 직후, PDF 재추출 요청이 먼저 DB에서 status=
+  PROCESSING을 차지하고, 그 다음 이 파일의 _start_processing()이 analysis_status만
+  확인하고 PROCESSING 전이에 성공해버리는 경우다. 이러면 추출과 분석이 동시에
+  진행되다가, 나중에 _finish_failure()가 조건 없이 analysis_status=FAILED를 저장하면서
+  재추출 성공 후 초기화된 PENDING 상태를 덮어쓸 수 있었다.
+- 해결: _start_processing()의 조건부 UPDATE에도 status=MaterialStatus.COMPLETED
+  조건을 추가했다. material_extract()의 조건부 UPDATE(analysis_status가 PROCESSING/
+  COMPLETED면 차단)와 서로 대칭을 이루게 되어, 두 요청 중 DB에 먼저 도달해 조건부
+  UPDATE를 통과한 쪽만 성공하고 나머지는 원자적으로 실패한다.
 """
 from __future__ import annotations
 
@@ -308,21 +320,37 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
     """
     analysis_status를 PROCESSING으로 원자적으로 전이시킨다.
 
-    - is_retry=False (최초 분석): 현재 analysis_status가 PENDING일 때만 전이
-    - is_retry=True  (재시도):    현재 analysis_status가 FAILED이고
-                                  analysis_retry_count < MAX_RETRY_COUNT일 때만 전이,
-                                  전이와 동시에 analysis_retry_count를 1 증가시킨다.
+    - is_retry=False (최초 분석): 현재 status(텍스트 추출 상태)가 COMPLETED이고
+                                  analysis_status가 PENDING일 때만 전이
+    - is_retry=True  (재시도):    현재 status가 COMPLETED이고 analysis_status가
+                                  FAILED이며 analysis_retry_count < MAX_RETRY_COUNT일
+                                  때만 전이, 전이와 동시에 analysis_retry_count를
+                                  1 증가시킨다.
+
+    status=COMPLETED 조건을 넣은 이유 (리뷰 반영): 이 조건이 없으면 아래 경쟁
+    상태가 가능했다.
+        1. View가 material.status==COMPLETED를 파이썬에서 확인
+        2. 그 직후 PDF 재추출 요청이 DB에서 status=PROCESSING을 먼저 차지
+        3. 이 함수가 analysis_status=PENDING만 확인하고 PROCESSING 전이에 성공
+        4. PDF 추출과 AI 분석이 동시에 실행되어, 나중에 _finish_failure()가
+           조건 없이 analysis_status=FAILED를 저장하면서 재추출 성공 후
+           초기화된 PENDING 상태를 덮어씀
+    status=COMPLETED를 이 조건부 UPDATE 안에 같이 넣으면, material_extract()
+    쪽의 조건부 UPDATE(analysis_status가 PROCESSING/COMPLETED면 재추출 차단)와
+    서로 대칭을 이뤄서, 두 요청 중 DB에 먼저 도달한 쪽만 성공하고 나머지는
+    원자적으로 실패하게 된다.
 
     DB 조건부 UPDATE 하나로 "확인 + 변경"을 원자적으로 처리하기 때문에,
     동시에 같은 요청이 여러 번 들어와도 정확히 하나만 성공한다.
 
     Returns:
         True: 전이에 성공함 (study_material 인스턴스도 최신값으로 갱신됨)
-        False: 조건이 안 맞아 전이하지 못함 (이미 처리중/조건 불충족 등)
+        False: 조건이 안 맞아 전이하지 못함 (이미 처리중/조건 불충족/추출 미완료 등)
     """
     if is_retry:
         updated_count = StudyMaterial.objects.filter(
             pk=study_material.pk,
+            status=MaterialStatus.COMPLETED,
             analysis_status=MaterialStatus.FAILED,
             analysis_retry_count__lt=MAX_RETRY_COUNT,
         ).update(
@@ -333,6 +361,7 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
     else:
         updated_count = StudyMaterial.objects.filter(
             pk=study_material.pk,
+            status=MaterialStatus.COMPLETED,
             analysis_status=MaterialStatus.PENDING,
         ).update(
             analysis_status=MaterialStatus.PROCESSING,
@@ -349,15 +378,21 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
 
 def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
-    E-AI-01 진입점. analysis_status가 PENDING일 때만 분석을 시작한다.
+    E-AI-01 진입점. 텍스트 추출(status)이 COMPLETED이고 analysis_status가
+    PENDING일 때만 분석을 시작한다.
 
     Raises:
-        DuplicateAnalysisRequestError: PENDING이 아니어서(이미 진행/완료/실패) 시작 못 함
+        DuplicateAnalysisRequestError: 시작 조건이 안 맞아 시작 못 함 (추출이
+            아직 진행 중이거나, analysis_status가 PENDING이 아님)
         AIAnalysisError 계열, AIResponseValidationError: 분석 자체가 실패함
     """
     started = _start_processing(study_material, is_retry=False)
     if not started:
-        study_material.refresh_from_db(fields=["analysis_status"])
+        study_material.refresh_from_db(fields=["status", "analysis_status"])
+        if study_material.status != MaterialStatus.COMPLETED:
+            raise DuplicateAnalysisRequestError(
+                "텍스트 추출이 진행 중이라 지금은 분석을 시작할 수 없습니다."
+            )
         raise DuplicateAnalysisRequestError(
             f"분석을 시작할 수 없는 상태입니다 (현재 analysis_status: "
             f"{study_material.analysis_status})."
@@ -367,17 +402,25 @@ def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
 
 def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
     """
-    E-AI-03 진입점. FAILED 상태이고 재시도 횟수가 남아있을 때만 재시도한다.
+    E-AI-03 진입점. 텍스트 추출(status)이 COMPLETED이고, analysis_status가
+    FAILED이며 재시도 횟수가 남아있을 때만 재시도한다.
 
     Raises:
-        DuplicateAnalysisRequestError: 현재 PROCESSING이라 중복 요청인 경우
+        DuplicateAnalysisRequestError: 추출이 진행 중이거나, analysis_status가
+            PROCESSING이라 중복 요청인 경우
         AnalysisNotSupportedError: COMPLETED 상태라 MVP 기준 재분석 미지원인 경우
         RetryLimitExceededError: FAILED 상태이지만 재시도 횟수(2회)를 이미 다 쓴 경우
         AIAnalysisError 계열, AIResponseValidationError: 재시도한 분석 자체가 실패함
     """
     started = _start_processing(study_material, is_retry=True)
     if not started:
-        study_material.refresh_from_db(fields=["analysis_status", "analysis_retry_count"])
+        study_material.refresh_from_db(fields=["status", "analysis_status", "analysis_retry_count"])
+
+        if study_material.status != MaterialStatus.COMPLETED:
+            raise DuplicateAnalysisRequestError(
+                "텍스트 추출이 진행 중이라 지금은 재시도를 시작할 수 없습니다."
+            )
+
         status = study_material.analysis_status
 
         if status == MaterialStatus.PROCESSING:
@@ -388,7 +431,8 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
                 "결과를 수정하려면 작업 검토 화면에서 직접 수정해주세요."
             )
         if status == MaterialStatus.FAILED:
-            # FAILED인데도 전이 실패했다는 건 재시도 횟수를 이미 다 썼다는 뜻
+            # FAILED이고 추출도 COMPLETED인데 전이 실패했다는 건
+            # 재시도 횟수를 이미 다 썼다는 뜻
             raise RetryLimitExceededError(
                 "재시도 횟수(최대 2회)를 모두 사용했습니다. 학습 작업을 직접 추가해주세요."
             )

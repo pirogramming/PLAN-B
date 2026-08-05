@@ -629,6 +629,46 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(result["retry_count"], 1)
         self.assertEqual(result["retry_remaining"], MAX_RETRY_COUNT - 1)
 
+    # ---------- 추출 시작과 분석 시작의 경쟁 상태 (리뷰 반영) ----------
+
+    def test_initial_analysis_blocked_when_extraction_wins_race_after_status_check(self):
+        """
+        View가 material.status==COMPLETED를 확인한 시점(이 material 객체는 메모리에
+        COMPLETED로 남아있음) 직후, DB에서는 PDF 재추출이 먼저 status=PROCESSING을
+        차지했다고 가정한다. _start_processing()은 인메모리 값이 아니라 DB를 다시
+        조건부로 확인하므로, 이 경우 분석 시작 자체가 원자적으로 실패해야 한다.
+        """
+        material = self._make_material()
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)  # View가 이미 확인한 상태
+
+        # PDF 재추출이 먼저 DB에서 PROCESSING을 차지했다고 가정
+        # (material 인메모리 객체는 건드리지 않아 "직후" 시점을 그대로 재현)
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PENDING)  # 시작조차 안 됨
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)  # 추출 상태는 그대로
+
+    def test_retry_blocked_when_extraction_wins_race_after_status_check(self):
+        """재시도 경로에서도 동일한 경쟁 상태가 원자적으로 막혀야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = 0
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_retry_count, 0)  # 증가 안 함
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
+
 
 class MaterialAnalysisViewTestCase(TestCase):
     """
@@ -739,8 +779,8 @@ class MaterialAnalysisViewTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["status"], MaterialStatus.FAILED)
-        self.assertEqual(data["error_message"], "네트워크 오류")
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["analysis_error_message"], "네트워크 오류")
         self.assertEqual(data["retry_count"], 1)
         self.assertEqual(data["retry_remaining"], 1)
 
@@ -748,6 +788,115 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.client.force_login(self.other)
         response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
         self.assertEqual(response.status_code, 404)
+
+    # ---------- stage/failed_stage 조합 (추출 상태 + 분석 상태 통합) ----------
+
+    def _get_stage(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
+        return response.json()
+
+    def test_stage_pending_when_nothing_started(self):
+        self.material.status = MaterialStatus.PENDING
+        self.material.analysis_status = MaterialStatus.PENDING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "PENDING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_extracting_when_extraction_processing(self):
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_extraction_when_extraction_failed(self):
+        self.material.status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "EXTRACTION")
+
+    def test_stage_analyzing_when_analysis_processing(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "ANALYZING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_analysis_when_analysis_failed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "ANALYSIS")
+
+    def test_stage_completed_when_analysis_completed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.COMPLETED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "COMPLETED")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_prioritizes_extraction_over_stale_analysis_failure(self):
+        """
+        재추출 중(status=PROCESSING)인데 이전 분석 실패 기록(analysis_status=FAILED)이
+        같이 남아있는 경우, 추출 상태를 우선해서 EXTRACTING으로 보여줘야 한다
+        (이전 분석 실패가 잘못 노출되면 안 됨).
+        """
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_response_still_includes_existing_fields(self):
+        """stage/failed_stage 추가가 retry_count/retry_remaining, 그리고
+        analysis_status/analysis_error_message 값을 안 건드리는지 확인."""
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_error_message = "테스트 실패 사유"
+        self.material.analysis_retry_count = 1
+        self.material.save(update_fields=[
+            "analysis_status", "analysis_error_message", "analysis_retry_count",
+        ])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["analysis_error_message"], "테스트 실패 사유")
+        self.assertEqual(data["retry_count"], 1)
+        self.assertEqual(data["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    def test_stage_response_includes_extraction_fields(self):
+        """extraction_status/extraction_error_message가 material.status/
+        error_message 값을 그대로 반영하는지 확인 (BE2와 합의한 필드명)."""
+        self.material.status = MaterialStatus.FAILED
+        self.material.error_message = "PDF 추출 실패 사유"
+        self.material.save(update_fields=["status", "error_message"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["extraction_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["extraction_error_message"], "PDF 추출 실패 사유")
 
     # ---------- 예기치 못한 파이프라인 예외 처리 (PR #33 리뷰 반영) ----------
 

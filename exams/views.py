@@ -304,7 +304,7 @@ def material_extract(request, material_id):
     if not updated_count:
         material.refresh_from_db(fields=['status', 'analysis_status'])
         if material.status == MaterialStatus.PROCESSING:
-            messages.info(request, "이미 분석 중인 자료입니다.")
+            messages.info(request, "이미 PDF 텍스트를 추출 중인 자료입니다.")
         elif material.analysis_status == MaterialStatus.PROCESSING:
             messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
         else:
@@ -440,13 +440,75 @@ def material_retry_analyze(request, material_id):
 @require_http_methods(["GET"])
 def material_analysis_status(request, material_id):
     """
-    E-AI-02: AI 분석 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    "분석 중..." 화면에서 주기적으로 호출해 analysis_status 변화를 확인하는 용도.
+    E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
+    "분석 중..." 화면에서 주기적으로 호출해 상태 변화를 확인하는 용도.
+
+    프론트가 material_analyze()를 순차 자동 호출하는 방식으로 가면서, 성공/실패
+    판단을 이 엔드포인트 하나로만 하기로 확정했다. 텍스트 추출 상태
+    (material.status/error_message, BE2 담당 필드)와 AI 분석 상태
+    (material.analysis_status/analysis_error_message, 이 파일 담당)를 하나의
+    스키마로 합쳐서 내려준다 (BE2와 필드명·구조 합의 완료).
+
+    최종 응답 스키마:
+        {
+            "stage": "PENDING | EXTRACTING | ANALYZING | COMPLETED | FAILED",
+            "extraction_status": "pending | processing | completed | failed",
+            "extraction_error_message": str | None,
+            "analysis_status": "pending | processing | completed | failed",
+            "analysis_error_message": str | None,
+            "failed_stage": "EXTRACTION | ANALYSIS" | None,
+            "retry_count": int,
+            "retry_remaining": int,
+        }
+    extraction_status/analysis_status는 StudyMaterial 모델 필드 값을 그대로 내려서
+    소문자다 (MaterialStatus TextChoices 자체가 소문자). stage/failed_stage는 이
+    엔드포인트가 새로 만드는 값이라 대문자로 통일했다.
+
+    stage 우선순위가 "추출 상태 먼저, 분석 상태 나중"인 이유: material_extract()의
+    원자적 방어(analysis_status가 PROCESSING/COMPLETED면 재추출 자체가 막힘) 덕분에,
+    material.status가 PROCESSING/FAILED로 남아있다는 건 "지금 추출(재추출 포함)
+    작업이 진행/실패한 것"이 확정적으로 최신 상황이라는 뜻이다. 그래서 이 경우엔
+    analysis_status에 남아있는 이전 분석 기록(예: 재추출 전의 예전 실패 사유)보다
+    추출 상태를 우선해서 보여준다 - 순서를 반대로 하면(분석 실패를 먼저 체크하면),
+    재추출이 한창 진행 중인데도 stage가 잘못 FAILED로 나오는 문제가 생긴다.
+
+    failed_stage: stage가 "FAILED"일 때, 추출 단계에서 실패한 건지("EXTRACTION")
+    분석 단계에서 실패한 건지("ANALYSIS") 구분해서 알려준다. 둘 다 아니면 None.
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
-    return JsonResponse(get_analysis_status(material))
+    analysis_data = get_analysis_status(material)  # 기존 서비스 함수, 시그니처 안 바뀜
+
+    if material.status == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "EXTRACTION"
+    elif material.status == MaterialStatus.PROCESSING:
+        stage = "EXTRACTING"
+        failed_stage = None
+    elif analysis_data["status"] == MaterialStatus.PROCESSING:
+        stage = "ANALYZING"
+        failed_stage = None
+    elif analysis_data["status"] == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "ANALYSIS"
+    elif analysis_data["status"] == MaterialStatus.COMPLETED:
+        stage = "COMPLETED"
+        failed_stage = None
+    else:
+        stage = "PENDING"
+        failed_stage = None
+
+    return JsonResponse({
+        "stage": stage,
+        "extraction_status": material.status,
+        "extraction_error_message": material.error_message,
+        "analysis_status": analysis_data["status"],
+        "analysis_error_message": analysis_data["error_message"],
+        "failed_stage": failed_stage,
+        "retry_count": analysis_data["retry_count"],
+        "retry_remaining": analysis_data["retry_remaining"],
+    })
 
 
 # =====================================================================
