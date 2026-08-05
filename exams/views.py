@@ -279,6 +279,10 @@ def material_extract(request, material_id):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
+    # 재추출 성공 후 "텍스트가 실제로 바뀌었는지" 판단하는 기준값. 아래에서
+    # material.status/analysis_status 등을 refresh_from_db()로 갱신해도
+    # extracted_text 필드는 그 refresh 대상에 포함하지 않으므로 이 시점 값 그대로 유지된다.
+    previous_extracted_text = material.extracted_text
 
     if material.material_type != MaterialType.PDF:
         messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
@@ -336,13 +340,16 @@ def material_extract(request, material_id):
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
-    # 재추출 성공은 곧 "새로운 분석 대상"이 됐다는 뜻이다. 이전 텍스트를 기준으로
-    # 쌓였던 AI 분석 상태(특히 FAILED 사유, 재시도 횟수)는 새 텍스트와 무관하므로
-    # 초기화해서, 사용자가 새 텍스트로 최초 분석부터 다시 시작할 수 있게 한다.
-    # (추출 실패 케이스에서는 extracted_text 자체가 안 바뀌므로 여기서 건드리지 않는다.)
-    material.analysis_status = MaterialStatus.PENDING
-    material.analysis_error_message = None
-    material.analysis_retry_count = 0
+    # 재추출 성공은 텍스트가 바뀌었을 수도, 완전히 같을 수도 있다 (예: 사용자가
+    # 같은 PDF를 실수로 다시 업로드). 텍스트가 실제로 바뀐 경우에만 "새로운 분석
+    # 대상"으로 보고 AI 분석 상태(특히 FAILED 사유, 재시도 횟수)를 초기화한다.
+    # 리뷰 반영: 텍스트가 동일한데도 무조건 초기화하면, 재시도 2회를 이미 다 쓴
+    # 자료도 같은 PDF를 다시 추출하는 것만으로 retry_count가 0으로 리셋되어
+    # 재시도 횟수 제한을 우회할 수 있었다.
+    if extracted != previous_extracted_text:
+        material.analysis_status = MaterialStatus.PENDING
+        material.analysis_error_message = None
+        material.analysis_retry_count = 0
     material.save(update_fields=[
         'status', 'extracted_text', 'error_message',
         'analysis_status', 'analysis_error_message', 'analysis_retry_count',

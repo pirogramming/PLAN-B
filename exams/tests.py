@@ -283,6 +283,34 @@ class MaterialExtractTests(TestCase):
         self.assertEqual(material.analysis_retry_count, 0)
 
     @patch('exams.views.extract_text_from_pdf')
+    def test_extract_success_keeps_analysis_state_when_text_unchanged(self, mock_extract):
+        """
+        리뷰 반영: 재추출 결과가 기존 텍스트와 완전히 같다면(예: 같은 PDF를 실수로
+        다시 업로드), AI 분석 상태를 초기화하면 안 된다. 무조건 초기화하면 재시도
+        횟수를 이미 다 쓴 자료도 같은 PDF를 다시 추출하는 것만으로
+        analysis_retry_count가 0으로 리셋되어 재시도 제한을 우회할 수 있다.
+        """
+        mock_extract.return_value = "변하지 않는 텍스트입니다."
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "변하지 않는 텍스트입니다."
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_error_message = "예전 실패 사유"
+        material.analysis_retry_count = MAX_RETRY_COUNT
+        material.save(update_fields=[
+            "status", "extracted_text", "analysis_status",
+            "analysis_error_message", "analysis_retry_count",
+        ])
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(material.extracted_text, "변하지 않는 텍스트입니다.")
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_error_message, "예전 실패 사유")
+        self.assertEqual(material.analysis_retry_count, MAX_RETRY_COUNT)
+
+    @patch('exams.views.extract_text_from_pdf')
     def test_extract_blocked_when_analysis_processing(self, mock_extract):
         """
         AI 분석이 진행 중인 자료는 재추출하면 안 된다 - 어느 텍스트 기준으로
