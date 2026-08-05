@@ -2,39 +2,39 @@
 {% load static %}
 {% block title %}로그인 - PLAN B{% endblock %}
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+  <link rel="stylesheet" href="{% static 'css/components.css' %}">
 {% endblock %}
 
 {% block content %}
 <div class="auth-wrap">
-    <div class="card auth-card">
-        <div class="page-title" style="font-size:19px;">다시 오셨네요</div>
-        <div class="page-sub">계획을 이어서 확인해보세요</div>
+  <div class="card auth-card">
+    <div class="page-title-sm">다시 오셨네요</div>
+    <div class="page-sub">계획을 이어서 확인해보세요</div>
 
-        {% if form.non_field_errors %}
-        <div class="form-error-box">{{ form.non_field_errors|striptags }}</div>
-        {% endif %}
+    {% if form.non_field_errors %}
+      <div class="form-error-box">{{ form.non_field_errors|striptags }}</div>
+    {% endif %}
 
-        <form method="post" novalidate>
-            {% csrf_token %}
-            {% if request.GET.next %}<input type="hidden" name="next" value="{{ request.GET.next }}">{% endif %}
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% if request.GET.next %}<input type="hidden" name="next" value="{{ request.GET.next }}">{% endif %}
 
-            <div class="form-group">
-                <label class="form-label" for="{{ form.username.id_for_label }}">{{ form.username.label }}</label>
-                {{ form.username }}
-            </div>
+      <div class="form-group">
+        <label class="form-label" for="{{ form.username.id_for_label }}">{{ form.username.label }}</label>
+        {{ form.username }}
+      </div>
 
-            <div class="form-group">
-                <label class="form-label" for="{{ form.password.id_for_label }}">비밀번호</label>
-                {{ form.password }}
-            </div>
+      <div class="form-group">
+        <label class="form-label" for="{{ form.password.id_for_label }}">비밀번호</label>
+        {{ form.password }}
+      </div>
 
-            <button type="submit" class="btn btn-brand btn-block">로그인</button>
-        </form>
+      <button type="submit" class="btn btn-brand btn-block">로그인</button>
+    </form>
 
-        <div class="auth-link">
-            계정이 없나요? <a href="{% url 'accounts:signup' %}">회원가입</a>
-        </div>
+    <div class="auth-link">
+      계정이 없나요? <a href="{% url 'accounts:signup' %}">회원가입</a>
     </div>
+  </div>
 </div>
 {% endblock %}
