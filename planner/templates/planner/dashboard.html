@@ -101,12 +101,12 @@
               <div class="kpi-value">{{ overall.max_minutes }}<small>분</small></div>
             </div>
             <div>
-              <div class="kpi-label">판정 기준 부족</div>
-              <div class="kpi-value {% if overall.shortage_minutes %}warn{% endif %}">
-                {% if overall.shortage_minutes %}-{{ overall.shortage_minutes }}{% else %}0{% endif %}<small>분</small>
+              <div class="kpi-label">가능까지 부족</div>
+              <div class="kpi-value {% if overall.max_shortage_minutes %}warn{% endif %}">
+                {% if overall.max_shortage_minutes %}-{{ overall.max_shortage_minutes }}{% else %}0{% endif %}<small>분</small>
               </div>
               {% if overall.daily_extra_minutes %}
-                <div class="kpi-sub">남은 {{ remaining_days }}일 동안 하루 <b class="num">+{{ overall.daily_extra_minutes }}분</b>이면 해소</div>
+                <div class="kpi-sub">남은 {{ remaining_days }}일 동안 하루 <b class="num">+{{ overall.daily_extra_minutes }}분</b>이면 가능</div>
               {% endif %}
             </div>
           </div>
