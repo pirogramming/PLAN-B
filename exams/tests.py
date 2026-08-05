@@ -3,7 +3,8 @@ import io
 import pypdf
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.db import connection
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -29,6 +30,7 @@ from exams.services.analysis_orchestrator import (
 )
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
 User = get_user_model()
@@ -253,6 +255,102 @@ class MaterialExtractTests(TestCase):
         self.assertEqual(material.status, MaterialStatus.FAILED)
         self.assertIn("스캔", material.error_message)
 
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_success_resets_stale_analysis_state(self, mock_extract):
+        """
+        이전 텍스트 기준으로 FAILED였던 AI 분석 상태가, 재추출 성공(=새 텍스트로
+        교체) 후에는 PENDING/재시도횟수 0으로 초기화되어야 한다 (새 텍스트니까
+        최초 분석부터 다시 시작할 수 있어야 함).
+        """
+        mock_extract.return_value = "새로 추출된 텍스트입니다."
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "예전 텍스트"
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_error_message = "예전 텍스트 기준 실패 사유"
+        material.analysis_retry_count = 1
+        material.save(update_fields=[
+            "status", "extracted_text", "analysis_status",
+            "analysis_error_message", "analysis_retry_count",
+        ])
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(material.extracted_text, "새로 추출된 텍스트입니다.")
+        self.assertEqual(material.analysis_status, MaterialStatus.PENDING)
+        self.assertIsNone(material.analysis_error_message)
+        self.assertEqual(material.analysis_retry_count, 0)
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_success_keeps_analysis_state_when_text_unchanged(self, mock_extract):
+        """
+        리뷰 반영: 재추출 결과가 기존 텍스트와 완전히 같다면(예: 같은 PDF를 실수로
+        다시 업로드), AI 분석 상태를 초기화하면 안 된다. 무조건 초기화하면 재시도
+        횟수를 이미 다 쓴 자료도 같은 PDF를 다시 추출하는 것만으로
+        analysis_retry_count가 0으로 리셋되어 재시도 제한을 우회할 수 있다.
+        """
+        mock_extract.return_value = "변하지 않는 텍스트입니다."
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "변하지 않는 텍스트입니다."
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_error_message = "예전 실패 사유"
+        material.analysis_retry_count = MAX_RETRY_COUNT
+        material.save(update_fields=[
+            "status", "extracted_text", "analysis_status",
+            "analysis_error_message", "analysis_retry_count",
+        ])
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(material.extracted_text, "변하지 않는 텍스트입니다.")
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_error_message, "예전 실패 사유")
+        self.assertEqual(material.analysis_retry_count, MAX_RETRY_COUNT)
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_blocked_when_analysis_processing(self, mock_extract):
+        """
+        AI 분석이 진행 중인 자료는 재추출하면 안 된다 - 어느 텍스트 기준으로
+        분석 중인지 꼬일 수 있기 때문 (analysis_orchestrator 쪽 재검증과 짝을 이룸).
+        """
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "기존 추출 텍스트"
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.save(update_fields=["status", "extracted_text", "analysis_status"])
+
+        response = self.client.post(
+            reverse('exams:material_extract', args=[material.id]), follow=True
+        )
+
+        material.refresh_from_db()
+        mock_extract.assert_not_called()
+        self.assertEqual(material.extracted_text, "기존 추출 텍스트")
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("AI 분석이 진행 중인" in str(m) for m in messages_list))
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_blocked_when_analysis_completed(self, mock_extract):
+        """AI 분석이 이미 끝난 자료도 재추출하면 안 된다 (결과가 옛 텍스트 기준이 됨)."""
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "기존 추출 텍스트"
+        material.analysis_status = MaterialStatus.COMPLETED
+        material.save(update_fields=["status", "extracted_text", "analysis_status"])
+
+        response = self.client.post(
+            reverse('exams:material_extract', args=[material.id]), follow=True
+        )
+
+        material.refresh_from_db()
+        mock_extract.assert_not_called()
+        self.assertEqual(material.extracted_text, "기존 추출 텍스트")
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("이미 AI 분석이 완료된" in str(m) for m in messages_list))
+
 class StudyTaskCreateTests(TestCase):
     """직접 추가한 학습 작업의 예상시간 계산"""
 
@@ -373,6 +471,7 @@ class AnalysisOrchestratorTestCase(TestCase):
     def _make_material(self, text="1장 개념 정리"):
         return StudyMaterial.objects.create(
             exam=self.exam, title="테스트 자료", extracted_text=text,
+            status=MaterialStatus.COMPLETED,
         )
 
     # ---------- 최초 분석 ----------
@@ -406,7 +505,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(material.status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.error_message)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_ai_analysis_failure_sets_failed_and_rolls_back(self, mock_analyze):
         mock_analyze.side_effect = AICallFailedError("AI 서버 연결 실패")
         material = self._make_material()
@@ -435,7 +534,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertNotIn("예상시간 계산 중 알 수 없는 오류", material.analysis_error_message or "")
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_empty_result_is_treated_as_failure(self, mock_analyze):
         mock_analyze.return_value = []
         material = self._make_material()
@@ -484,7 +583,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         material.save(update_fields=["analysis_status", "analysis_retry_count"])
 
         # 1차 재시도는 실패시킨다
-        with patch("exams.services.analysis_orchestrator.analyze_study_material") as mock_analyze:
+        with patch("exams.services.analysis_orchestrator.fetch_extracted_tasks") as mock_analyze:
             mock_analyze.side_effect = AICallFailedError("1차 재시도 실패")
             with self.assertRaises(AICallFailedError):
                 retry_analysis(material)
@@ -557,6 +656,46 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(result["error_message"], "네트워크 오류")
         self.assertEqual(result["retry_count"], 1)
         self.assertEqual(result["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    # ---------- 추출 시작과 분석 시작의 경쟁 상태 (리뷰 반영) ----------
+
+    def test_initial_analysis_blocked_when_extraction_wins_race_after_status_check(self):
+        """
+        View가 material.status==COMPLETED를 확인한 시점(이 material 객체는 메모리에
+        COMPLETED로 남아있음) 직후, DB에서는 PDF 재추출이 먼저 status=PROCESSING을
+        차지했다고 가정한다. _start_processing()은 인메모리 값이 아니라 DB를 다시
+        조건부로 확인하므로, 이 경우 분석 시작 자체가 원자적으로 실패해야 한다.
+        """
+        material = self._make_material()
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)  # View가 이미 확인한 상태
+
+        # PDF 재추출이 먼저 DB에서 PROCESSING을 차지했다고 가정
+        # (material 인메모리 객체는 건드리지 않아 "직후" 시점을 그대로 재현)
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PENDING)  # 시작조차 안 됨
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)  # 추출 상태는 그대로
+
+    def test_retry_blocked_when_extraction_wins_race_after_status_check(self):
+        """재시도 경로에서도 동일한 경쟁 상태가 원자적으로 막혀야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = 0
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_retry_count, 0)  # 증가 안 함
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
 
 
 class MaterialAnalysisViewTestCase(TestCase):
@@ -668,8 +807,8 @@ class MaterialAnalysisViewTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["status"], MaterialStatus.FAILED)
-        self.assertEqual(data["error_message"], "네트워크 오류")
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["analysis_error_message"], "네트워크 오류")
         self.assertEqual(data["retry_count"], 1)
         self.assertEqual(data["retry_remaining"], 1)
 
@@ -677,6 +816,115 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.client.force_login(self.other)
         response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
         self.assertEqual(response.status_code, 404)
+
+    # ---------- stage/failed_stage 조합 (추출 상태 + 분석 상태 통합) ----------
+
+    def _get_stage(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
+        return response.json()
+
+    def test_stage_pending_when_nothing_started(self):
+        self.material.status = MaterialStatus.PENDING
+        self.material.analysis_status = MaterialStatus.PENDING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "PENDING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_extracting_when_extraction_processing(self):
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_extraction_when_extraction_failed(self):
+        self.material.status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "EXTRACTION")
+
+    def test_stage_analyzing_when_analysis_processing(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "ANALYZING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_analysis_when_analysis_failed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "ANALYSIS")
+
+    def test_stage_completed_when_analysis_completed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.COMPLETED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "COMPLETED")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_prioritizes_extraction_over_stale_analysis_failure(self):
+        """
+        재추출 중(status=PROCESSING)인데 이전 분석 실패 기록(analysis_status=FAILED)이
+        같이 남아있는 경우, 추출 상태를 우선해서 EXTRACTING으로 보여줘야 한다
+        (이전 분석 실패가 잘못 노출되면 안 됨).
+        """
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_response_still_includes_existing_fields(self):
+        """stage/failed_stage 추가가 retry_count/retry_remaining, 그리고
+        analysis_status/analysis_error_message 값을 안 건드리는지 확인."""
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_error_message = "테스트 실패 사유"
+        self.material.analysis_retry_count = 1
+        self.material.save(update_fields=[
+            "analysis_status", "analysis_error_message", "analysis_retry_count",
+        ])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["analysis_error_message"], "테스트 실패 사유")
+        self.assertEqual(data["retry_count"], 1)
+        self.assertEqual(data["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    def test_stage_response_includes_extraction_fields(self):
+        """extraction_status/extraction_error_message가 material.status/
+        error_message 값을 그대로 반영하는지 확인 (BE2와 합의한 필드명)."""
+        self.material.status = MaterialStatus.FAILED
+        self.material.error_message = "PDF 추출 실패 사유"
+        self.material.save(update_fields=["status", "error_message"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["extraction_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["extraction_error_message"], "PDF 추출 실패 사유")
 
     # ---------- 예기치 못한 파이프라인 예외 처리 (PR #33 리뷰 반영) ----------
 
@@ -820,3 +1068,170 @@ startxref
             extract_text_from_pdf(dummy_file)
 
         self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+
+class AITransactionIsolationTestCase(TransactionTestCase):
+    """
+    이슈: task_extractor.analyze_study_material()가 통째로 @transaction.atomic이라,
+    그 안에서 벌어지는 AI 네트워크 호출이 DB 트랜잭션을 물고 있는 채로 실행되던 문제.
+
+    fetch_extracted_tasks()(네트워크, 트랜잭션 없음)와 save_extracted_tasks()/
+    _save_tasks_with_estimates()(DB 쓰기, 짧은 트랜잭션)로 분리한 뒤,
+    AI 호출 시점에 실제로 열려있는 DB 트랜잭션이 없는지 직접 검증한다.
+
+    TestCase가 아니라 TransactionTestCase를 쓰는 이유: 일반 TestCase는 테스트
+    하나하나를 자체적으로 큰 트랜잭션으로 감싸서 롤백하기 때문에, 그 안에서는
+    connection.in_atomic_block이 항상 True로 나와 이 검증 자체가 무의미해진다.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tx_tester@example.com", email="tx_tester@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="트랜잭션 격리 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="테스트과목", exam_date=datetime.date(2026, 8, 18),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", extracted_text="1장 개념 정리",
+            status=MaterialStatus.COMPLETED,
+        )
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_call_ai_runs_without_open_transaction(self):
+        observed_in_atomic_block = []
+
+        def spy_call_ai(prompt):
+            # 이 테스트의 목적은 트랜잭션 유무 확인이지 실제 AI 응답 확인이 아니므로,
+            # 테스트 실행 환경에서 AI_MOCK_MODE가 어쩌다 False로 덮어써져도 실제
+            # Gemini API를 호출하지 않도록 고정 응답을 직접 반환한다.
+            observed_in_atomic_block.append(connection.in_atomic_block)
+            return task_extractor._MOCK_RESPONSE
+
+        with patch("exams.services.task_extractor._call_ai", side_effect=spy_call_ai):
+            analyze_and_estimate(self.material)
+
+        self.assertEqual(len(observed_in_atomic_block), 1)
+        self.assertFalse(
+            observed_in_atomic_block[0],
+            "AI 네트워크 호출(_call_ai) 시점에 DB 트랜잭션이 열려있으면 안 된다.",
+        )
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_studytask_creation_still_rolls_back_on_db_failure(self):
+        """
+        네트워크 호출을 트랜잭션 밖으로 뺐어도, DB 저장 단계 자체의 원자성은
+        여전히 보장되어야 한다 (StudyTask 생성 + 예상시간 반영이 한 단위로 롤백).
+        """
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_stale_extracted_text_discards_result(self):
+        """
+        AI 호출 시작 이후 저장 시점 사이에 extracted_text가 바뀌면(예: 다른 요청이
+        PDF를 재추출), 그 사이 받은 AI 결과는 저장하지 않고 버려야 한다.
+        """
+        def fake_fetch(exam, extracted_text):
+            # AI 응답을 기다리는 동안 다른 요청이 텍스트를 바꿔치기했다고 가정
+            StudyMaterial.objects.filter(pk=self.material.pk).update(
+                extracted_text="다른 요청이 재추출한 새 텍스트"
+            )
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        # 텍스트 자체는 다른 요청이 바꾼 값 그대로 남아있어야 한다 (이 실행이 덮어쓰면 안 됨)
+        self.assertEqual(self.material.extracted_text, "다른 요청이 재추출한 새 텍스트")
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_stale_when_extraction_reprocessing_even_if_text_unchanged(self):
+        """
+        PDF 재추출이 "시작"만 되고(status=PROCESSING) 아직 extracted_text 자체는
+        안 바뀐 시점에도, 저장을 포기해야 한다 (텍스트 비교만으로는 이 시점을
+        걸러낼 수 없어서 status도 별도로 확인해야 하는 케이스).
+        """
+        original_text = self.material.extracted_text
+
+        def fake_fetch(exam, extracted_text):
+            # 재추출이 막 시작됐다고 가정: status만 PROCESSING으로 바뀌고
+            # extracted_text는 아직 원래 값 그대로인 상태
+            StudyMaterial.objects.filter(pk=self.material.pk).update(
+                status=MaterialStatus.PROCESSING
+            )
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        # 텍스트 자체는 그대로였다는 것도 재확인 (이게 이 테스트의 핵심 포인트)
+        self.assertEqual(self.material.extracted_text, original_text)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_speed_factor_uses_latest_value_at_save_time(self):
+        """
+        예상시간 계산은 AI 호출 전에 로드해둔 오래된 exam 객체가 아니라, 저장
+        시점에 다시 조회한 최신 speed_factor를 사용해야 한다.
+        """
+        def fake_fetch(exam, extracted_text):
+            # AI 응답을 기다리는 동안 progress 기록으로 speed_factor가 갱신됐다고 가정
+            Exam.objects.filter(pk=self.exam.pk).update(speed_factor=2.0)
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            tasks = analyze_and_estimate(self.material)
+
+        from planner.services.time_estimator import estimate_task_minutes
+
+        first_task = tasks[0]
+        expected_min, expected_max = estimate_task_minutes(
+            task_type=first_task.task_type,
+            difficulty=first_task.difficulty,
+            speed_factor=2.0,  # 저장 시점의 최신값
+        )
+        self.assertEqual(first_task.estimated_min_minutes, expected_min)
+        self.assertEqual(first_task.estimated_max_minutes, expected_max)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_existing_unconfirmed_task_preserved_when_save_rolls_back(self):
+        """
+        save_extracted_tasks()는 기존 미확정 작업을 삭제하고 새로 만드는데, 그
+        직후(예상시간 계산) 실패로 트랜잭션이 롤백되면 기존 작업 삭제도 함께
+        되돌려져서 그대로 남아있어야 한다.
+        """
+        old_task = StudyTask.objects.create(
+            exam=self.exam, study_material=self.material, title="기존 작업",
+            task_type="concept", importance="medium", depth="basic",
+            difficulty="normal", estimated_min_minutes=10, estimated_max_minutes=20,
+            order=1,
+        )
+
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertTrue(
+            StudyTask.objects.filter(pk=old_task.pk, title="기존 작업").exists()
+        )
