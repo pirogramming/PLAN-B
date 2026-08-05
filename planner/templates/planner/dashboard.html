@@ -65,7 +65,6 @@
                지금 계획은 <b>{{ overall.status_label }}</b> 상태 그대로입니다.</p>
           </div>
           <div class="actions">
-            {# TODO: 복구안 비교 화면 URL 로 교체 (pending_recovery.group_id 사용) #}
             <a class="btn btn-accent btn-sm" href="#">복구안 보기</a>
           </div>
         </div>
@@ -82,7 +81,7 @@
               </span>
             </div>
             <span class="num" style="font-size:11.5px;color:var(--neutral7)">
-              {{ overall.calculated_at|date:"n.j H:i" }} 기준
+              {{ overall.viewed_at|date:"n.j H:i" }} 조회 기준
             </span>
           </div>
 
@@ -102,27 +101,20 @@
               <div class="kpi-value">{{ overall.max_minutes }}<small>분</small></div>
             </div>
             <div>
-              <div class="kpi-label">최대 기준 부족</div>
+              <div class="kpi-label">판정 기준 부족</div>
               <div class="kpi-value {% if overall.shortage_minutes %}warn{% endif %}">
                 {% if overall.shortage_minutes %}-{{ overall.shortage_minutes }}{% else %}0{% endif %}<small>분</small>
               </div>
               {% if overall.daily_extra_minutes %}
-                <div class="kpi-sub">하루 평균 <b class="num">+{{ overall.daily_extra_minutes }}분</b>이면 해소</div>
+                <div class="kpi-sub">남은 {{ remaining_days }}일 동안 하루 <b class="num">+{{ overall.daily_extra_minutes }}분</b>이면 해소</div>
               {% endif %}
             </div>
           </div>
         </div>
       </div>
 
-      {% comment %}
-        과목 목록
-        과목별 가용시간은 ExamPeriod 단위라 배분 정책 없이는 계산할 수 없습니다.
-        그래서 과목별 Fit Bar와 판정 배지는 넣지 않고
-        시험일 / 남은 예상시간 / 남은 작업 수만 보여줍니다.
-      {% endcomment %}
       <div class="section-head">
         <h3>과목</h3>
-        {# TODO: {% url 'planner:calendar' %} 로 교체 #}
         <a class="btn btn-ghost btn-sm" href="#">
           전체 계획 보기<svg class="ico"><use href="#i-chevron-right"/></svg>
         </a>
@@ -132,7 +124,7 @@
         {% for s in subject_summary %}
           <div class="subject-card">
             <span class="dday {% if s.is_near %}near{% endif %}">D-{{ s.d_day }}</span>
-            <div style="flex:1;min-width:0">
+            <div class="info">
               <div class="name">{{ s.subject_name }}</div>
               <div class="date">시험 {{ s.exam_date|date:"n월 j일" }}</div>
             </div>
@@ -148,7 +140,6 @@
         {% endfor %}
       </div>
 
-      {# ---- 진행 상황 ---- #}
       <div class="section-head">
         <h3>진행 상황</h3>
         <span class="note">완료 환산 기준</span>
