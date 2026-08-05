@@ -207,6 +207,7 @@ def dashboard(request):
     today = timezone.localdate()
     today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today).first()
     today_count = today_plan.items.count() if today_plan else 0
+    today_minutes = today_plan.planned_minutes if today_plan else 0
 
     pending_recovery_item = None
     if today_plan and today_plan.finalized_at:
@@ -221,8 +222,12 @@ def dashboard(request):
         'has_plan': True,
         'today': today,
         'today_count': today_count,
+        'today_minutes': today_minutes,
         'pending_recovery': (
-            {'group_id': pending_recovery_item.recovery_group_id, 'created_at': pending_recovery_item.created_at}
+            {
+                'recovery_group_id': pending_recovery_item.recovery_group_id,
+                'created_at': pending_recovery_item.created_at,
+            }
             if pending_recovery_item else None
         ),
     }
