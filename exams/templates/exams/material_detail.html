@@ -15,7 +15,7 @@
   <div class="crumb-text">
     {{ material.exam.subject_name }} &nbsp;›&nbsp; {{ material.title }}
   </div>
-  <div class="page-title" style="font-size:19px;">
+  <div class="page-title-sm">
     {{ material.title }}
   </div>
   <div class="page-sub">
@@ -23,7 +23,7 @@
   </div>
 
   {% if material.material_type == 'pdf' %}
-  <div class="card" style="margin-bottom:14px;" id="extract-card">
+  <div class="card" style="margin-bottom:14px;">
     <div class="section-label">텍스트 추출</div>
 
     {% if material.status == 'completed' %}
@@ -56,7 +56,7 @@
   {% endif %}
 
   {% if material.status == 'completed' %}
-  <div class="card" id="analyze-card">
+  <div class="card">
     <div class="section-label">AI 학습 작업 분석</div>
 
     {% if material.analysis_status == 'completed' %}
@@ -92,7 +92,7 @@
   {% endif %}
 
   <form method="post" action="{% url 'exams:material_delete' material.id %}"
-    onsubmit="return confirm('이 학습자료를 삭제할까요?');" style="margin-top:14px;">
+        onsubmit="return confirm('이 학습자료를 삭제할까요?');" style="margin-top:14px;">
     {% csrf_token %}
     <button type="submit" class="btn btn-ghost btn-block delete-material-btn">
       학습자료 삭제
@@ -106,86 +106,105 @@
     <div class="auto-loading-text" id="auto-loading-text">
       처리 중이에요
     </div>
-    <div class="auto-loading-sub">잠시만 기다려주세요</div>
+    <div class="auto-loading-sub" id="auto-loading-sub">
+      잠시만 기다려주세요
+    </div>
+    <div id="auto-loading-stuck" class="auto-loading-stuck">
+      <div class="auto-loading-stuck-text">
+        생각보다 오래 걸리고 있어요.
+        백엔드 처리가 아직 안 끝났을 수 있어요.
+      </div>
+      <button type="button" class="btn btn-ghost" onclick="location.reload()">
+        새로고침
+      </button>
+    </div>
   </div>
 </div>
 
-<form id="auto-extract-form" method="post" action="{% url 'exams:material_extract' material.id %}"
-  class="hidden-auto-form">
+<form id="auto-extract-form" method="post"
+      action="{% url 'exams:material_extract' material.id %}"
+      class="hidden-auto-form">
   {% csrf_token %}
 </form>
 
-<form id="auto-analyze-form" method="post" action="{% url 'exams:material_analyze' material.id %}"
-  class="hidden-auto-form">
+<form id="auto-analyze-form" method="post"
+      action="{% url 'exams:material_analyze' material.id %}"
+      class="hidden-auto-form">
   {% csrf_token %}
 </form>
 
 <script>
-  var STATUS_URL = "{% url 'exams:material_analysis_status' material.id %}";
-  var TASK_REVIEW_URL = "{% url 'exams:task_review' material.exam.id %}";
-  var fired = false;
+var MATERIAL_TYPE = "{{ material.material_type }}";
+var EXTRACT_STATUS = "{{ material.status }}";
+var ANALYSIS_STATUS = "{{ material.analysis_status }}";
+var STATUS_URL = "{% url 'exams:material_analysis_status' material.id %}";
+var TASK_REVIEW_URL = "{% url 'exams:task_review' material.exam.id %}";
+var fired = false;
+var stuckTimer = null;
 
-  function showAutoLoading(text) {
-    document.getElementById('auto-loading-text').textContent = text;
-    document.getElementById('auto-loading-overlay').classList.add('open');
+function showAutoLoading(text) {
+  document.getElementById('auto-loading-text').textContent = text;
+  document.getElementById('auto-loading-overlay').classList.add('open');
+
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+  }
+  stuckTimer = setTimeout(function () {
+    document.getElementById('auto-loading-stuck').classList.add('show');
+  }, 15000);
+}
+
+function scheduleNextCheck() {
+  setTimeout(checkStatusAndAct, 1500);
+}
+
+function checkStatusAndAct() {
+  fetch(STATUS_URL)
+    .then(function (res) { return res.json(); })
+    .then(handleStatus)
+    .catch(function () {
+      document.getElementById('auto-loading-stuck').classList.add('show');
+    });
+}
+
+function handleStatus(data) {
+  if (data.stage === 'COMPLETED') {
+    window.location.href = TASK_REVIEW_URL;
+    return;
+  }
+  if (data.stage === 'FAILED') {
+    location.reload();
+    return;
+  }
+  if (data.stage === 'EXTRACTING') {
+    showAutoLoading('PDF 텍스트를 추출하고 있어요');
+    scheduleNextCheck();
+    return;
+  }
+  if (data.stage === 'ANALYZING') {
+    showAutoLoading('AI 학습 작업을 분석하고 있어요');
+    scheduleNextCheck();
+    return;
   }
 
-  function scheduleNextCheck() {
-    setTimeout(checkStatusAndAct, 1500);
+  if (fired) {
+    return;
   }
 
-  function checkStatusAndAct() {
-    fetch(STATUS_URL)
-      .then(function (res) { return res.json(); })
-      .then(handleStatus)
-      .catch(function () {
-        /* 상태 조회 자체가 실패하면 그냥 멈춤 (자동 재시도 안 함) */
-      });
+  if (data.extraction_status === 'PENDING') {
+    fired = true;
+    showAutoLoading('PDF 텍스트를 추출하고 있어요');
+    document.getElementById('auto-extract-form').submit();
+    return;
   }
-
-  function handleStatus(data) {
-    if (data.stage === 'COMPLETED') {
-      window.location.href = TASK_REVIEW_URL;
-      return;
-    }
-
-    if (data.stage === 'FAILED') {
-      location.reload();
-      return;
-    }
-
-    if (data.stage === 'EXTRACTING') {
-      showAutoLoading('PDF 텍스트를 추출하고 있어요');
-      scheduleNextCheck();
-      return;
-    }
-
-    if (data.stage === 'ANALYZING') {
-      showAutoLoading('AI 학습 작업을 분석하고 있어요');
-      scheduleNextCheck();
-      return;
-    }
-
-    /* stage === 'PENDING' : 아직 아무것도 안 시작됨 → 한 번만 자동 호출 */
-    if (fired) {
-      return;
-    }
-
-    if (data.extraction_status === 'PENDING') {
-      fired = true;
-      showAutoLoading('PDF 텍스트를 추출하고 있어요');
-      document.getElementById('auto-extract-form').submit();
-      return;
-    }
-
-    if (data.analysis_status === 'PENDING') {
-      fired = true;
-      showAutoLoading('AI 학습 작업을 분석하고 있어요');
-      document.getElementById('auto-analyze-form').submit();
-      return;
-    }
+  if (data.analysis_status === 'PENDING') {
+    fired = true;
+    showAutoLoading('AI 학습 작업을 분석하고 있어요');
+    document.getElementById('auto-analyze-form').submit();
+    return;
   }
+}
 
-  document.addEventListener('DOMContentLoaded', checkStatusAndAct);
+document.addEventListener('DOMContentLoaded', checkStatusAndAct);
 </script>
 {% endblock %}

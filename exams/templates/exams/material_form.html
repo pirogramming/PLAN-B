@@ -58,8 +58,15 @@
         {{ form.material_type }}
       </div>
 
+      {% if form.file.errors %}
+      <div class="form-error-box material-upload-error">
+        {{ form.file.errors|striptags }}
+      </div>
+      {% endif %}
+
       <div id="pdf-panel" class="material-upload-panel">
-        <label for="{{ form.file.id_for_label }}" class="material-upload-box">
+        <label for="{{ form.file.id_for_label }}"
+               class="material-upload-box{% if form.file.errors %} error{% endif %}">
           <div class="material-upload-icon">＋</div>
           <div class="material-upload-text">
             파일을 끌어다 놓거나 클릭해서 업로드
@@ -67,13 +74,8 @@
         </label>
         {{ form.file }}
         <div class="material-upload-hint">
-          텍스트 추출이 가능한 PDF만 지원돼요
+          텍스트 추출이 가능한 PDF만 지원돼요 (최대 10MB)
         </div>
-        {% if form.file.errors %}
-        <div class="field-error">
-          {{ form.file.errors|striptags }}
-        </div>
-        {% endif %}
       </div>
 
       <div id="text-panel" class="material-upload-panel" style="display:none;">
