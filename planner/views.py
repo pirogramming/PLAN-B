@@ -3,7 +3,8 @@ from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
-
+from django.urls import reverse
+from planner.models import RecoveryPlan
 from exams.models import ExamPeriod, StudyTask, AvailableTime
 from planner.models import DailyPlan
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE
@@ -164,3 +165,65 @@ def plan_complete(request, period_id):
         'total_planned_minutes': total_planned_minutes,
     }
     return render(request, 'planner/plan_complete.html', context)
+
+@login_required
+@require_http_methods(["GET"])
+def dashboard(request):
+    """
+    1단계 최소 버전: 시험기간 존재 여부, 계획 존재 여부, 오늘 할 일 개수만 보여준다.
+    Fit Bar/과목별 요약/진행률 집계는 #51 머지 후 데이터 파이프라인이 갖춰지면 추가한다.
+    """
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=request.user, status='active')
+        .order_by('-created_at')
+        .first()
+    )
+
+    if exam_period is None:
+        return render(request, 'planner/dashboard.html', {'exam_period': None})
+
+    has_plan = DailyPlan.objects.filter(exam_period=exam_period).exists()
+
+    if not has_plan:
+        is_ready, _ = _validate_task_readiness(exam_period)
+        if is_ready:
+            next_step_label, next_step_url = "계획 생성하기", reverse(
+                'planner:feasibility', kwargs={'period_id': exam_period.id}
+            )
+        else:
+            next_step_label, next_step_url = "학습 작업 확인하기", reverse(
+                'exams:period_detail', kwargs={'period_id': exam_period.id}
+            )
+
+        context = {
+            'exam_period': exam_period,
+            'has_plan': False,
+            'next_step_label': next_step_label,
+            'next_step_url': next_step_url,
+        }
+        return render(request, 'planner/dashboard.html', context)
+
+    today = timezone.localdate()
+    today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today).first()
+    today_count = today_plan.items.count() if today_plan else 0
+
+    pending_recovery_item = None
+    if today_plan and today_plan.finalized_at:
+        pending_recovery_item = (
+            RecoveryPlan.objects
+            .filter(source_daily_plan=today_plan, status='pending')
+            .first()
+        )
+
+    context = {
+        'exam_period': exam_period,
+        'has_plan': True,
+        'today': today,
+        'today_count': today_count,
+        'pending_recovery': (
+            {'group_id': pending_recovery_item.recovery_group_id, 'created_at': pending_recovery_item.created_at}
+            if pending_recovery_item else None
+        ),
+    }
+    return render(request, 'planner/dashboard.html', context)
