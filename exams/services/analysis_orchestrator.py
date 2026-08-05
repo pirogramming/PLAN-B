@@ -46,11 +46,43 @@ BE3 담당 - AI 분석과 예상시간 계산을 이어붙이는 오케스트레
   - 그 외 예기치 못한 예외: 상세 내용은 로그에만 남기고, 사용자용 메시지는
     일반적인 문구로 저장 (내부 구현 노출 방지)
 
-알려진 한계 (이번 PR 범위 밖, 후속 리팩터링 이슈로 분리):
-- task_extractor.analyze_study_material()가 @transaction.atomic이라, 그 안에서
-  이뤄지는 AI 네트워크 호출이 DB 트랜잭션을 물고 있는 상태로 실행된다.
-  외부 네트워크 호출을 트랜잭션 안에 두는 것은 이상적이지 않지만, task_extractor
-  구조 자체를 바꿔야 하는 사안이라 이 PR에서는 다루지 않는다.
+해결된 이슈:
+- (과거) task_extractor.analyze_study_material()가 @transaction.atomic이라 그 안의
+  AI 네트워크 호출이 DB 트랜잭션을 물고 있었음 -> task_extractor를
+  fetch_extracted_tasks()(네트워크, 트랜잭션 없음)와 save_extracted_tasks()(DB 쓰기,
+  짧은 트랜잭션)로 분리했고, 이 파일도 analyze_study_material() 대신
+  fetch_extracted_tasks()를 직접 호출해서 AI 호출이 트랜잭션 밖에서 실행되도록 함.
+
+AI 호출과 DB 저장 사이의 입력 변경 경쟁 상태 (리뷰 반영):
+- AI 네트워크 호출을 트랜잭션 밖으로 뺀 대가로, "AI 호출 시작 ~ 결과 저장" 사이에
+  StudyMaterial이 바뀔 수 있는 창(window)이 생겼다 (예: 다른 요청이 PDF를 다시
+  추출해서 extracted_text가 바뀌는 경우). 이 경우를 대비해 _save_tasks_with_estimates()가
+  저장 직전에 StudyMaterial을 다시 조회해서 다음을 재검증한다.
+    1. analysis_status가 여전히 PROCESSING인지
+    2. status(텍스트 추출 상태)가 COMPLETED인지 - PDF 재추출이 진행 중(status가
+       PROCESSING/FAILED/PENDING으로 바뀜)이면, 아직 extracted_text 자체는 안
+       바뀌었더라도 곧 바뀔 수 있는 불안정한 상태이므로 저장을 포기한다. (텍스트
+       비교만으로는 "재추출이 시작됐지만 아직 안 끝난" 시점을 못 걸러내기 때문에
+       별도로 확인이 필요했다.)
+    3. extracted_text가 AI 호출 당시와 동일한지 (analyzed_text로 전달받아 비교)
+  하나라도 어긋나면 StaleAnalysisRequestError를 던지고 아무것도 저장하지 않는다.
+- 같은 이유로 예상시간 계산에 쓰는 exam.speed_factor도, AI 호출 전에 로드해둔 오래된
+  객체가 아니라 저장 시점에 다시 조회한 최신 값을 사용한다.
+- material_extract()(exams/views.py, BE2 담당) 쪽에도 analysis_status가 PROCESSING/
+  COMPLETED인 자료의 재추출을 조건부 UPDATE로 원자적으로 막는 방어를 추가했다
+  (Python에서 조회 후 검사하는 방식은 그 자체로 동시 요청 사이의 경쟁 상태가 남는다).
+
+PDF 추출 시작과 AI 분석 시작이 동시에 성공하는 경쟁 상태 (리뷰 반영):
+- 위 저장 시점 재검증만으로는 못 막는 경우가 있었다: View가 material.status==
+  COMPLETED를 파이썬에서 확인한 직후, PDF 재추출 요청이 먼저 DB에서 status=
+  PROCESSING을 차지하고, 그 다음 이 파일의 _start_processing()이 analysis_status만
+  확인하고 PROCESSING 전이에 성공해버리는 경우다. 이러면 추출과 분석이 동시에
+  진행되다가, 나중에 _finish_failure()가 조건 없이 analysis_status=FAILED를 저장하면서
+  재추출 성공 후 초기화된 PENDING 상태를 덮어쓸 수 있었다.
+- 해결: _start_processing()의 조건부 UPDATE에도 status=MaterialStatus.COMPLETED
+  조건을 추가했다. material_extract()의 조건부 UPDATE(analysis_status가 PROCESSING/
+  COMPLETED면 차단)와 서로 대칭을 이루게 되어, 두 요청 중 DB에 먼저 도달해 조건부
+  UPDATE를 통과한 쪽만 성공하고 나머지는 원자적으로 실패한다.
 """
 from __future__ import annotations
 
@@ -62,7 +94,7 @@ from django.db.models import F
 from core.choices import MaterialStatus
 from core.exceptions import AIAnalysisError, AIResponseValidationError
 from exams.models import StudyMaterial, StudyTask
-from exams.services.task_extractor import analyze_study_material
+from exams.services.task_extractor import fetch_extracted_tasks, save_extracted_tasks
 from planner.services.time_estimator import estimate_task_minutes
 
 logger = logging.getLogger(__name__)
@@ -82,6 +114,15 @@ class AnalysisNotSupportedError(Exception):
     """COMPLETED 상태처럼, 정책상 이 상태에서는 (재)분석을 지원하지 않을 때"""
 
 
+class StaleAnalysisRequestError(Exception):
+    """
+    AI 호출 시작 이후 저장 시점까지 사이에 StudyMaterial이 바뀌어서
+    (analysis_status가 더 이상 PROCESSING이 아니거나, extracted_text가 AI 호출
+    당시와 달라져서) 지금 들고 있는 AI 결과를 더 이상 신뢰할 수 없을 때.
+    이 경우 결과를 저장하지 않고 조용히 포기한다.
+    """
+
+
 class AnalysisPipelineError(Exception):
     """
     분석 파이프라인(task_extractor/time_estimator/bulk_update 등)에서
@@ -96,26 +137,99 @@ class AnalysisPipelineError(Exception):
     """
 
 
-@transaction.atomic
 def _run_analysis_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
     AI 분석(task_extractor)과 예상시간 계산(time_estimator)을 순서대로 실행한다.
     analysis_status는 건드리지 않는다 (상태 관리는 호출하는 쪽이 담당).
 
     처리 순서:
-        1. analyze_study_material()로 StudyTask 생성 (estimated_min/max_minutes=0)
-        2. 생성된 각 StudyTask에 대해 BE1의 estimate_task_minutes() 호출
-        3. 계산된 예상시간을 한 번에 bulk_update로 반영
+        1. fetch_extracted_tasks()로 AI 호출 + 파싱 + 검증 (네트워크, 트랜잭션 없음)
+        2. _save_tasks_with_estimates()로 StudyTask 생성과 예상시간 계산을
+           하나의 짧은 트랜잭션으로 저장 (DB 쓰기만 있어서 커넥션을 오래 안 붙잡음)
 
-    실패 시 이 함수 전체가 @transaction.atomic이므로 생성된 StudyTask도 함께
-    롤백된다. "예상시간 없는 StudyTask"가 DB에 남지 않는다.
+    이렇게 나눈 이유: AI 네트워크 호출은 재시도 포함 최대 수십 초가 걸릴 수 있는데,
+    이걸 DB 트랜잭션 안에 두면 그동안 커넥션을 계속 점유하게 된다. 네트워크 호출을
+    트랜잭션 밖으로 완전히 빼서, DB 트랜잭션은 실제 DB 쓰기 구간(순식간에 끝남)만
+    감싸도록 했다.
+
+    AI 호출에 쓴 텍스트(analyzed_text)를 저장 단계까지 그대로 들고 가서, 저장
+    시점에 StudyMaterial.extracted_text와 비교한다 (아래 _save_tasks_with_estimates
+    참고) - 그 사이에 텍스트가 바뀌었으면 이 결과는 버려야 하기 때문이다.
+
+    실패 시:
+        - 1단계(AI 호출) 실패: 애초에 트랜잭션이 시작도 안 되므로 DB에는 아무
+          변화도 없다.
+        - 2단계(DB 저장) 실패: _save_tasks_with_estimates()가 @transaction.atomic이므로
+          그 안에서 생성된 StudyTask도 함께 롤백된다. "예상시간 없는 StudyTask"가
+          DB에 남지 않는다.
     """
-    tasks = analyze_study_material(study_material)
+    if not study_material.extracted_text:
+        raise AIResponseValidationError("StudyMaterial에 분석할 텍스트가 없습니다.")
+
+    exam = study_material.exam
+    analyzed_text = study_material.extracted_text
+    extracted_tasks = fetch_extracted_tasks(exam, analyzed_text)
+
+    return _save_tasks_with_estimates(study_material, extracted_tasks, analyzed_text)
+
+
+@transaction.atomic
+def _save_tasks_with_estimates(
+    study_material: StudyMaterial, extracted_tasks, analyzed_text: str
+) -> list[StudyTask]:
+    """
+    AI가 추출한 결과를 StudyTask로 저장하고, 곧바로 예상시간까지 채운다.
+    DB 쓰기만 하고 네트워크 호출은 전혀 없어서, 트랜잭션으로 묶어도 커넥션을
+    오래 점유하지 않는다.
+
+    저장 직전에 StudyMaterial을 다시 조회해서(select_for_update로 잠그면서),
+    AI 호출 이후 상태가 바뀌지 않았는지 재검증한다:
+        - analysis_status가 여전히 PROCESSING인지
+        - status(텍스트 추출 상태)가 COMPLETED인지 (재추출이 진행 중이면 아직
+          extracted_text 자체는 안 바뀌었어도 불안정한 상태로 간주)
+        - extracted_text가 analyzed_text(AI 호출에 실제로 쓴 텍스트)와 같은지
+    하나라도 어긋나면 StaleAnalysisRequestError를 던지고 아무것도 쓰지 않는다.
+    (select_for_update는 SQLite에서 실제 잠금이 걸리지는 않지만, 재조회 자체는
+    트랜잭션 안에서 최신 값을 가져오므로 최소한의 방어 역할은 한다.)
+
+    예상시간 계산에 쓰는 exam.speed_factor도 AI 호출 전에 로드해둔 오래된 객체가
+    아니라, 이 재조회로 얻은 최신 값을 사용한다.
+    """
+    current = (
+        StudyMaterial.objects
+        .select_for_update()
+        .select_related("exam")
+        .get(pk=study_material.pk)
+    )
+
+    if current.analysis_status != MaterialStatus.PROCESSING:
+        raise StaleAnalysisRequestError(
+            f"저장 시점에 analysis_status가 PROCESSING이 아닙니다 "
+            f"(현재: {current.analysis_status}). study_material_id={study_material.pk}"
+        )
+
+    if current.status != MaterialStatus.COMPLETED:
+        # material_extract()가 PDF를 재추출 중이면 status가 PROCESSING/FAILED/PENDING으로
+        # 바뀐다. 아직 extracted_text 자체는 안 바뀐 시점이라 아래 텍스트 비교만으로는
+        # 못 걸러내므로, 추출 상태 자체도 별도로 확인한다 (재추출 완료 시점에 텍스트가
+        # 바뀌기 전에 이 실행이 먼저 저장해버리는 걸 막기 위함).
+        raise StaleAnalysisRequestError(
+            f"저장 시점에 텍스트 추출 상태가 COMPLETED가 아닙니다 "
+            f"(현재: {current.status}). study_material_id={study_material.pk}"
+        )
+
+    if current.extracted_text != analyzed_text:
+        raise StaleAnalysisRequestError(
+            f"저장 시점에 추출 텍스트가 AI 호출 당시와 달라 결과를 저장하지 않습니다. "
+            f"study_material_id={study_material.pk}"
+        )
+
+    tasks = save_extracted_tasks(current, extracted_tasks)
 
     if not tasks:
         return tasks
 
-    exam = study_material.exam
+    exam = current.exam  # 재조회로 얻은 최신 exam (speed_factor 최신값 보장)
     for task in tasks:
         est_min, est_max = estimate_task_minutes(
             task_type=task.task_type,
@@ -163,6 +277,18 @@ def _execute_analysis(study_material: StudyMaterial) -> list[StudyTask]:
     """
     try:
         tasks = _run_analysis_and_estimate(study_material)
+    except StaleAnalysisRequestError as exc:
+        # 이 요청은 여전히 PROCESSING의 유일한 소유자다 (_start_processing의 조건부
+        # UPDATE 덕분에 동시에 두 실행이 PROCESSING을 가질 수 없음 - 이 예외는
+        # "저장 시점에 입력이 바뀌었다"는 뜻이지 "다른 실행에게 뺏겼다"는 뜻이 아니다).
+        # 그래서 안전하게 FAILED로 마무리해 사용자가 다시 시도할 수 있게 한다.
+        message = "분석 도중 자료 내용이 변경되어 결과를 저장하지 않았습니다. 다시 시도해주세요."
+        _finish_failure(study_material, message)
+        logger.warning(
+            "분석 결과 저장 시점 재검증 실패: study_material_id=%s, 사유=%s",
+            study_material.id, exc,
+        )
+        raise AnalysisPipelineError(message) from exc
     except AIAnalysisError as exc:
         _finish_failure(study_material, str(exc))
         logger.warning(
@@ -194,21 +320,37 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
     """
     analysis_status를 PROCESSING으로 원자적으로 전이시킨다.
 
-    - is_retry=False (최초 분석): 현재 analysis_status가 PENDING일 때만 전이
-    - is_retry=True  (재시도):    현재 analysis_status가 FAILED이고
-                                  analysis_retry_count < MAX_RETRY_COUNT일 때만 전이,
-                                  전이와 동시에 analysis_retry_count를 1 증가시킨다.
+    - is_retry=False (최초 분석): 현재 status(텍스트 추출 상태)가 COMPLETED이고
+                                  analysis_status가 PENDING일 때만 전이
+    - is_retry=True  (재시도):    현재 status가 COMPLETED이고 analysis_status가
+                                  FAILED이며 analysis_retry_count < MAX_RETRY_COUNT일
+                                  때만 전이, 전이와 동시에 analysis_retry_count를
+                                  1 증가시킨다.
+
+    status=COMPLETED 조건을 넣은 이유 (리뷰 반영): 이 조건이 없으면 아래 경쟁
+    상태가 가능했다.
+        1. View가 material.status==COMPLETED를 파이썬에서 확인
+        2. 그 직후 PDF 재추출 요청이 DB에서 status=PROCESSING을 먼저 차지
+        3. 이 함수가 analysis_status=PENDING만 확인하고 PROCESSING 전이에 성공
+        4. PDF 추출과 AI 분석이 동시에 실행되어, 나중에 _finish_failure()가
+           조건 없이 analysis_status=FAILED를 저장하면서 재추출 성공 후
+           초기화된 PENDING 상태를 덮어씀
+    status=COMPLETED를 이 조건부 UPDATE 안에 같이 넣으면, material_extract()
+    쪽의 조건부 UPDATE(analysis_status가 PROCESSING/COMPLETED면 재추출 차단)와
+    서로 대칭을 이뤄서, 두 요청 중 DB에 먼저 도달한 쪽만 성공하고 나머지는
+    원자적으로 실패하게 된다.
 
     DB 조건부 UPDATE 하나로 "확인 + 변경"을 원자적으로 처리하기 때문에,
     동시에 같은 요청이 여러 번 들어와도 정확히 하나만 성공한다.
 
     Returns:
         True: 전이에 성공함 (study_material 인스턴스도 최신값으로 갱신됨)
-        False: 조건이 안 맞아 전이하지 못함 (이미 처리중/조건 불충족 등)
+        False: 조건이 안 맞아 전이하지 못함 (이미 처리중/조건 불충족/추출 미완료 등)
     """
     if is_retry:
         updated_count = StudyMaterial.objects.filter(
             pk=study_material.pk,
+            status=MaterialStatus.COMPLETED,
             analysis_status=MaterialStatus.FAILED,
             analysis_retry_count__lt=MAX_RETRY_COUNT,
         ).update(
@@ -219,6 +361,7 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
     else:
         updated_count = StudyMaterial.objects.filter(
             pk=study_material.pk,
+            status=MaterialStatus.COMPLETED,
             analysis_status=MaterialStatus.PENDING,
         ).update(
             analysis_status=MaterialStatus.PROCESSING,
@@ -235,15 +378,21 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> bool:
 
 def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
-    E-AI-01 진입점. analysis_status가 PENDING일 때만 분석을 시작한다.
+    E-AI-01 진입점. 텍스트 추출(status)이 COMPLETED이고 analysis_status가
+    PENDING일 때만 분석을 시작한다.
 
     Raises:
-        DuplicateAnalysisRequestError: PENDING이 아니어서(이미 진행/완료/실패) 시작 못 함
+        DuplicateAnalysisRequestError: 시작 조건이 안 맞아 시작 못 함 (추출이
+            아직 진행 중이거나, analysis_status가 PENDING이 아님)
         AIAnalysisError 계열, AIResponseValidationError: 분석 자체가 실패함
     """
     started = _start_processing(study_material, is_retry=False)
     if not started:
-        study_material.refresh_from_db(fields=["analysis_status"])
+        study_material.refresh_from_db(fields=["status", "analysis_status"])
+        if study_material.status != MaterialStatus.COMPLETED:
+            raise DuplicateAnalysisRequestError(
+                "텍스트 추출이 진행 중이라 지금은 분석을 시작할 수 없습니다."
+            )
         raise DuplicateAnalysisRequestError(
             f"분석을 시작할 수 없는 상태입니다 (현재 analysis_status: "
             f"{study_material.analysis_status})."
@@ -253,17 +402,25 @@ def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
 
 def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
     """
-    E-AI-03 진입점. FAILED 상태이고 재시도 횟수가 남아있을 때만 재시도한다.
+    E-AI-03 진입점. 텍스트 추출(status)이 COMPLETED이고, analysis_status가
+    FAILED이며 재시도 횟수가 남아있을 때만 재시도한다.
 
     Raises:
-        DuplicateAnalysisRequestError: 현재 PROCESSING이라 중복 요청인 경우
+        DuplicateAnalysisRequestError: 추출이 진행 중이거나, analysis_status가
+            PROCESSING이라 중복 요청인 경우
         AnalysisNotSupportedError: COMPLETED 상태라 MVP 기준 재분석 미지원인 경우
         RetryLimitExceededError: FAILED 상태이지만 재시도 횟수(2회)를 이미 다 쓴 경우
         AIAnalysisError 계열, AIResponseValidationError: 재시도한 분석 자체가 실패함
     """
     started = _start_processing(study_material, is_retry=True)
     if not started:
-        study_material.refresh_from_db(fields=["analysis_status", "analysis_retry_count"])
+        study_material.refresh_from_db(fields=["status", "analysis_status", "analysis_retry_count"])
+
+        if study_material.status != MaterialStatus.COMPLETED:
+            raise DuplicateAnalysisRequestError(
+                "텍스트 추출이 진행 중이라 지금은 재시도를 시작할 수 없습니다."
+            )
+
         status = study_material.analysis_status
 
         if status == MaterialStatus.PROCESSING:
@@ -274,7 +431,8 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
                 "결과를 수정하려면 작업 검토 화면에서 직접 수정해주세요."
             )
         if status == MaterialStatus.FAILED:
-            # FAILED인데도 전이 실패했다는 건 재시도 횟수를 이미 다 썼다는 뜻
+            # FAILED이고 추출도 COMPLETED인데 전이 실패했다는 건
+            # 재시도 횟수를 이미 다 썼다는 뜻
             raise RetryLimitExceededError(
                 "재시도 횟수(최대 2회)를 모두 사용했습니다. 학습 작업을 직접 추가해주세요."
             )

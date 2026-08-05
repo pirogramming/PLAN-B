@@ -279,6 +279,10 @@ def material_extract(request, material_id):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
+    # 재추출 성공 후 "텍스트가 실제로 바뀌었는지" 판단하는 기준값. 아래에서
+    # material.status/analysis_status 등을 refresh_from_db()로 갱신해도
+    # extracted_text 필드는 그 refresh 대상에 포함하지 않으므로 이 시점 값 그대로 유지된다.
+    previous_extracted_text = material.extracted_text
 
     if material.material_type != MaterialType.PDF:
         messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
@@ -288,13 +292,34 @@ def material_extract(request, material_id):
         messages.error(request, "첨부된 PDF 파일이 없습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    if material.status == MaterialStatus.PROCESSING:
-        messages.info(request, "이미 분석 중인 자료입니다.")
+    # 아래 세 조건 중 하나라도 걸리면 재추출을 막는다.
+    #   - status(추출 상태)가 이미 PROCESSING (다른 요청이 추출 중)
+    #   - analysis_status가 PROCESSING (AI 분석 진행 중 - 어느 텍스트 기준인지 꼬임)
+    #   - analysis_status가 COMPLETED (이미 이 텍스트 기준으로 분석 결과가 있음)
+    # 조회 후 파이썬에서 검사하는 방식은 동시 요청 사이의 경쟁 상태가 남으므로,
+    # 조건부 UPDATE 하나로 "확인 + PROCESSING 전이"를 원자적으로 처리한다
+    # (analysis_orchestrator._save_tasks_with_estimates()의 재검증과 짝을 이루는 방어).
+    updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
+        status=MaterialStatus.PROCESSING
+    ).exclude(
+        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    ).update(status=MaterialStatus.PROCESSING, error_message=None)
+
+    if not updated_count:
+        material.refresh_from_db(fields=['status', 'analysis_status'])
+        if material.status == MaterialStatus.PROCESSING:
+            messages.info(request, "이미 PDF 텍스트를 추출 중인 자료입니다.")
+        elif material.analysis_status == MaterialStatus.PROCESSING:
+            messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
+        else:
+            messages.error(
+                request,
+                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 "
+                "화면에서 확인해주세요.",
+            )
         return redirect('exams:material_detail', material_id=material.id)
 
-    material.status = MaterialStatus.PROCESSING
-    material.error_message = None
-    material.save(update_fields=['status', 'error_message'])
+    material.refresh_from_db(fields=['status', 'error_message'])
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -315,7 +340,20 @@ def material_extract(request, material_id):
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
-    material.save(update_fields=['status', 'extracted_text', 'error_message'])
+    # 재추출 성공은 텍스트가 바뀌었을 수도, 완전히 같을 수도 있다 (예: 사용자가
+    # 같은 PDF를 실수로 다시 업로드). 텍스트가 실제로 바뀐 경우에만 "새로운 분석
+    # 대상"으로 보고 AI 분석 상태(특히 FAILED 사유, 재시도 횟수)를 초기화한다.
+    # 리뷰 반영: 텍스트가 동일한데도 무조건 초기화하면, 재시도 2회를 이미 다 쓴
+    # 자료도 같은 PDF를 다시 추출하는 것만으로 retry_count가 0으로 리셋되어
+    # 재시도 횟수 제한을 우회할 수 있었다.
+    if extracted != previous_extracted_text:
+        material.analysis_status = MaterialStatus.PENDING
+        material.analysis_error_message = None
+        material.analysis_retry_count = 0
+    material.save(update_fields=[
+        'status', 'extracted_text', 'error_message',
+        'analysis_status', 'analysis_error_message', 'analysis_retry_count',
+    ])
     messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
     return redirect('exams:material_detail', material_id=material.id)
 
@@ -409,13 +447,75 @@ def material_retry_analyze(request, material_id):
 @require_http_methods(["GET"])
 def material_analysis_status(request, material_id):
     """
-    E-AI-02: AI 분석 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    "분석 중..." 화면에서 주기적으로 호출해 analysis_status 변화를 확인하는 용도.
+    E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
+    "분석 중..." 화면에서 주기적으로 호출해 상태 변화를 확인하는 용도.
+
+    프론트가 material_analyze()를 순차 자동 호출하는 방식으로 가면서, 성공/실패
+    판단을 이 엔드포인트 하나로만 하기로 확정했다. 텍스트 추출 상태
+    (material.status/error_message, BE2 담당 필드)와 AI 분석 상태
+    (material.analysis_status/analysis_error_message, 이 파일 담당)를 하나의
+    스키마로 합쳐서 내려준다 (BE2와 필드명·구조 합의 완료).
+
+    최종 응답 스키마:
+        {
+            "stage": "PENDING | EXTRACTING | ANALYZING | COMPLETED | FAILED",
+            "extraction_status": "pending | processing | completed | failed",
+            "extraction_error_message": str | None,
+            "analysis_status": "pending | processing | completed | failed",
+            "analysis_error_message": str | None,
+            "failed_stage": "EXTRACTION | ANALYSIS" | None,
+            "retry_count": int,
+            "retry_remaining": int,
+        }
+    extraction_status/analysis_status는 StudyMaterial 모델 필드 값을 그대로 내려서
+    소문자다 (MaterialStatus TextChoices 자체가 소문자). stage/failed_stage는 이
+    엔드포인트가 새로 만드는 값이라 대문자로 통일했다.
+
+    stage 우선순위가 "추출 상태 먼저, 분석 상태 나중"인 이유: material_extract()의
+    원자적 방어(analysis_status가 PROCESSING/COMPLETED면 재추출 자체가 막힘) 덕분에,
+    material.status가 PROCESSING/FAILED로 남아있다는 건 "지금 추출(재추출 포함)
+    작업이 진행/실패한 것"이 확정적으로 최신 상황이라는 뜻이다. 그래서 이 경우엔
+    analysis_status에 남아있는 이전 분석 기록(예: 재추출 전의 예전 실패 사유)보다
+    추출 상태를 우선해서 보여준다 - 순서를 반대로 하면(분석 실패를 먼저 체크하면),
+    재추출이 한창 진행 중인데도 stage가 잘못 FAILED로 나오는 문제가 생긴다.
+
+    failed_stage: stage가 "FAILED"일 때, 추출 단계에서 실패한 건지("EXTRACTION")
+    분석 단계에서 실패한 건지("ANALYSIS") 구분해서 알려준다. 둘 다 아니면 None.
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
-    return JsonResponse(get_analysis_status(material))
+    analysis_data = get_analysis_status(material)  # 기존 서비스 함수, 시그니처 안 바뀜
+
+    if material.status == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "EXTRACTION"
+    elif material.status == MaterialStatus.PROCESSING:
+        stage = "EXTRACTING"
+        failed_stage = None
+    elif analysis_data["status"] == MaterialStatus.PROCESSING:
+        stage = "ANALYZING"
+        failed_stage = None
+    elif analysis_data["status"] == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "ANALYSIS"
+    elif analysis_data["status"] == MaterialStatus.COMPLETED:
+        stage = "COMPLETED"
+        failed_stage = None
+    else:
+        stage = "PENDING"
+        failed_stage = None
+
+    return JsonResponse({
+        "stage": stage,
+        "extraction_status": material.status,
+        "extraction_error_message": material.error_message,
+        "analysis_status": analysis_data["status"],
+        "analysis_error_message": analysis_data["error_message"],
+        "failed_stage": failed_stage,
+        "retry_count": analysis_data["retry_count"],
+        "retry_remaining": analysis_data["retry_remaining"],
+    })
 
 
 # =====================================================================
