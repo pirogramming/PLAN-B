@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.utils import timezone as django_timezone
 from unittest.mock import patch
 from planner.services.recovery import RecoveryPlanInvalidDataError
+from django.urls import reverse
 
 from planner.services.progress_recorder import (
     finalize_daily_plan,
@@ -1680,3 +1681,172 @@ class ApplyRecoveryPlanTests(TestCase):
 
         with self.assertRaises(RecoveryPlanInvalidDataError):
             apply_recovery_plan(self.maintain_volume)
+
+class PlanGenerateFlowTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="plan_gen_tester", email="plangen@example.com", password="pass1234"
+        )
+        self.other_user = User.objects.create_user(
+            username="other_tester", email="other@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="계획 생성 테스트 시험기간",
+            start_date=self.today,
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.client.login(username="plangen@example.com", password="pass1234")
+
+    def _make_confirmed_task(self, exam=None, order=1, min_m=20, max_m=40):
+        from exams.models import StudyTask
+        return StudyTask.objects.create(
+            exam=exam or self.exam, title=f"작업 {order}", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=order,
+            estimated_min_minutes=min_m, estimated_max_minutes=max_m, is_confirmed=True,
+        )
+
+    def test_feasibility_blocks_other_user(self):
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.client.login(username="other@example.com", password="pass1234")
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_plan_generate_rejects_no_confirmed_tasks(self):
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_rejects_unconfirmed_task_present(self):
+        from exams.models import StudyTask
+        self._make_confirmed_task(order=1)
+        StudyTask.objects.create(
+            exam=self.exam, title="미확정 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=False,
+        )
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_rejects_subject_without_confirmed_task(self):
+        from exams.models import Exam
+        self._make_confirmed_task(order=1)
+        Exam.objects.create(
+            exam_period=self.exam_period, subject_name="작업 없는 과목",
+            exam_date=self.today + timedelta(days=6),
+        )
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_rejects_zero_estimated_time_task(self):
+        from exams.models import StudyTask
+        StudyTask.objects.create(
+            exam=self.exam, title="예상시간 0", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=0, estimated_max_minutes=0, is_confirmed=True,
+        )
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_ignores_past_available_time(self):
+        self._make_confirmed_task(order=1, min_m=20, max_m=40)
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=1), available_minutes=100
+        )
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_rejects_risky_feasibility(self):
+        self._make_confirmed_task(order=1, min_m=100, max_m=200)
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=150)
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(DailyPlan.objects.filter(exam_period=self.exam_period).count(), 0)
+
+    def test_plan_generate_success_allocates_all_tasks(self):
+        self._make_confirmed_task(order=1, min_m=20, max_m=40)
+        self._make_confirmed_task(order=2, min_m=20, max_m=40)
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(
+            DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 2
+        )
+
+    def test_plan_generate_twice_redirects_to_complete(self):
+        self._make_confirmed_task(order=1, min_m=20, max_m=40)
+        AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
+
+        self.client.post(reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id}))
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertEqual(
+            DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 1
+        )
+
+    def test_plan_complete_redirects_when_no_plan_yet(self):
+        response = self.client.get(
+            reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
