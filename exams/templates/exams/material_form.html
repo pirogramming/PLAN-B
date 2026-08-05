@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% load static exam_extras %}
+{% block title %}시험범위 등록 - PLAN B{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
+
+{% block content %}
+{% include "exams/_topbar.html" %}
+{% get_period_exams exam.exam_period_id as period_exams %}
+
+<div class="container" style="max-width:560px; margin:0 auto; padding-bottom:60px;">
+    <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
+        PLAN B &nbsp;›&nbsp; 시험범위 등록
+    </div>
+    <div class="page-title">시험범위 등록하기</div>
+    <div class="page-sub">과목별 시험범위를 알려주세요</div>
+
+    <!-- 과목 탭: 실제로는 각 과목의 material_create URL로 이동하는 링크 -->
+    <div class="tabbar">
+        {% for e in period_exams %}
+        <a class="tab {% if e.id == exam.id %}active{% endif %}" href="{% url 'exams:material_create' e.id %}">{{
+            e.subject_name }}</a>
+        {% endfor %}
+    </div>
+
+    {% if form.non_field_errors %}<div class="form-error-box">{{ form.non_field_errors|striptags }}</div>{% endif %}
+
+    <div class="card">
+        <!-- 입력방식 탭 (PDF / 텍스트) — 이건 진짜 JS 탭 (같은 화면 안에서 전환) -->
+        <div class="tabbar" data-method-tabs>
+            <button type="button" class="tab active" data-target="pdf-panel">PDF 업로드</button>
+            <button type="button" class="tab" data-target="text-panel">텍스트 입력</button>
+        </div>
+
+        <form method="post" enctype="multipart/form-data" novalidate id="material-form">
+            {% csrf_token %}
+
+            <div class="form-group" style="display:none;">
+                <label class="form-label" for="{{ form.title.id_for_label }}">자료/범위명</label>
+                {{ form.title }}
+            </div>
+
+            <div id="pdf-panel">
+                {{ form.file }}
+                <div style="font-size:11px; color:var(--neutral7); margin-top:6px; text-align:center;">파일을 끌어다 놓거나 클릭해서
+                    업로드 · 텍스트 추출 가능한 PDF만 지원</div>
+                {% if form.file.errors %}<div class="field-error">{{ form.file.errors|striptags }}</div>{% endif %}
+            </div>
+
+            <div id="text-panel" style="display:none;">
+                {{ form.extracted_text }}
+                {% if form.extracted_text.errors %}<div class="field-error">{{ form.extracted_text.errors|striptags }}
+                </div>{% endif %}
+            </div>
+
+            {{ form.material_type }}
+            <button type="submit" class="btn btn-brand btn-block" style="margin-top:14px;" id="analyze-submit-btn">분석
+                시작</button>
+        </form>
+    </div>
+</div>
+
+<!-- 분석 시작 시 로딩 오버레이 — material_analyze가 동기 처리라 별도 페이지 대신 이 화면 위에 표시 -->
+<div id="loading-overlay"
+    style="display:none; position:fixed; inset:0; background:rgba(20,25,35,.4); align-items:center; justify-content:center; z-index:50;">
+    <div class="card" style="width:320px; text-align:center;">
+        <div
+            style="width:44px; height:44px; border-radius:50%; border:4px solid var(--neutral4); border-top-color:var(--brand4); margin:0 auto 16px; animation:spin 0.9s linear infinite;">
+        </div>
+        <div style="font-size:13px; font-weight:700;">학습 작업을 분석하고 있어요</div>
+        <div style="font-size:11.5px; color:var(--neutral7); margin-top:4px;">잠시만 기다려주세요</div>
+    </div>
+</div>
+<style>
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+</style>
+
+<script>
+    // PDF / 텍스트 입력방식 토글
+    (function () {
+        const tabs = document.querySelectorAll('[data-method-tabs] .tab');
+        const typeInput = document.getElementById('{{ form.material_type.id_for_label }}');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                const isPdf = tab.dataset.target === 'pdf-panel';
+                document.getElementById('pdf-panel').style.display = isPdf ? '' : 'none';
+                document.getElementById('text-panel').style.display = isPdf ? 'none' : '';
+                if (typeInput) typeInput.value = isPdf ? 'pdf' : 'text';
+            });
+        });
+    })();
+
+    // title 필드는 화면엔 안 보이지만 폼엔 필요할 수 있어서 기본값 채워둠
+    // (StudyMaterialForm이 title을 required로 요구하는지 정확히 확인 못 해서 방어적으로 처리)
+    (function () {
+        const titleInput = document.getElementById('{{ form.title.id_for_label }}');
+        if (titleInput && !titleInput.value) {
+            titleInput.value = '{{ exam.subject_name }} 시험범위';
+        }
+    })();
+
+    // 분석 시작 시 로딩 오버레이 (material_analyze가 동기 처리라 응답 올 때까지 화면 유지)
+    document.getElementById('material-form').addEventListener('submit', () => {
+        document.getElementById('loading-overlay').style.display = 'flex';
+    });
+</script>
+{% endblock %}
