@@ -1,85 +1,191 @@
 {% extends "base.html" %}
 {% load static %}
-{% block title %}{{ material.title }} - PLAN B{% endblock %}
-{% block extra_css %}<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
+{% block title %}
+{{ material.title }} - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
 
 {% block content %}
 {% include "exams/_topbar.html" %}
 
-<div class="container" style="max-width:560px; margin:0 auto; padding-bottom:60px;">
-  <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
+<div class="container material-detail-wrap">
+  <div class="crumb-text">
     {{ material.exam.subject_name }} &nbsp;›&nbsp; {{ material.title }}
   </div>
-  <div class="page-title" style="font-size:19px;">{{ material.title }}</div>
-  <div class="page-sub">{{ material.get_material_type_display }}</div>
+  <div class="page-title" style="font-size:19px;">
+    {{ material.title }}
+  </div>
+  <div class="page-sub">
+    {{ material.get_material_type_display }}
+  </div>
 
-  <!-- 1. 텍스트 추출 상태 (PDF만 해당) -->
   {% if material.material_type == 'pdf' %}
-    <div class="card" style="margin-bottom:14px;">
-      <div style="font-size:13px; font-weight:700; margin-bottom:10px;">텍스트 추출</div>
+  <div class="card" style="margin-bottom:14px;" id="extract-card">
+    <div class="section-label">텍스트 추출</div>
 
-      {% if material.status == 'completed' %}
-        <span class="badge badge-possible">추출 완료</span>
-        <div style="margin-top:10px; max-height:140px; overflow-y:auto; font-size:12px; color:var(--neutral8); background:var(--neutral2); border-radius:8px; padding:10px 12px; white-space:pre-wrap;">{{ material.extracted_text|truncatechars:600 }}</div>
-
-      {% elif material.status == 'failed' %}
-        <span class="badge badge-impossible">추출 실패</span>
-        <div class="field-error" style="margin-top:8px;">{{ material.error_message }}</div>
-        <form method="post" action="{% url 'exams:material_extract' material.id %}" style="margin-top:12px;">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-brand btn-block">다시 추출하기</button>
-        </form>
-
-      {% elif material.status == 'processing' %}
-        <span class="badge badge-risky">추출 중...</span>
-        <script>setTimeout(() => location.reload(), 2000);</script>
-
-      {% else %}
-        <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">대기 중</span>
-        <form method="post" action="{% url 'exams:material_extract' material.id %}" style="margin-top:12px;">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-brand btn-block">텍스트 추출하기</button>
-        </form>
-      {% endif %}
+    {% if material.status == 'completed' %}
+    <span class="badge badge-possible">추출 완료</span>
+    <div class="extracted-text-box">
+      {{ material.extracted_text|truncatechars:600 }}
     </div>
+
+    {% elif material.status == 'failed' %}
+    <span class="badge badge-impossible">추출 실패</span>
+    <div class="field-error" style="margin-top:8px;">
+      {{ material.error_message }}
+    </div>
+    <form method="post" action="{% url 'exams:material_extract' material.id %}" style="margin-top:12px;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-brand btn-block">
+        다시 추출하기
+      </button>
+    </form>
+
+    {% elif material.status == 'processing' %}
+    <span class="badge badge-risky">추출 중...</span>
+
+    {% else %}
+    <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">
+      대기 중
+    </span>
+    {% endif %}
+  </div>
   {% endif %}
 
-  <!-- 2. AI 분석 상태 (텍스트 추출이 completed 여야 진행 가능) -->
   {% if material.status == 'completed' %}
-    <div class="card">
-      <div style="font-size:13px; font-weight:700; margin-bottom:10px;">AI 학습 작업 분석</div>
+  <div class="card" id="analyze-card">
+    <div class="section-label">AI 학습 작업 분석</div>
 
-      {% if material.analysis_status == 'completed' %}
-        <span class="badge badge-possible">분석 완료</span>
-        <a href="{% url 'exams:task_review' material.exam.id %}" class="btn btn-brand btn-block" style="margin-top:12px;">학습 작업 확인하러 가기</a>
+    {% if material.analysis_status == 'completed' %}
+    <span class="badge badge-possible">분석 완료</span>
+    <a href="{% url 'exams:task_review' material.exam.id %}" class="btn btn-brand btn-block" style="margin-top:12px;">
+      학습 작업 확인하러 가기
+    </a>
 
-      {% elif material.analysis_status == 'processing' %}
-        <span class="badge badge-risky">분석 중...</span>
-        <div style="font-size:12px; color:var(--neutral7); margin-top:8px;">잠시만 기다려주세요</div>
-        <script>setTimeout(() => location.reload(), 2000);</script>
+    {% elif material.analysis_status == 'processing' %}
+    <span class="badge badge-risky">분석 중...</span>
 
-      {% elif material.analysis_status == 'failed' %}
-        <span class="badge badge-impossible">분석 실패</span>
-        <div class="field-error" style="margin-top:8px;">{{ material.analysis_error_message }}</div>
-        <div style="font-size:11px; color:var(--neutral7); margin-top:4px;">재시도 <span class="num">{{ material.analysis_retry_count }}</span>회 진행됨</div>
-        <form method="post" action="{% url 'exams:material_retry_analyze' material.id %}" style="margin-top:12px;">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-brand btn-block">다시 시도</button>
-        </form>
-
-      {% else %}
-        <form method="post" action="{% url 'exams:material_analyze' material.id %}">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-brand btn-block">AI 분석 시작</button>
-        </form>
-      {% endif %}
+    {% elif material.analysis_status == 'failed' %}
+    <span class="badge badge-impossible">분석 실패</span>
+    <div class="field-error" style="margin-top:8px;">
+      {{ material.analysis_error_message }}
     </div>
+    <div style="font-size:11px; color:var(--neutral7); margin-top:4px;">
+      재시도 <span class="num">{{ material.analysis_retry_count }}</span>회 진행됨
+    </div>
+    <form method="post" action="{% url 'exams:material_retry_analyze' material.id %}" style="margin-top:12px;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-brand btn-block">
+        다시 시도
+      </button>
+    </form>
+
+    {% else %}
+    <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">
+      대기 중
+    </span>
+    {% endif %}
+  </div>
   {% endif %}
 
   <form method="post" action="{% url 'exams:material_delete' material.id %}"
-        onsubmit="return confirm('이 학습자료를 삭제할까요?');" style="margin-top:14px;">
+    onsubmit="return confirm('이 학습자료를 삭제할까요?');" style="margin-top:14px;">
     {% csrf_token %}
-    <button type="submit" class="btn btn-ghost btn-block" style="color:var(--judge3); border-color:var(--judge3-line);">학습자료 삭제</button>
+    <button type="submit" class="btn btn-ghost btn-block delete-material-btn">
+      학습자료 삭제
+    </button>
   </form>
 </div>
+
+<div id="auto-loading-overlay" class="auto-loading-overlay">
+  <div class="card auto-loading-box">
+    <div class="auto-loading-spinner"></div>
+    <div class="auto-loading-text" id="auto-loading-text">
+      처리 중이에요
+    </div>
+    <div class="auto-loading-sub">잠시만 기다려주세요</div>
+  </div>
+</div>
+
+<form id="auto-extract-form" method="post" action="{% url 'exams:material_extract' material.id %}"
+  class="hidden-auto-form">
+  {% csrf_token %}
+</form>
+
+<form id="auto-analyze-form" method="post" action="{% url 'exams:material_analyze' material.id %}"
+  class="hidden-auto-form">
+  {% csrf_token %}
+</form>
+
+<script>
+  var STATUS_URL = "{% url 'exams:material_analysis_status' material.id %}";
+  var TASK_REVIEW_URL = "{% url 'exams:task_review' material.exam.id %}";
+  var fired = false;
+
+  function showAutoLoading(text) {
+    document.getElementById('auto-loading-text').textContent = text;
+    document.getElementById('auto-loading-overlay').classList.add('open');
+  }
+
+  function scheduleNextCheck() {
+    setTimeout(checkStatusAndAct, 1500);
+  }
+
+  function checkStatusAndAct() {
+    fetch(STATUS_URL)
+      .then(function (res) { return res.json(); })
+      .then(handleStatus)
+      .catch(function () {
+        /* 상태 조회 자체가 실패하면 그냥 멈춤 (자동 재시도 안 함) */
+      });
+  }
+
+  function handleStatus(data) {
+    if (data.stage === 'COMPLETED') {
+      window.location.href = TASK_REVIEW_URL;
+      return;
+    }
+
+    if (data.stage === 'FAILED') {
+      location.reload();
+      return;
+    }
+
+    if (data.stage === 'EXTRACTING') {
+      showAutoLoading('PDF 텍스트를 추출하고 있어요');
+      scheduleNextCheck();
+      return;
+    }
+
+    if (data.stage === 'ANALYZING') {
+      showAutoLoading('AI 학습 작업을 분석하고 있어요');
+      scheduleNextCheck();
+      return;
+    }
+
+    /* stage === 'PENDING' : 아직 아무것도 안 시작됨 → 한 번만 자동 호출 */
+    if (fired) {
+      return;
+    }
+
+    if (data.extraction_status === 'PENDING') {
+      fired = true;
+      showAutoLoading('PDF 텍스트를 추출하고 있어요');
+      document.getElementById('auto-extract-form').submit();
+      return;
+    }
+
+    if (data.analysis_status === 'PENDING') {
+      fired = true;
+      showAutoLoading('AI 학습 작업을 분석하고 있어요');
+      document.getElementById('auto-analyze-form').submit();
+      return;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', checkStatusAndAct);
+</script>
 {% endblock %}
