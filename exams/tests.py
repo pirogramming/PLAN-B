@@ -3,7 +3,7 @@ import io
 import pypdf
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, Client
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -15,6 +15,8 @@ from core.choices import (
     MaterialType,
     TaskType,
     TaskDifficulty,
+    PriorityLevel,
+    TaskDepth,
 )
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
@@ -27,8 +29,6 @@ from exams.services.analysis_orchestrator import (
     get_analysis_status,
     retry_analysis,
 )
-
-from django.core.files.uploadedfile import SimpleUploadedFile
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
 User = get_user_model()
@@ -163,6 +163,137 @@ class ExamModelTests(TestCase):
         self.assertEqual(str(exam), f"공학수학 ({exam.exam_date})")
 
 
+class TaskReviewFormSubmitTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            username="testuser", password="password123"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="2026 2학기 중간고사",
+            start_date="2026-08-01",
+            end_date="2026-08-15",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date="2026-08-10",
+            speed_factor=1.0,
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            title="기존 제목",
+            task_type=TaskType.CONCEPT,
+            importance=PriorityLevel.MEDIUM,
+            depth=TaskDepth.BASIC,
+            difficulty=TaskDifficulty.NORMAL,
+            is_confirmed=False,
+        )
+        self.url = reverse("exams:task_review", kwargs={"exam_id": self.exam.id})
+
+    def test_save_only_action(self):
+        """'수정사항 저장' 버튼(action=save) 클릭 시 DB 수정 후 리뷰 페이지로 리다이렉트 검증"""
+        post_data = {
+            "form-TOTAL_FORMS": "1",
+            "form-INITIAL_FORMS": "1",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-id": self.task.id,
+            "form-0-unit_name": "1장 개념",
+            "form-0-title": "수정된 제목 (저장만)",
+            "form-0-task_type": TaskType.CONCEPT,
+            "form-0-importance": PriorityLevel.MEDIUM,
+            "form-0-depth": TaskDepth.BASIC,
+            "form-0-difficulty": TaskDifficulty.HARD,
+            "action": "save",
+        }
+
+        response = self.client.post(self.url, post_data)
+        self.assertRedirects(response, self.url)
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.title, "수정된 제목 (저장만)")
+        self.assertEqual(self.task.difficulty, TaskDifficulty.HARD)
+        self.assertFalse(self.task.is_confirmed)
+
+    @patch("exams.views.redirect")
+    def test_confirm_and_next_action(self, mock_redirect):
+        """'모두 확정하고 다음으로' 버튼 클릭 시 views.py 수정 없이 redirect mock으로 URL 미연결 처리"""
+        from django.http import HttpResponseRedirect
+        expected_redirect_url = f"/planner/period/{self.period.id}/feasibility/"
+        mock_redirect.return_value = HttpResponseRedirect(expected_redirect_url)
+
+        post_data = {
+            "form-TOTAL_FORMS": "1",
+            "form-INITIAL_FORMS": "1",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-id": self.task.id,
+            "form-0-unit_name": "1장 개념",
+            "form-0-title": "수정된 제목 (저장+확정)",
+            "form-0-task_type": TaskType.CONCEPT,
+            "form-0-importance": PriorityLevel.HIGH,
+            "form-0-depth": TaskDepth.CORE,
+            "form-0-difficulty": TaskDifficulty.EASY,
+            "action": "confirm_and_next",
+        }
+
+        response = self.client.post(self.url, post_data)
+
+        mock_redirect.assert_called_once_with(
+            'planner:feasibility', period_id=self.period.id
+        )
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.title, "수정된 제목 (저장+확정)")
+        self.assertTrue(self.task.is_confirmed)
+
+
+class MaterialAnalysisStatusViewTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            username="testuser2", password="password123"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="시험기간",
+            start_date="2026-08-01",
+            end_date="2026-08-15",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="운영체제",
+            exam_date="2026-08-10",
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="운영체제 Ch1",
+            status=MaterialStatus.COMPLETED,
+            analysis_status=MaterialStatus.PROCESSING,
+        )
+        self.url = reverse(
+            "exams:material_analysis_status",
+            kwargs={"material_id": self.material.id},
+        )
+
+    def test_analysis_status_endpoint_returns_json(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+
+        data = response.json()
+        self.assertEqual(data["stage"], "ANALYZING")
+        self.assertEqual(data["extraction_status"], MaterialStatus.COMPLETED)
+        self.assertEqual(data["analysis_status"], MaterialStatus.PROCESSING)
+        self.assertEqual(data["study_material_id"], self.material.id)
+        self.assertEqual(data["exam_id"], self.exam.id)
+
+
 class MaterialCreateTests(TestCase):
     """자료 등록 시 입력 유형별 status 처리"""
 
@@ -189,11 +320,9 @@ class MaterialCreateTests(TestCase):
         self.assertEqual(response.status_code, 302)
         material = StudyMaterial.objects.get(exam=self.exam)
         self.assertEqual(material.status, MaterialStatus.COMPLETED)
-        # AI 분석 상태는 건드리지 않고 기본값(PENDING) 유지
         self.assertEqual(material.analysis_status, MaterialStatus.PENDING)
 
     def test_pdf_material_status_stays_pending_until_extracted(self):
-        from django.core.files.uploadedfile import SimpleUploadedFile
         pdf_file = SimpleUploadedFile("dummy.pdf", b"%PDF-1.4 dummy content", content_type="application/pdf")
 
         response = self.client.post(reverse('exams:material_create', args=[self.exam.id]), {
@@ -253,6 +382,7 @@ class MaterialExtractTests(TestCase):
         self.assertEqual(material.status, MaterialStatus.FAILED)
         self.assertIn("스캔", material.error_message)
 
+
 class StudyTaskCreateTests(TestCase):
     """직접 추가한 학습 작업의 예상시간 계산"""
 
@@ -294,6 +424,7 @@ class StudyTaskCreateTests(TestCase):
             speed_factor=1.2,
         )
 
+
 class TaskReviewTests(TestCase):
     """작업 수정 시 예상시간 재계산 확인"""
 
@@ -318,7 +449,6 @@ class TaskReviewTests(TestCase):
 
     @patch('exams.views.estimate_task_minutes')
     def test_task_update_recalculates_estimated_time(self, mock_estimate):
-        # difficulty를 EASY→HARD로 바꾸면 더 큰 값이 반환된다고 가정
         mock_estimate.return_value = (80, 120)
 
         management_form_data = {
@@ -332,7 +462,7 @@ class TaskReviewTests(TestCase):
             'form-0-task_type': TaskType.CONCEPT,
             'form-0-importance': 'medium',
             'form-0-depth': 'basic',
-            'form-0-difficulty': TaskDifficulty.HARD,  # EASY → HARD로 수정
+            'form-0-difficulty': TaskDifficulty.HARD,
         }
         response = self.client.post(
             reverse('exams:task_review', args=[self.exam.id]), management_form_data
@@ -349,15 +479,8 @@ class TaskReviewTests(TestCase):
             speed_factor=1.0,
         )
 
-class AnalysisOrchestratorTestCase(TestCase):
-    """
-    analysis_orchestrator.py 리뷰 확정 사항 검증:
-    - 상태 필드 분리(status/error_message vs analysis_status/analysis_error_message)
-    - 최초 분석/재시도 상태 전이, 재시도 횟수 제한(최대 2회)
-    - 파이프라인 전체 예외 처리 및 롤백
-    - 빈 결과(0개) 실패 처리
-    """
 
+class AnalysisOrchestratorTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
             username="orch_tester@example.com", email="orch_tester@example.com", password="pass1234!"
@@ -374,8 +497,6 @@ class AnalysisOrchestratorTestCase(TestCase):
         return StudyMaterial.objects.create(
             exam=self.exam, title="테스트 자료", extracted_text=text,
         )
-
-    # ---------- 최초 분석 ----------
 
     def test_initial_analysis_success_sets_completed(self):
         material = self._make_material()
@@ -402,7 +523,6 @@ class AnalysisOrchestratorTestCase(TestCase):
         analyze_and_estimate(material)
 
         material.refresh_from_db()
-        # 텍스트 추출 상태(status/error_message)는 AI 분석과 무관하게 그대로 유지돼야 한다
         self.assertEqual(material.status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.error_message)
 
@@ -424,14 +544,11 @@ class AnalysisOrchestratorTestCase(TestCase):
         mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
         material = self._make_material()
 
-        # 예기치 못한 예외(ValueError)는 AnalysisPipelineError로 변환되어 발생한다
-        # (View가 AIAnalysisError/AnalysisPipelineError만 알면 되도록 하기 위함)
         with self.assertRaises(AnalysisPipelineError):
             analyze_and_estimate(material)
 
         material.refresh_from_db()
         self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
-        # 예기치 못한 예외는 상세 내용을 그대로 노출하지 않고 일반 문구로 저장한다
         self.assertNotIn("예상시간 계산 중 알 수 없는 오류", material.analysis_error_message or "")
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
@@ -453,8 +570,6 @@ class AnalysisOrchestratorTestCase(TestCase):
 
         with self.assertRaises(DuplicateAnalysisRequestError):
             analyze_and_estimate(material)
-
-    # ---------- 재시도 ----------
 
     def test_retry_rejected_when_completed(self):
         material = self._make_material()
@@ -483,7 +598,6 @@ class AnalysisOrchestratorTestCase(TestCase):
         material.analysis_retry_count = 0
         material.save(update_fields=["analysis_status", "analysis_retry_count"])
 
-        # 1차 재시도는 실패시킨다
         with patch("exams.services.analysis_orchestrator.analyze_study_material") as mock_analyze:
             mock_analyze.side_effect = AICallFailedError("1차 재시도 실패")
             with self.assertRaises(AICallFailedError):
@@ -493,7 +607,6 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(material.analysis_retry_count, 1)
         self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
 
-        # 2차 재시도는 mock 모드 기본 흐름 그대로 성공시킨다
         tasks = retry_analysis(material)
 
         material.refresh_from_db()
@@ -523,12 +636,8 @@ class AnalysisOrchestratorTestCase(TestCase):
 
     @patch("exams.services.task_extractor._call_ai")
     def test_internal_self_correction_retry_does_not_affect_user_retry_count(self, mock_call_ai):
-        """
-        task_extractor 내부의 JSON 검증 self-correction 재요청(1회 실패 후 성공)이
-        analysis_retry_count에는 영향을 주지 않아야 한다.
-        """
         mock_call_ai.side_effect = [
-            "이건 유효하지 않은 JSON 입니다",  # 1차 응답: 검증 실패 -> 내부 self-correction 유발
+            "이건 유효하지 않은 JSON 입니다",
             '{"tasks": [{"unit_name": "1장", "title": "개념 읽기", "task_type": "concept", '
             '"importance": "high", "depth": "core", "difficulty": "normal", '
             '"ai_reason": "기초 개념이라 우선순위가 높습니다."}]}',
@@ -541,8 +650,6 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertTrue(len(tasks) > 0)
         self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
         self.assertEqual(material.analysis_retry_count, 0)
-
-    # ---------- 상태 조회 ----------
 
     def test_get_analysis_status_reports_retry_remaining(self):
         material = self._make_material()
@@ -560,10 +667,6 @@ class AnalysisOrchestratorTestCase(TestCase):
 
 
 class MaterialAnalysisViewTestCase(TestCase):
-    """
-    AI 분석 관련 View(material_analyze/material_retry_analyze/material_analysis_status) 검증.
-    """
-
     def setUp(self):
         self.owner = User.objects.create_user(
             username="view_owner@example.com", email="view_owner@example.com", password="pass1234!"
@@ -668,17 +771,15 @@ class MaterialAnalysisViewTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["status"], MaterialStatus.FAILED)
-        self.assertEqual(data["error_message"], "네트워크 오류")
-        self.assertEqual(data["retry_count"], 1)
-        self.assertEqual(data["retry_remaining"], 1)
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["extraction_status"], MaterialStatus.COMPLETED)
+        self.assertEqual(data["study_material_id"], self.material.id)
+        self.assertEqual(data["exam_id"], self.exam.id)
 
     def test_other_user_cannot_view_analysis_status(self):
         self.client.force_login(self.other)
         response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
         self.assertEqual(response.status_code, 404)
-
-    # ---------- 예기치 못한 파이프라인 예외 처리 (PR #33 리뷰 반영) ----------
 
     @patch("exams.services.analysis_orchestrator.estimate_task_minutes")
     def test_analyze_unexpected_exception_redirects_instead_of_500(self, mock_estimate):
@@ -689,7 +790,6 @@ class MaterialAnalysisViewTestCase(TestCase):
             reverse('exams:material_analyze', args=[self.material.id]), follow=True
         )
 
-        # 500이 아니라 자료 상세 화면으로 정상 리다이렉트되어야 한다
         self.assertEqual(response.status_code, 200)
         self.assertRedirects(
             response, reverse('exams:material_detail', args=[self.material.id])
@@ -729,18 +829,12 @@ class MaterialAnalysisViewTestCase(TestCase):
             self.material.analysis_error_message,
             "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
         )
-        # 재시도 자체는 시작됐으므로 retry_count는 증가한 상태로 남아야 한다
         self.assertEqual(self.material.analysis_retry_count, 1)
 
 
 class PdfExtractorTestCase(TestCase):
 
     def test_extract_text_success(self):
-        """[3번] 정상적인 텍스트 PDF에서 텍스트가 올바르게 추출되는지 검증"""
-        # pypdf를 사용하여 텍스트가 포함된 PDF 메모리 상에 동적 생성
-        # 1페이지짜리 샘플 PDF 세팅 (텍스트 포함)
-        # Note: pypdf로 텍스트 오브젝트 직접 주입이 안 될 수 있어 표준 Stream 방식을 사용하거나
-        # ReportLab 등이 없는 환경을 고려한 기본 텍스트 포함 1페이지 생성
         raw_pdf_data = b"""%PDF-1.4
 1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
 2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj
@@ -768,18 +862,14 @@ startxref
 
         dummy_file = SimpleUploadedFile("valid_sample.pdf", raw_pdf_data, content_type="application/pdf")
 
-        # 텍스트 추출 실행
         extracted_text = extract_text_from_pdf(dummy_file)
 
-        # 검증
         self.assertIn("Hello Plan B PDF Text Extraction", extracted_text)
 
     def test_extract_text_encrypted_with_empty_password(self):
-        """[4번] 빈 비밀번호("")로 해제 가능한 암호화 PDF 처리 검증"""
         writer = pypdf.PdfWriter()
         page = writer.add_blank_page(width=100, height=100)
         
-        # 빈 비밀번호("")로 읽기 암호화 설정
         writer.encrypt(user_password="", owner_password="")
 
         pdf_buffer = io.BytesIO()
@@ -788,16 +878,12 @@ startxref
 
         dummy_file = SimpleUploadedFile("encrypted_empty_pass.pdf", pdf_buffer.read(), content_type="application/pdf")
 
-        # 빈 비밀번호 해제 시도 후 텍스트 추출 동작 시도 (내용이 없으므로 빈 PDF 예외 혹은 정상 통과 확인)
-        # 빈 페이지이므로 PdfExtractionError("PDF에서 텍스트를 추출할 수 없습니다...")가 발생해야 decrypt("") 단계를 무사히 통과한 것임
         with self.assertRaises(PdfExtractionError) as context:
             extract_text_from_pdf(dummy_file)
 
-        # "암호화된 PDF 파일은 지원하지 않습니다"가 아닌, decrypt 통과 후 "텍스트를 추출할 수 없습니다" 메시지가 나와야 성공!
         self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
 
     def test_extract_text_from_invalid_pdf(self):
-        """손상되었거나 일반 텍스트 파일 입력 시 예외 검증"""
         dummy_file = SimpleUploadedFile("invalid.pdf", b"Not a PDF content", content_type="application/pdf")
 
         with self.assertRaises(PdfExtractionError) as context:
@@ -806,7 +892,6 @@ startxref
         self.assertIn("올바른 PDF 형식이 아니거나 손상된 파일입니다", str(context.exception))
 
     def test_extract_text_from_empty_pdf_or_image(self):
-        """텍스트 레이어가 없는 빈/스캔 PDF일 때 예외 처리 검증"""
         writer = pypdf.PdfWriter()
         writer.add_blank_page(width=100, height=100)
 

@@ -409,14 +409,49 @@ def material_retry_analyze(request, material_id):
 @require_http_methods(["GET"])
 def material_analysis_status(request, material_id):
     """
-    E-AI-02: AI 분석 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    "분석 중..." 화면에서 주기적으로 호출해 analysis_status 변화를 확인하는 용도.
+    E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
+    "분석 중..." 화면에서 주기적으로 호출해 extraction_status 및 analysis_status를 확인한다.
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
-    return JsonResponse(get_analysis_status(material))
 
+    # 1. BE2 텍스트 추출 상태 및 에러 (StudyMaterial 모델 필드 직접 참조)
+    extraction_status = material.status  # MaterialStatus: PENDING | PROCESSING | COMPLETED | FAILED
+    extraction_error = material.error_message
+
+    # 2. BE3 AI 분석 상태 및 에러 (StudyMaterial 모델 필드 직접 참조)
+    analysis_status = material.analysis_status  # MaterialStatus: PENDING | PROCESSING | COMPLETED | FAILED
+    analysis_error = material.analysis_error_message
+
+    # 3. 전체 stage 판정 로직
+    if (
+        extraction_status == MaterialStatus.FAILED
+        or analysis_status == MaterialStatus.FAILED
+    ):
+        stage = "FAILED"
+    elif extraction_status in (MaterialStatus.PENDING, MaterialStatus.PROCESSING):
+        stage = "EXTRACTING"
+    elif analysis_status in (MaterialStatus.PENDING, MaterialStatus.PROCESSING):
+        stage = "ANALYZING"
+    elif (
+        extraction_status == MaterialStatus.COMPLETED
+        and analysis_status == MaterialStatus.COMPLETED
+    ):
+        stage = "COMPLETED"
+    else:
+        stage = "PENDING"
+
+    # 4. 약속된 JSON 응답 스펙 반환
+    return JsonResponse({
+        "stage": stage,
+        "extraction_status": extraction_status,
+        "extraction_error_message": extraction_error,
+        "analysis_status": analysis_status,
+        "analysis_error_message": analysis_error,
+        "study_material_id": material.id,
+        "exam_id": material.exam_id,
+    })
 
 # =====================================================================
 # AI 작업 검토 (exams:task_review) 
@@ -428,13 +463,17 @@ def task_review(request, exam_id):
     queryset = StudyTask.objects.filter(exam=exam)
 
     if request.method == 'POST':
+        action = request.POST.get('action')
         formset = StudyTaskFormSet(request.POST, queryset=queryset)
+
         if formset.is_valid():
+            # 1. 수정/생성된 Task 저장
             instances = formset.save(commit=False)
             for instance in instances:
                 instance.exam = exam
                 instance.is_user_modified = True
 
+                # 공부 예상 시간 재계산
                 estimated_min, estimated_max = estimate_task_minutes(
                     task_type=instance.task_type,
                     difficulty=instance.difficulty,
@@ -444,13 +483,26 @@ def task_review(request, exam_id):
                 instance.estimated_max_minutes = estimated_max
 
                 instance.save()
+
+            # 2. 삭제 대상 Task 처리
             for obj in formset.deleted_objects:
                 obj.delete()
+
+            # 3. action 파라미터에 따른 리다이렉트 및 확정 처리 분기
+            if action in ('confirm', 'confirm_and_next'):
+                # 해당 과목의 모든 미확정 Task를 확정 상태(is_confirmed=True)로 업데이트
+                exam.study_tasks.filter(is_confirmed=False).update(is_confirmed=True)
+                return redirect('planner:feasibility', period_id=exam.exam_period_id)
+
+            # 단순 저장(save) 또는 기타 제출 시 기존 리뷰 페이지로 리다이렉트
             return redirect('exams:task_review', exam_id=exam.id)
     else:
         formset = StudyTaskFormSet(queryset=queryset)
 
-    return render(request, 'exams/task_review.html', {'formset': formset, 'exam': exam})
+    return render(request, 'exams/task_review.html', {
+        'formset': formset,
+        'exam': exam,
+    })
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 
