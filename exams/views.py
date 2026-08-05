@@ -4,6 +4,7 @@ from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
 from django.http import JsonResponse
+from django.db import transaction
 
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
@@ -23,12 +24,12 @@ from .services.analysis_orchestrator import (
     analyze_and_estimate,
     retry_analysis,
     get_analysis_status,
+    MAX_RETRY_COUNT,
     DuplicateAnalysisRequestError,
     AnalysisNotSupportedError,
     RetryLimitExceededError,
     AnalysisPipelineError,
 )
-from django.db import transaction
 
 
 # =====================================================================
@@ -61,7 +62,7 @@ def period_create(request):
     """
     생성 전용. 수정은 period_update가 따로 담당.
     - active 시험기간 1개 제한 (MVP 정책)
-    - 생성 성공 시 '시험기간 상세'로 이동 (표의 연동화면 기준)
+    - 생성 성공 시 '시험기간 상세'로 이동
     - start_date~end_date 범위의 AvailableTime을 0분으로 미리 채워둠
     """
     if request.method == 'POST':
@@ -125,6 +126,7 @@ def period_update(request, period_id):
 
     return render(request, 'exams/period_form.html', {'form': form, 'period': period})
 
+
 # =====================================================================
 # 시험기간 삭제 (exams:period_delete)
 # =====================================================================
@@ -165,7 +167,7 @@ def subject_create(request, period_id):
             exam = form.save(commit=False)
             exam.exam_period = period
             exam.save()
-            return redirect('exams:period_detail', period_id=period.id)  # 표: 연동화면=시험기간 상세
+            return redirect('exams:period_detail', period_id=period.id)
     else:
         form = ExamForm(exam_period=period)
 
@@ -212,10 +214,6 @@ def subject_delete(request, period_id, exam_id):
 @login_required
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    """
-    period_create/update에서 이미 0분으로 AvailableTime을 생성해두므로
-    여기서는 값만 채우는 '수정' 개념 (extra=0 formset으로 충분)
-    """
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
 
@@ -226,7 +224,7 @@ def available_time_update(request, period_id):
             for instance in instances:
                 instance.exam_period = period
                 instance.save()
-            return redirect('exams:period_detail', period_id=period.id)  # 표: 연동화면=시험기간 상세
+            return redirect('exams:period_detail', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
 
@@ -255,6 +253,7 @@ def material_create(request, exam_id):
 
     return render(request, 'exams/material_form.html', {'form': form, 'exam': exam})
 
+
 # =====================================================================
 # 자료 상세 (exams:material_detail)
 # =====================================================================
@@ -272,13 +271,10 @@ def material_detail(request, material_id):
 @login_required
 @require_http_methods(["POST"])
 def material_extract(request, material_id):
-    """
-    D-MAT-03: PDF 텍스트 추출
-    - status: PENDING/FAILED → PROCESSING → COMPLETED(+extracted_text) / FAILED(+error_message)
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
+    previous_extracted_text = material.extracted_text
 
     if material.material_type != MaterialType.PDF:
         messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
@@ -288,13 +284,27 @@ def material_extract(request, material_id):
         messages.error(request, "첨부된 PDF 파일이 없습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    if material.status == MaterialStatus.PROCESSING:
-        messages.info(request, "이미 분석 중인 자료입니다.")
+    updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
+        status=MaterialStatus.PROCESSING
+    ).exclude(
+        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    ).update(status=MaterialStatus.PROCESSING, error_message=None)
+
+    if not updated_count:
+        material.refresh_from_db(fields=['status', 'analysis_status'])
+        if material.status == MaterialStatus.PROCESSING:
+            messages.info(request, "이미 PDF 텍스트를 추출 중인 자료입니다.")
+        elif material.analysis_status == MaterialStatus.PROCESSING:
+            messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
+        else:
+            messages.error(
+                request,
+                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 "
+                "화면에서 확인해주세요.",
+            )
         return redirect('exams:material_detail', material_id=material.id)
 
-    material.status = MaterialStatus.PROCESSING
-    material.error_message = None
-    material.save(update_fields=['status', 'error_message'])
+    material.refresh_from_db(fields=['status', 'error_message'])
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -315,7 +325,16 @@ def material_extract(request, material_id):
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
-    material.save(update_fields=['status', 'extracted_text', 'error_message'])
+
+    if extracted != previous_extracted_text:
+        material.analysis_status = MaterialStatus.PENDING
+        material.analysis_error_message = None
+        material.analysis_retry_count = 0
+
+    material.save(update_fields=[
+        'status', 'extracted_text', 'error_message',
+        'analysis_status', 'analysis_error_message', 'analysis_retry_count',
+    ])
     messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
     return redirect('exams:material_detail', material_id=material.id)
 
@@ -333,20 +352,13 @@ def material_delete(request, material_id):
     messages.success(request, "학습자료가 삭제되었습니다.")
     return redirect('exams:period_detail', period_id=period_id)
 
+
 # =====================================================================
 # AI 분석 실행 (exams:material_analyze) - E-AI-01
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
 def material_analyze(request, material_id):
-    """
-    E-AI-01: AI 분석 요청.
-    analysis_status: PENDING -> PROCESSING -> COMPLETED/FAILED
-
-    텍스트 추출(status)이 아직 COMPLETED가 아니면 (PDF 추출 전, 실패 등)
-    분석 자체를 시작하지 않는다 - 추출 상태와 분석 상태는 별개 필드지만,
-    추출이 안 끝난 자료를 분석할 수는 없기 때문.
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
@@ -360,8 +372,7 @@ def material_analyze(request, material_id):
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError):
-        # 실패 사유는 이미 material.analysis_error_message에 저장돼 있음
+    except (AIAnalysisError, AnalysisPipelineError, Exception):
         messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
 
@@ -375,10 +386,6 @@ def material_analyze(request, material_id):
 @login_required
 @require_http_methods(["POST"])
 def material_retry_analyze(request, material_id):
-    """
-    E-AI-03: AI 분석 재시도. FAILED 상태 + 재시도 횟수(2회) 남아있을 때만 허용.
-    조건에 안 맞으면 analysis_orchestrator가 던지는 예외를 그대로 사용자 메시지로 변환한다.
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
@@ -394,7 +401,7 @@ def material_retry_analyze(request, material_id):
     except RetryLimitExceededError as e:
         messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError):
+    except (AIAnalysisError, AnalysisPipelineError, Exception):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
@@ -410,48 +417,66 @@ def material_retry_analyze(request, material_id):
 def material_analysis_status(request, material_id):
     """
     E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    "분석 중..." 화면에서 주기적으로 호출해 extraction_status 및 analysis_status를 확인한다.
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    # 1. BE2 텍스트 추출 상태 및 에러 (StudyMaterial 모델 필드 직접 참조)
-    extraction_status = material.status  # MaterialStatus: PENDING | PROCESSING | COMPLETED | FAILED
+    extraction_status = material.status
     extraction_error = material.error_message
-
-    # 2. BE3 AI 분석 상태 및 에러 (StudyMaterial 모델 필드 직접 참조)
-    analysis_status = material.analysis_status  # MaterialStatus: PENDING | PROCESSING | COMPLETED | FAILED
+    analysis_status = material.analysis_status
     analysis_error = material.analysis_error_message
 
-    # 3. 전체 stage 판정 로직
-    if (
-        extraction_status == MaterialStatus.FAILED
-        or analysis_status == MaterialStatus.FAILED
-    ):
-        stage = "FAILED"
-    elif extraction_status in (MaterialStatus.PENDING, MaterialStatus.PROCESSING):
+    # 1. 전체 stage 판정 로직
+    failed_stage = None
+
+    # ① 재추출 진행 중이면 이전 분석 실패보다 최우선으로 "EXTRACTING"
+    if extraction_status == MaterialStatus.PROCESSING:
         stage = "EXTRACTING"
-    elif analysis_status in (MaterialStatus.PENDING, MaterialStatus.PROCESSING):
+
+    # ② 추출 자체가 실패한 경우
+    elif extraction_status == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "EXTRACTION"
+
+    # ③ 분석 진행 중인 경우
+    elif analysis_status == MaterialStatus.PROCESSING:
         stage = "ANALYZING"
+
+    # ④ 분석이 실패한 경우
+    elif analysis_status == MaterialStatus.FAILED:
+        stage = "FAILED"
+        failed_stage = "ANALYSIS"
+
+    # ⑤ 둘 다 완료된 경우
     elif (
         extraction_status == MaterialStatus.COMPLETED
         and analysis_status == MaterialStatus.COMPLETED
     ):
         stage = "COMPLETED"
+
+    # ⑥ 아무것도 안 한 PENDING 상태 (PENDING이 튜플에서 빠져서 여기로 옴)
     else:
         stage = "PENDING"
 
-    # 4. 약속된 JSON 응답 스펙 반환
+    # 2. 재시도 정보 계산 (API 계약 필수 필드)
+    retry_count = material.analysis_retry_count
+    retry_remaining = max(0, MAX_RETRY_COUNT - retry_count)
+
+    # 3. 약속된 JSON 응답 스펙 반환
     return JsonResponse({
         "stage": stage,
         "extraction_status": extraction_status,
         "extraction_error_message": extraction_error,
         "analysis_status": analysis_status,
         "analysis_error_message": analysis_error,
+        "failed_stage": failed_stage,
+        "retry_count": retry_count,
+        "retry_remaining": retry_remaining,
         "study_material_id": material.id,
         "exam_id": material.exam_id,
     })
+
 
 # =====================================================================
 # AI 작업 검토 (exams:task_review) 
@@ -467,13 +492,11 @@ def task_review(request, exam_id):
         formset = StudyTaskFormSet(request.POST, queryset=queryset)
 
         if formset.is_valid():
-            # 1. 수정/생성된 Task 저장
             instances = formset.save(commit=False)
             for instance in instances:
                 instance.exam = exam
                 instance.is_user_modified = True
 
-                # 공부 예상 시간 재계산
                 estimated_min, estimated_max = estimate_task_minutes(
                     task_type=instance.task_type,
                     difficulty=instance.difficulty,
@@ -484,17 +507,13 @@ def task_review(request, exam_id):
 
                 instance.save()
 
-            # 2. 삭제 대상 Task 처리
             for obj in formset.deleted_objects:
                 obj.delete()
 
-            # 3. action 파라미터에 따른 리다이렉트 및 확정 처리 분기
             if action in ('confirm', 'confirm_and_next'):
-                # 해당 과목의 모든 미확정 Task를 확정 상태(is_confirmed=True)로 업데이트
                 exam.study_tasks.filter(is_confirmed=False).update(is_confirmed=True)
                 return redirect('planner:feasibility', period_id=exam.exam_period_id)
 
-            # 단순 저장(save) 또는 기타 제출 시 기존 리뷰 페이지로 리다이렉트
             return redirect('exams:task_review', exam_id=exam.id)
     else:
         formset = StudyTaskFormSet(queryset=queryset)
@@ -503,6 +522,7 @@ def task_review(request, exam_id):
         'formset': formset,
         'exam': exam,
     })
+
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 

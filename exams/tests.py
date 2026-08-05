@@ -2,8 +2,8 @@ import datetime
 import io
 import pypdf
 from unittest.mock import patch
-
-from django.test import TestCase, Client
+from django.db import connection
+from django.test import TestCase, TransactionTestCase, override_settings, Client
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -29,6 +29,8 @@ from exams.services.analysis_orchestrator import (
     get_analysis_status,
     retry_analysis,
 )
+
+from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 
 User = get_user_model()
@@ -219,13 +221,8 @@ class TaskReviewFormSubmitTest(TestCase):
         self.assertEqual(self.task.difficulty, TaskDifficulty.HARD)
         self.assertFalse(self.task.is_confirmed)
 
-    @patch("exams.views.redirect")
-    def test_confirm_and_next_action(self, mock_redirect):
-        """'모두 확정하고 다음으로' 버튼 클릭 시 views.py 수정 없이 redirect mock으로 URL 미연결 처리"""
-        from django.http import HttpResponseRedirect
-        expected_redirect_url = f"/planner/period/{self.period.id}/feasibility/"
-        mock_redirect.return_value = HttpResponseRedirect(expected_redirect_url)
-
+    def test_confirm_and_next_action(self):
+        """'모두 확정하고 다음으로' 버튼 클릭 시 실제 planner:feasibility 라우팅 검증 (모킹 제거 반영)"""
         post_data = {
             "form-TOTAL_FORMS": "1",
             "form-INITIAL_FORMS": "1",
@@ -243,8 +240,13 @@ class TaskReviewFormSubmitTest(TestCase):
 
         response = self.client.post(self.url, post_data)
 
-        mock_redirect.assert_called_once_with(
-            'planner:feasibility', period_id=self.period.id
+        # 리다이렉트 URL 및 kwargs 인자 정상 전달 검증
+        self.assertRedirects(
+            response,
+            reverse(
+                "planner:feasibility",
+                kwargs={"period_id": self.period.id},
+            ),
         )
 
         self.task.refresh_from_db()
@@ -292,6 +294,16 @@ class MaterialAnalysisStatusViewTest(TestCase):
         self.assertEqual(data["analysis_status"], MaterialStatus.PROCESSING)
         self.assertEqual(data["study_material_id"], self.material.id)
         self.assertEqual(data["exam_id"], self.exam.id)
+        
+        # retry_count 및 retry_remaining 검증 복원
+        self.assertEqual(
+            data["retry_count"],
+            self.material.analysis_retry_count,
+        )
+        self.assertEqual(
+            data["retry_remaining"],
+            max(0, 2 - self.material.analysis_retry_count),
+        )
 
 
 class MaterialCreateTests(TestCase):
@@ -381,6 +393,86 @@ class MaterialExtractTests(TestCase):
 
         self.assertEqual(material.status, MaterialStatus.FAILED)
         self.assertIn("스캔", material.error_message)
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_success_resets_stale_analysis_state(self, mock_extract):
+        mock_extract.return_value = "새로 추출된 텍스트입니다."
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "예전 텍스트"
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_error_message = "예전 텍스트 기준 실패 사유"
+        material.analysis_retry_count = 1
+        material.save(update_fields=[
+            "status", "extracted_text", "analysis_status",
+            "analysis_error_message", "analysis_retry_count",
+        ])
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(material.extracted_text, "새로 추출된 텍스트입니다.")
+        self.assertEqual(material.analysis_status, MaterialStatus.PENDING)
+        self.assertIsNone(material.analysis_error_message)
+        self.assertEqual(material.analysis_retry_count, 0)
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_success_keeps_analysis_state_when_text_unchanged(self, mock_extract):
+        mock_extract.return_value = "변하지 않는 텍스트입니다."
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "변하지 않는 텍스트입니다."
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_error_message = "예전 실패 사유"
+        material.analysis_retry_count = MAX_RETRY_COUNT
+        material.save(update_fields=[
+            "status", "extracted_text", "analysis_status",
+            "analysis_error_message", "analysis_retry_count",
+        ])
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(material.extracted_text, "변하지 않는 텍스트입니다.")
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_error_message, "예전 실패 사유")
+        self.assertEqual(material.analysis_retry_count, MAX_RETRY_COUNT)
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_blocked_when_analysis_processing(self, mock_extract):
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "기존 추출 텍스트"
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.save(update_fields=["status", "extracted_text", "analysis_status"])
+
+        response = self.client.post(
+            reverse('exams:material_extract', args=[material.id]), follow=True
+        )
+
+        material.refresh_from_db()
+        mock_extract.assert_not_called()
+        self.assertEqual(material.extracted_text, "기존 추출 텍스트")
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("AI 분석이 진행 중인" in str(m) for m in messages_list))
+
+    @patch('exams.views.extract_text_from_pdf')
+    def test_extract_blocked_when_analysis_completed(self, mock_extract):
+        material = self._make_pdf_material()
+        material.status = MaterialStatus.COMPLETED
+        material.extracted_text = "기존 추출 텍스트"
+        material.analysis_status = MaterialStatus.COMPLETED
+        material.save(update_fields=["status", "extracted_text", "analysis_status"])
+
+        response = self.client.post(
+            reverse('exams:material_extract', args=[material.id]), follow=True
+        )
+
+        material.refresh_from_db()
+        mock_extract.assert_not_called()
+        self.assertEqual(material.extracted_text, "기존 추출 텍스트")
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("이미 AI 분석이 완료된" in str(m) for m in messages_list))
 
 
 class StudyTaskCreateTests(TestCase):
@@ -496,6 +588,7 @@ class AnalysisOrchestratorTestCase(TestCase):
     def _make_material(self, text="1장 개념 정리"):
         return StudyMaterial.objects.create(
             exam=self.exam, title="테스트 자료", extracted_text=text,
+            status=MaterialStatus.COMPLETED,
         )
 
     def test_initial_analysis_success_sets_completed(self):
@@ -526,7 +619,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(material.status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.error_message)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_ai_analysis_failure_sets_failed_and_rolls_back(self, mock_analyze):
         mock_analyze.side_effect = AICallFailedError("AI 서버 연결 실패")
         material = self._make_material()
@@ -552,7 +645,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertNotIn("예상시간 계산 중 알 수 없는 오류", material.analysis_error_message or "")
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
-    @patch("exams.services.analysis_orchestrator.analyze_study_material")
+    @patch("exams.services.analysis_orchestrator.fetch_extracted_tasks")
     def test_empty_result_is_treated_as_failure(self, mock_analyze):
         mock_analyze.return_value = []
         material = self._make_material()
@@ -598,7 +691,7 @@ class AnalysisOrchestratorTestCase(TestCase):
         material.analysis_retry_count = 0
         material.save(update_fields=["analysis_status", "analysis_retry_count"])
 
-        with patch("exams.services.analysis_orchestrator.analyze_study_material") as mock_analyze:
+        with patch("exams.services.analysis_orchestrator.fetch_extracted_tasks") as mock_analyze:
             mock_analyze.side_effect = AICallFailedError("1차 재시도 실패")
             with self.assertRaises(AICallFailedError):
                 retry_analysis(material)
@@ -664,6 +757,35 @@ class AnalysisOrchestratorTestCase(TestCase):
         self.assertEqual(result["error_message"], "네트워크 오류")
         self.assertEqual(result["retry_count"], 1)
         self.assertEqual(result["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    def test_initial_analysis_blocked_when_extraction_wins_race_after_status_check(self):
+        material = self._make_material()
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PENDING)
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
+
+    def test_retry_blocked_when_extraction_wins_race_after_status_check(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = 0
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        StudyMaterial.objects.filter(pk=material.pk).update(status=MaterialStatus.PROCESSING)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(material.analysis_retry_count, 0)
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
 
 
 class MaterialAnalysisViewTestCase(TestCase):
@@ -775,11 +897,112 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.assertEqual(data["extraction_status"], MaterialStatus.COMPLETED)
         self.assertEqual(data["study_material_id"], self.material.id)
         self.assertEqual(data["exam_id"], self.exam.id)
+        self.assertEqual(data["analysis_error_message"], "네트워크 오류")
+        self.assertEqual(data["retry_count"], 1)
+        self.assertEqual(data["retry_remaining"], 1)
 
     def test_other_user_cannot_view_analysis_status(self):
         self.client.force_login(self.other)
         response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
         self.assertEqual(response.status_code, 404)
+
+    def _get_stage(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(reverse('exams:material_analysis_status', args=[self.material.id]))
+        return response.json()
+
+    def test_stage_pending_when_nothing_started(self):
+        self.material.status = MaterialStatus.PENDING
+        self.material.analysis_status = MaterialStatus.PENDING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "PENDING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_extracting_when_extraction_processing(self):
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_extraction_when_extraction_failed(self):
+        self.material.status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "EXTRACTION")
+
+    def test_stage_analyzing_when_analysis_processing(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "ANALYZING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_failed_with_analysis_when_analysis_failed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "FAILED")
+        self.assertEqual(data["failed_stage"], "ANALYSIS")
+
+    def test_stage_completed_when_analysis_completed(self):
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.COMPLETED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "COMPLETED")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_prioritizes_extraction_over_stale_analysis_failure(self):
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["stage"], "EXTRACTING")
+        self.assertIsNone(data["failed_stage"])
+
+    def test_stage_response_still_includes_existing_fields(self):
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_error_message = "테스트 실패 사유"
+        self.material.analysis_retry_count = 1
+        self.material.save(update_fields=[
+            "analysis_status", "analysis_error_message", "analysis_retry_count",
+        ])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["analysis_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["analysis_error_message"], "테스트 실패 사유")
+        self.assertEqual(data["retry_count"], 1)
+        self.assertEqual(data["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    def test_stage_response_includes_extraction_fields(self):
+        self.material.status = MaterialStatus.FAILED
+        self.material.error_message = "PDF 추출 실패 사유"
+        self.material.save(update_fields=["status", "error_message"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["extraction_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["extraction_error_message"], "PDF 추출 실패 사유")
 
     @patch("exams.services.analysis_orchestrator.estimate_task_minutes")
     def test_analyze_unexpected_exception_redirects_instead_of_500(self, mock_estimate):
@@ -905,3 +1128,127 @@ startxref
             extract_text_from_pdf(dummy_file)
 
         self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+
+
+class AITransactionIsolationTestCase(TransactionTestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tx_tester@example.com", email="tx_tester@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="트랜잭션 격리 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="테스트과목", exam_date=datetime.date(2026, 8, 18),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", extracted_text="1장 개념 정리",
+            status=MaterialStatus.COMPLETED,
+        )
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_call_ai_runs_without_open_transaction(self):
+        observed_in_atomic_block = []
+
+        def spy_call_ai(prompt):
+            observed_in_atomic_block.append(connection.in_atomic_block)
+            return task_extractor._MOCK_RESPONSE
+
+        with patch("exams.services.task_extractor._call_ai", side_effect=spy_call_ai):
+            analyze_and_estimate(self.material)
+
+        self.assertEqual(len(observed_in_atomic_block), 1)
+        self.assertFalse(
+            observed_in_atomic_block[0],
+            "AI 네트워크 호출(_call_ai) 시점에 DB 트랜잭션이 열려있으면 안 된다.",
+        )
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_studytask_creation_still_rolls_back_on_db_failure(self):
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_stale_extracted_text_discards_result(self):
+        def fake_fetch(exam, extracted_text):
+            StudyMaterial.objects.filter(pk=self.material.pk).update(
+                extracted_text="다른 요청이 재추출한 새 텍스트"
+            )
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(self.material.extracted_text, "다른 요청이 재추출한 새 텍스트")
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_stale_when_extraction_reprocessing_even_if_text_unchanged(self):
+        original_text = self.material.extracted_text
+
+        def fake_fetch(exam, extracted_text):
+            StudyMaterial.objects.filter(pk=self.material.pk).update(
+                status=MaterialStatus.PROCESSING
+            )
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=self.material).count(), 0)
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.analysis_status, MaterialStatus.FAILED)
+        self.assertEqual(self.material.extracted_text, original_text)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_speed_factor_uses_latest_value_at_save_time(self):
+        def fake_fetch(exam, extracted_text):
+            Exam.objects.filter(pk=self.exam.pk).update(speed_factor=2.0)
+            return task_extractor.fetch_extracted_tasks(exam, extracted_text)
+
+        with patch(
+            "exams.services.analysis_orchestrator.fetch_extracted_tasks", side_effect=fake_fetch
+        ):
+            tasks = analyze_and_estimate(self.material)
+
+        from planner.services.time_estimator import estimate_task_minutes
+
+        first_task = tasks[0]
+        expected_min, expected_max = estimate_task_minutes(
+            task_type=first_task.task_type,
+            difficulty=first_task.difficulty,
+            speed_factor=2.0,
+        )
+        self.assertEqual(first_task.estimated_min_minutes, expected_min)
+        self.assertEqual(first_task.estimated_max_minutes, expected_max)
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_existing_unconfirmed_task_preserved_when_save_rolls_back(self):
+        old_task = StudyTask.objects.create(
+            exam=self.exam, study_material=self.material, title="기존 작업",
+            task_type="concept", importance="medium", depth="basic",
+            difficulty="normal", estimated_min_minutes=10, estimated_max_minutes=20,
+            order=1,
+        )
+
+        with patch("exams.services.analysis_orchestrator.estimate_task_minutes") as mock_estimate:
+            mock_estimate.side_effect = ValueError("예상시간 계산 중 알 수 없는 오류")
+            with self.assertRaises(AnalysisPipelineError):
+                analyze_and_estimate(self.material)
+
+        self.assertTrue(
+            StudyTask.objects.filter(pk=old_task.pk, title="기존 작업").exists()
+        )

@@ -280,31 +280,21 @@ def _parse_and_validate(raw_response: str) -> list[ExtractedTask]:
     return tasks
 
 
-@transaction.atomic
-def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
+def fetch_extracted_tasks(exam: Exam, extracted_text: str) -> list[ExtractedTask]:
     """
-    StudyMaterial의 추출된 텍스트를 AI로 분석해 StudyTask들을 생성한다.
+    AI 호출 + 파싱 + 검증만 수행한다. DB 접근이 전혀 없고, 트랜잭션도 걸지 않는다.
 
-    - AI가 생성하는 값: unit_name, title, task_type, importance, depth, difficulty, ai_reason
-    - AI가 생성하지 않는 값: estimated_min/max_minutes
-      -> 0으로 남겨두고, 이후 BE1의 time_estimator 서비스가 채운다.
-    - 생성된 StudyTask는 is_confirmed=False, is_user_modified=False 상태로 저장된다.
-      사용자가 검토/수정/확정하기 전까지는 최종 계획에 사용되지 않는다.
-    - AI 응답이 JSON 검증에 실패하면, 실패 이유를 프롬프트에 덧붙여 최대
-      MAX_VALIDATION_RETRIES회 self-correction 재요청을 한다.
-    - 동일 StudyMaterial에 대해 다시 실행되면(재분석), 이전에 생성된 미확정·미수정
-      StudyTask는 삭제하고 새로 만든다 (사용자가 수정했거나 확정한 작업은 보존).
+    (기존 이슈: analyze_study_material() 전체가 @transaction.atomic이라, 그 안에서
+    벌어지는 AI 네트워크 호출(재시도 포함 최대 수십 초 소요 가능)이 DB 커넥션을
+    오래 점유하는 문제가 있었다. 이 함수는 순수 네트워크/파싱만 담당해서 DB 트랜잭션과
+    완전히 분리한다 - 호출하는 쪽에서 결과를 받은 뒤 별도로, 가능한 한 짧게 DB에 저장해야 한다.)
+
+    AI 응답이 JSON 검증에 실패하면, 실패 이유를 프롬프트에 덧붙여 최대
+    MAX_VALIDATION_RETRIES회 self-correction 재요청을 한다.
 
     실패 시 AIAnalysisError 계열 예외(AICallFailedError, AIResponseValidationError)를
-    발생시키며, 이 경우 StudyTask는 생성/삭제되지 않는다 (트랜잭션 롤백).
+    발생시킨다.
     """
-    if not study_material.extracted_text:
-        raise AIResponseValidationError("StudyMaterial에 분석할 텍스트가 없습니다.")
-
-    exam: Exam = study_material.exam
-
-    # AI 응답이 검증에 실패하면, 실패 이유를 프롬프트에 덧붙여 최대 MAX_VALIDATION_RETRIES회
-    # 재요청한다 (self-correction). 그래도 실패하면 AIResponseValidationError를 던진다.
     extracted_tasks = None
     last_validation_error: str | None = None
 
@@ -312,7 +302,7 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
         prompt = build_prompt(
             exam.subject_name,
             exam.exam_date,
-            study_material.extracted_text,
+            extracted_text,
             previous_error=last_validation_error,
         )
         raw_response = _call_ai(prompt)
@@ -330,6 +320,24 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
         raise AIResponseValidationError(
             f"AI 응답 검증이 {MAX_VALIDATION_RETRIES + 1}회 모두 실패했습니다: {last_validation_error}"
         )
+
+    return extracted_tasks
+
+
+@transaction.atomic
+def save_extracted_tasks(
+    study_material: StudyMaterial, extracted_tasks: list[ExtractedTask]
+) -> list[StudyTask]:
+    """
+    fetch_extracted_tasks()가 만든 결과를 StudyTask로 저장한다. DB 쓰기 전용이라
+    네트워크 호출 없이 짧게 끝나므로, 트랜잭션으로 묶어도 DB 커넥션을 오래 점유하지 않는다.
+
+    - 생성된 StudyTask는 is_confirmed=False, is_user_modified=False 상태로 저장된다.
+      사용자가 검토/수정/확정하기 전까지는 최종 계획에 사용되지 않는다.
+    - 동일 StudyMaterial에 대해 다시 실행되면(재분석), 이전에 생성된 미확정·미수정
+      StudyTask는 삭제하고 새로 만든다 (사용자가 수정했거나 확정한 작업은 보존).
+    """
+    exam: Exam = study_material.exam
 
     # 동일 StudyMaterial로 "AI 분석 다시 실행"을 하는 경우, 이전에 생성된 미확정/미수정
     # StudyTask가 계속 누적되는 것을 방지하기 위해 먼저 정리한다.
@@ -374,3 +382,30 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
     StudyTask.objects.bulk_create(created_tasks)
     logger.info("AI 분석 완료: exam=%s, 생성된 작업 %d개", exam.subject_name, len(created_tasks))
     return created_tasks
+
+
+def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
+    """
+    StudyMaterial의 추출된 텍스트를 AI로 분석해 StudyTask들을 생성한다.
+    (fetch_extracted_tasks + save_extracted_tasks를 순서대로 호출하는 편의 함수)
+
+    - AI가 생성하는 값: unit_name, title, task_type, importance, depth, difficulty, ai_reason
+    - AI가 생성하지 않는 값: estimated_min/max_minutes
+      -> 0으로 남겨두고, 이후 BE1의 time_estimator 서비스가 채운다.
+
+    주의: 이 함수 자체는 트랜잭션으로 감싸져 있지 않다 (AI 네트워크 호출을 트랜잭션
+    밖에 두기 위함). DB 쓰기는 save_extracted_tasks() 안에서만 짧게 트랜잭션 처리된다.
+    이 함수를 다른 DB 작업과 원자적으로(atomic) 묶어야 하는 경우(예: 예상시간 계산까지
+    한 번에 롤백되어야 하는 경우)에는, 이 함수 대신 fetch_extracted_tasks()로 AI 결과를
+    먼저 받아온 뒤, 필요한 DB 작업들을 직접 하나의 @transaction.atomic으로 묶을 것
+    (analysis_orchestrator.py의 _run_analysis_and_estimate() 참고).
+
+    실패 시 AIAnalysisError 계열 예외(AICallFailedError, AIResponseValidationError)를
+    발생시키며, 이 경우 StudyTask는 생성/삭제되지 않는다.
+    """
+    if not study_material.extracted_text:
+        raise AIResponseValidationError("StudyMaterial에 분석할 텍스트가 없습니다.")
+
+    exam: Exam = study_material.exam
+    extracted_tasks = fetch_extracted_tasks(exam, study_material.extracted_text)
+    return save_extracted_tasks(study_material, extracted_tasks)
