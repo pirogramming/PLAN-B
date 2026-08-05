@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}계획 가능성 판정 - PLAN B{% endblock %}
+{% block content %}
+  <h1>계획 가능성 판정</h1>
+  <p>{{ exam_period.title }}</p>
+
+  <p>판정: {{ result.status }}</p>
+  <p>확정된 작업 수: {{ task_count }}</p>
+  <p>최소 필요시간: {{ total_min_minutes }}분</p>
+  <p>최대 필요시간: {{ total_max_minutes }}분</p>
+  <p>가용시간: {{ total_available_minutes }}분</p>
+
+  {% if can_generate %}
+    <form method="post" action="{% url 'planner:plan_generate' period_id=exam_period.id %}">
+      {% csrf_token %}
+      <button type="submit">계획 생성하기</button>
+    </form>
+  {% else %}
+    <p>{{ readiness_error|default:"가능시간 또는 학습작업을 조정해주세요." }}</p>
+  {% endif %}
+{% endblock %}

@@ -1,6 +1,10 @@
 from django.urls import path
+from . import views
 
 app_name = 'planner'
 
 urlpatterns = [
+    path('feasibility/<int:period_id>/', views.feasibility, name='feasibility'),
+    path('plan/generate/<int:period_id>/', views.plan_generate, name='plan_generate'),
+    path('plan/complete/<int:period_id>/', views.plan_complete, name='plan_complete'),
 ]
