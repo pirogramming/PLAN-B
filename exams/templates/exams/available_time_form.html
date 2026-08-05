@@ -13,151 +13,162 @@
 {% get_calendar_grid period.id as calendar_days %}
 
 <div class="container avail-wrap">
-    <div class="crumb-text">
-        <a href="{% url 'exams:period_detail' period.id %}">PLAN B</a>
-        &nbsp;›&nbsp; 가용시간 입력
-    </div>
-    <div class="page-title">
-        가용시간 입력하기
-    </div>
-    <div class="page-sub">
-        하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요
+  <div class="crumb-text">
+    <a href="{% url 'exams:period_detail' period.id %}">PLAN B</a>
+    &nbsp;›&nbsp; 가용시간 입력
+  </div>
+  <div class="page-title">
+    가용시간 입력하기
+  </div>
+  <div class="page-sub">
+    하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요
+  </div>
+
+  {% if formset.non_form_errors %}
+  <div class="form-error-box">
+    {{ formset.non_form_errors|striptags }}
+  </div>
+  {% endif %}
+
+  <form method="post" novalidate id="available-time-form">
+    {% csrf_token %}
+    {{ formset.management_form }}
+
+    <div class="formset-hidden">
+      {% for form in formset %}
+      <div data-formset-row="{{ forloop.counter0 }}">
+        {{ form.id }}
+        {{ form.date }}
+        {{ form.hours }}
+        {{ form.minutes }}
+      </div>
+      {% endfor %}
     </div>
 
-    {% if formset.non_form_errors %}
-    <div class="form-error-box">
-        {{ formset.non_form_errors|striptags }}
-    </div>
-    {% endif %}
-
-    <form method="post" novalidate id="available-time-form">
-        {% csrf_token %}
-        {{ formset.management_form }}
-
-        <div class="formset-hidden">
-            {% for form in formset %}
-            <div data-formset-row="{{ forloop.counter0 }}">
-                {{ form.id }}
-                {{ form.date }}
-                {{ form.hours }}
-                {{ form.minutes }}
-            </div>
-            {% endfor %}
+    <div class="avail-body">
+      <div class="card avail-cal-col">
+        <div class="avail-cal-title">
+          {{ period.start_date|date:"n월 j일" }} -
+          {{ period.end_date|date:"n월 j일" }}
         </div>
 
-        <div class="avail-body">
-            <div class="card avail-cal-col">
-                <div class="avail-cal-title">
-                    {{ period.start_date|date:"n월 j일" }} -
-                    {{ period.end_date|date:"n월 j일" }}
-                </div>
+        <div class="avail-cal-grid">
+          <div class="avail-weekday">월</div>
+          <div class="avail-weekday">화</div>
+          <div class="avail-weekday">수</div>
+          <div class="avail-weekday">목</div>
+          <div class="avail-weekday">금</div>
+          <div class="avail-weekday">토</div>
+          <div class="avail-weekday">일</div>
 
-                <div class="avail-cal-grid">
-                    <div class="avail-weekday">월</div>
-                    <div class="avail-weekday">화</div>
-                    <div class="avail-weekday">수</div>
-                    <div class="avail-weekday">목</div>
-                    <div class="avail-weekday">금</div>
-                    <div class="avail-weekday">토</div>
-                    <div class="avail-weekday">일</div>
-
-                    {% for day in calendar_days %}
-                    {% if forloop.first %}
-                    {% if day.is_exam_day %}
-                    <button type="button" class="avail-day exam-day" disabled data-date="{{ day.date|date:'Y-m-d' }}"
-                        style="grid-column-start:{{ day.weekday }};">
-                        {{ day.date|date:"j" }}
-                    </button>
-                    {% else %}
-                    <button type="button" class="avail-day" data-index="{{ day.formset_index }}"
-                        data-date="{{ day.date|date:'Y-m-d' }}" style="grid-column-start:{{ day.weekday }};">
-                        {{ day.date|date:"j" }}
-                    </button>
-                    {% endif %}
-                    {% else %}
-                    {% if day.is_exam_day %}
-                    <button type="button" class="avail-day exam-day" disabled data-date="{{ day.date|date:'Y-m-d' }}">
-                        {{ day.date|date:"j" }}
-                    </button>
-                    {% else %}
-                    <button type="button" class="avail-day" data-index="{{ day.formset_index }}"
-                        data-date="{{ day.date|date:'Y-m-d' }}">
-                        {{ day.date|date:"j" }}
-                    </button>
-                    {% endif %}
-                    {% endif %}
-                    {% endfor %}
-                </div>
-            </div>
-
-            <div class="card avail-side-col disabled" id="side-panel">
-                <div id="side-panel-date" class="avail-side-date">
-                    날짜를 선택하세요
-                </div>
-                <div class="avail-side-caption">선택한 날짜</div>
-
-                <div class="field-label">전체 가용 시간</div>
-                <input type="number" min="0" step="10" class="form-control num" id="side-panel-minutes"
-                    placeholder="240">
-                <div class="avail-side-hint">분 단위로 입력</div>
-
-                <button type="button" class="btn btn-brand btn-block avail-save-btn" id="side-panel-save">
-                    저장
-                </button>
-            </div>
+          {% for day in calendar_days %}
+            {% if forloop.first %}
+              {% if day.is_exam_day %}
+              <button type="button" class="avail-day exam-day" disabled
+                      data-date="{{ day.date|date:'Y-m-d' }}"
+                      style="grid-column-start:{{ day.weekday }};">
+                {{ day.date|date:"j" }}
+              </button>
+              {% else %}
+              <button type="button"
+                      class="avail-day{% if day.has_value %} has-value{% endif %}"
+                      data-index="{{ day.formset_index }}"
+                      data-date="{{ day.date|date:'Y-m-d' }}"
+                      style="grid-column-start:{{ day.weekday }};">
+                {{ day.date|date:"j" }}
+              </button>
+              {% endif %}
+            {% else %}
+              {% if day.is_exam_day %}
+              <button type="button" class="avail-day exam-day" disabled
+                      data-date="{{ day.date|date:'Y-m-d' }}">
+                {{ day.date|date:"j" }}
+              </button>
+              {% else %}
+              <button type="button"
+                      class="avail-day{% if day.has_value %} has-value{% endif %}"
+                      data-index="{{ day.formset_index }}"
+                      data-date="{{ day.date|date:'Y-m-d' }}">
+                {{ day.date|date:"j" }}
+              </button>
+              {% endif %}
+            {% endif %}
+          {% endfor %}
         </div>
+      </div>
 
-        <button type="submit" class="btn btn-brand avail-next-btn">
-            다음
+      <div class="card avail-side-col disabled" id="side-panel">
+        <div id="side-panel-date" class="avail-side-date">
+          날짜를 선택하세요
+        </div>
+        <div class="avail-side-caption">선택한 날짜</div>
+
+        <div class="field-label">전체 가용 시간</div>
+        <input type="number" min="0" step="10"
+               class="form-control num"
+               id="side-panel-minutes"
+               placeholder="240">
+        <div class="avail-side-hint">분 단위로 입력</div>
+
+        <button type="button"
+                class="btn btn-brand btn-block avail-save-btn"
+                id="side-panel-save">
+          저장
         </button>
-    </form>
+      </div>
+    </div>
+
+    <button type="submit" class="btn btn-brand avail-next-btn">
+      다음
+    </button>
+  </form>
 </div>
 
 <script>
-    (function () {
-        var sidePanel = document.getElementById('side-panel');
-        var dateLabel = document.getElementById('side-panel-date');
-        var minutesInput = document.getElementById('side-panel-minutes');
-        var saveBtn = document.getElementById('side-panel-save');
-        var currentDay = null;
+(function () {
+  var sidePanel = document.getElementById('side-panel');
+  var dateLabel = document.getElementById('side-panel-date');
+  var minutesInput = document.getElementById('side-panel-minutes');
+  var saveBtn = document.getElementById('side-panel-save');
+  var currentDay = null;
 
-        function selectDay(dayBtn) {
-            document.querySelectorAll('.avail-day').forEach(function (d) {
-                d.classList.remove('sel');
-            });
-            dayBtn.classList.add('sel');
-            currentDay = dayBtn;
-            sidePanel.classList.remove('disabled');
-            dateLabel.textContent = dayBtn.dataset.date;
+  function selectDay(dayBtn) {
+    document.querySelectorAll('.avail-day').forEach(function (d) {
+      d.classList.remove('sel');
+    });
+    dayBtn.classList.add('sel');
+    currentDay = dayBtn;
+    sidePanel.classList.remove('disabled');
+    dateLabel.textContent = dayBtn.dataset.date;
 
-            var row = document.querySelector(
-                '[data-formset-row="' + dayBtn.dataset.index + '"]'
-            );
-            var hoursInput = row.querySelector('input[name$="-hours"]');
-            var minInput = row.querySelector('input[name$="-minutes"]');
-            var total = (parseInt(hoursInput.value || 0, 10) * 60) +
+    var row = document.querySelector(
+      '[data-formset-row="' + dayBtn.dataset.index + '"]'
+    );
+    var hoursInput = row.querySelector('input[name$="-hours"]');
+    var minInput = row.querySelector('input[name$="-minutes"]');
+    var total = (parseInt(hoursInput.value || 0, 10) * 60) +
                 parseInt(minInput.value || 0, 10);
-            minutesInput.value = total || '';
-        }
+    minutesInput.value = total || '';
+  }
 
-        document.querySelectorAll('.avail-day:not(.exam-day)').forEach(
-            function (btn) {
-                btn.addEventListener('click', function () {
-                    selectDay(btn);
-                });
-            }
-        );
+  document.querySelectorAll('.avail-day:not(.exam-day)').forEach(
+    function (btn) {
+      btn.addEventListener('click', function () {
+        selectDay(btn);
+      });
+    }
+  );
 
-        saveBtn.addEventListener('click', function () {
-            if (!currentDay) return;
-            var total = parseInt(minutesInput.value || 0, 10);
-            var row = document.querySelector(
-                '[data-formset-row="' + currentDay.dataset.index + '"]'
-            );
-            row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
-            row.querySelector('input[name$="-minutes"]').value = total % 60;
-            currentDay.classList.toggle('has-value', total > 0);
-        });
-    })();
+  saveBtn.addEventListener('click', function () {
+    if (!currentDay) return;
+    var total = parseInt(minutesInput.value || 0, 10);
+    var row = document.querySelector(
+      '[data-formset-row="' + currentDay.dataset.index + '"]'
+    );
+    row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
+    row.querySelector('input[name$="-minutes"]').value = total % 60;
+    currentDay.classList.toggle('has-value', total > 0);
+  });
+})();
 </script>
 {% endblock %}

@@ -40,12 +40,13 @@ def get_calendar_grid(period_id):
     exam_dates = set(
         Exam.objects.filter(exam_period_id=period_id).values_list('exam_date', flat=True)
     )
-    available_dates = list(
+    available_rows = list(
         AvailableTime.objects.filter(exam_period_id=period_id)
         .order_by('date')
-        .values_list('date', flat=True)
+        .values_list('date', 'available_minutes')
     )
-    date_to_index = {d: i for i, d in enumerate(available_dates)}
+    date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
+    date_to_minutes = {d: m for d, m in available_rows}
 
     days = []
     current = period.start_date
@@ -55,6 +56,7 @@ def get_calendar_grid(period_id):
             'weekday': current.isoweekday(),  # 1=월 ... 7=일
             'is_exam_day': current in exam_dates,
             'formset_index': date_to_index.get(current),
+            'has_value': date_to_minutes.get(current, 0) > 0,
         })
         current += timedelta(days=1)
     return days
