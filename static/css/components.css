@@ -1,0 +1,116 @@
+/* PLAN B - 공통 컴포넌트
+   forms.py 의 widget class(form-control, form-select 등)와 이름을 맞춰뒀음.
+   tokens.css 의 변수만 사용 — 새 색상 임의로 추가하지 말 것. */
+
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  height:44px; padding:0 20px; border-radius:10px;
+  background:var(--neutral11); color:#fff; font-size:14px; font-weight:600;
+  border:none; cursor:pointer;
+}
+.btn:hover{ background:var(--neutral10); }
+.btn:disabled{ background:var(--neutral6); cursor:not-allowed; }
+.btn.btn-brand{ background:var(--brand4); }
+.btn.btn-brand:hover{ background:var(--brand5); }
+.btn.btn-ghost{ background:#fff; color:var(--neutral11); border:1px solid var(--neutral5); }
+.btn.btn-block{ width:100%; }
+
+.card{
+  background:var(--neutral1); border:1px solid var(--neutral4); border-radius:16px;
+  padding:24px 26px;
+}
+
+.form-group{ margin-bottom:16px; }
+.form-label{ display:block; font-size:13px; font-weight:600; color:var(--neutral9); margin-bottom:6px; }
+
+.form-control, .form-select, .textarea-input{
+  width:100%; height:44px; padding:0 14px; border-radius:10px;
+  border:1px solid var(--neutral5); background:var(--neutral2);
+  font-family:var(--ui); font-size:14px; color:var(--neutral10);
+}
+.textarea-input{ height:auto; padding:12px 14px; resize:vertical; }
+.form-control:focus, .form-select:focus, .textarea-input:focus{
+  outline:none; border-color:var(--brand4); background:#fff;
+}
+.file-input{ padding:10px 14px; height:auto; background:var(--neutral2); }
+.number-input{ text-align:center; }
+
+.field-error{ color:var(--judge3); font-size:12px; margin-top:5px; }
+.form-error-box{
+  background:var(--judge3-bg); border:1px solid var(--judge3-line); color:var(--judge3);
+  border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
+}
+
+.page-title{ font-size:24px; font-weight:700; color:var(--neutral11); margin-bottom:6px; }
+.page-sub{ font-size:13px; color:var(--neutral7); margin-bottom:20px; }
+
+/* 판정 뱃지 (가능/위험/불가능) — planner/feasibility 등에서 재사용 */
+.badge{ display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; }
+.badge::before{ content:""; width:6px; height:6px; border-radius:50%; }
+.badge.badge-possible{ background:var(--judge1-bg); color:var(--judge1); border:1px solid var(--judge1-line); }
+.badge.badge-possible::before{ background:var(--judge1); }
+.badge.badge-risky{ background:var(--judge2-bg); color:var(--judge2); border:1px solid var(--judge2-line); }
+.badge.badge-risky::before{ background:var(--judge2); }
+.badge.badge-impossible{ background:var(--judge3-bg); color:var(--judge3); border:1px solid var(--judge3-line); }
+.badge.badge-impossible::before{ background:var(--judge3); }
+
+/* 과목 우선순위 원형 배지 (H/M/L) — Figma 브랜드 블루 계층 그대로 사용 */
+.priority-dot{
+  width:26px; height:26px; border-radius:50%; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10.5px; font-weight:800;
+}
+.priority-dot.priority-high{ background:var(--brand4); color:#fff; }
+.priority-dot.priority-medium{ background:var(--brand3); color:var(--neutral10); }
+.priority-dot.priority-low{ background:var(--brand2); color:var(--neutral9); }
+
+/* 탭바 — 실제로는 페이지 이동 링크(<a>)지만 시각적으로는 탭처럼 보이게 */
+.tabbar{ display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+.tabbar a.tab{
+  padding:8px 16px; border-radius:9px; background:var(--neutral2); color:var(--neutral8);
+  font-size:12px; font-weight:600; text-decoration:none; display:inline-block;
+}
+.tabbar a.tab.active{ background:var(--neutral11); color:#fff; }
+.auth-wrap{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+.auth-card{ width:380px; }
+.auth-link{ text-align:center; font-size:13px; color:var(--neutral8); margin-top:16px; }
+.auth-link a{ color:var(--brand4); font-weight:700; text-decoration:none; }
+
+/* 2열 레이아웃 (subject_form 등) */
+.two-col{ display:flex; gap:20px; align-items:flex-start; }
+.two-col > *{ flex:1; min-width:0; }
+.grow{ flex:1; min-width:0; }
+
+/* 리스트 카드 한 줄 (등록된 과목 등) */
+.list-card{
+  display:flex; align-items:center; gap:10px;
+  padding:11px 14px; border-radius:11px; background:var(--neutral2);
+  margin-bottom:8px; font-size:12.5px;
+}
+
+/* 범용 필/탭 배지 — .tabbar 밖에서 단독으로도 씀 (task_review의 과목/깊이 태그 등) */
+.tab{
+  padding:8px 16px; border-radius:9px; background:var(--neutral2); color:var(--neutral8);
+  font-size:12px; font-weight:600; display:inline-block;
+}
+.tab.active{ background:var(--neutral11); color:#fff; }
+
+/* 세그먼트 선택형 (중요도/깊이/난이도) — 작업 수정 모달에서 사용 */
+.segment{ display:flex; gap:6px; }
+.segment .opt{
+  flex:1; text-align:center; padding:9px 0; border-radius:9px;
+  font-size:11.5px; font-weight:700; background:var(--neutral2); color:var(--neutral8);
+  border:none; cursor:pointer; font-family:var(--ui);
+}
+.segment .opt.sel{ background:var(--neutral11); color:#fff; }
+
+/* 모달 — 작업 수정 화면에서 사용 */
+.modal-backdrop{
+  position:fixed; inset:0; background:rgba(20,25,35,.35);
+  display:none; align-items:center; justify-content:center; z-index:50;
+}
+.modal-backdrop.open{ display:flex; }
+.modal{
+  width:480px; max-width:92vw; background:#fff; border-radius:18px;
+  padding:30px 30px 26px; box-shadow:0 10px 40px rgba(0,0,0,.2);
+}
