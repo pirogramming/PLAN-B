@@ -9,17 +9,18 @@
 {% get_period_exams exam.exam_period_id as period_exams %}
 
 <div class="container" style="max-width:1080px; margin:0 auto; padding-bottom:60px;">
-    <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">PLAN B &nbsp;›&nbsp; 과목 등록</div>
+    <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">PLAN B &nbsp;›&nbsp; 학습 작업</div>
 
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:18px;">
-        <div class="page-title" style="margin-bottom:0;">학습 작업</div>
-        <label style="font-size:12px; color:var(--neutral7); display:flex; align-items:center; gap:6px;">
-            <input type="checkbox" data-select-all="task-select"> 전체 선택
-        </label>
+    <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:18px;">
+        <div>
+            <div class="page-title" style="margin-bottom:0;">학습 작업</div>
+            <div class="page-sub" style="margin-bottom:0;">수정 후 꼭 "변경사항 저장"을 눌러야 반영돼요</div>
+        </div>
+        <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-ghost">+ 작업 추가하기</a>
     </div>
 
     <div style="display:flex; gap:20px; align-items:flex-start;">
-        <!-- 좌측 과목 네비게이션 (실제로는 각 과목 task_review URL 링크) -->
+        <!-- 좌측 과목 네비게이션 (실제로는 과목별 task_review URL 링크) -->
         <div style="flex:0 0 180px;">
             <div class="card" style="padding:16px;">
                 <div style="font-size:11.5px; font-weight:700; color:var(--neutral7); margin-bottom:8px;">과목</div>
@@ -33,7 +34,7 @@
             </div>
         </div>
 
-        <!-- 우측 작업 리스트 -->
+        <!-- 우측 작업 리스트 (formset 인라인 편집) -->
         <div style="flex:1;">
             {% if formset.non_form_errors %}<div class="form-error-box">{{ formset.non_form_errors|striptags }}</div>{%
             endif %}
@@ -44,47 +45,64 @@
 
                 {% if not formset.forms %}
                 <div class="card" style="text-align:center; padding:36px 20px; color:var(--neutral7); font-size:13px;">
-                    아직 학습 작업이 없어요. 시험범위 등록 화면에서 AI 분석을 먼저 실행해주세요.
+                    아직 학습 작업이 없어요. 시험범위 등록 화면에서 AI 분석을 먼저 실행하거나, 직접 추가해주세요.
                 </div>
                 {% endif %}
 
                 {% for form in formset %}
-                <div class="card" style="margin-bottom:10px; display:flex; align-items:center; gap:14px;">
-                    <input type="checkbox" data-select-group="task-select" style="flex-shrink:0;">
+                <div class="card" style="margin-bottom:10px;">
                     {{ form.id }}
-
-                    <div style="flex:1; min-width:0;">
-                        <div style="display:flex; gap:6px; margin-bottom:6px;">
-                            <span class="tab active" style="padding:2px 9px; font-size:9.5px;">{{ exam.subject_name
-                                }}</span>
-                            <span class="tab"
-                                style="padding:2px 9px; font-size:9.5px; background:var(--neutral11); color:#fff;">{{
-                                form.instance.get_depth_display|default:form.instance.depth|upper }}</span>
+                    <div style="display:flex; gap:10px; margin-bottom:10px;">
+                        <div style="flex:1;">
+                            <label class="form-label">단원명</label>
+                            {{ form.unit_name }}
                         </div>
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <span style="font-size:13px; font-weight:600; flex-shrink:0;">{{ form.instance.unit_name
-                                }}</span>
+                        <div style="flex:2;">
+                            <label class="form-label">작업명</label>
                             {{ form.title }}
+                            {% if form.title.errors %}<div class="field-error">{{ form.title.errors|striptags }}</div>{%
+                            endif %}
                         </div>
-                        <div style="display:none;">{{ form.task_type }}{{ form.importance }}{{ form.depth }}{{
-                            form.difficulty }}{{ form.unit_name }}</div>
                     </div>
 
-                    <div class="num" style="font-size:13px; font-weight:700; white-space:nowrap;">
-                        {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
+                    <div style="display:flex; gap:10px; align-items:flex-end;">
+                        <div style="flex:1;">
+                            <label class="form-label">작업 유형</label>
+                            {{ form.task_type }}
+                        </div>
+                        <div style="flex:1;">
+                            <label class="form-label">중요도</label>
+                            {{ form.importance }}
+                        </div>
+                        <div style="flex:1;">
+                            <label class="form-label">깊이</label>
+                            {{ form.depth }}
+                        </div>
+                        <div style="flex:1;">
+                            <label class="form-label">난이도</label>
+                            {{ form.difficulty }}
+                        </div>
+                        <div style="flex:0 0 80px; text-align:right; font-size:12px; color:var(--neutral7); padding-bottom:12px;"
+                            class="num">
+                            {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
+                        </div>
                     </div>
+
+                    {% if form.instance.is_confirmed %}
+                    <span class="badge badge-possible" style="margin-top:10px;">확정됨</span>
+                    {% endif %}
+
                     {% if form.DELETE %}
-                    <label style="font-size:11px; color:var(--judge3); display:flex; align-items:center; gap:4px;">
-                        {{ form.DELETE }} 삭제
+                    <label
+                        style="display:flex; align-items:center; gap:6px; margin-top:10px; font-size:11.5px; color:var(--judge3);">
+                        {{ form.DELETE }} 이 작업 삭제
                     </label>
                     {% endif %}
                 </div>
                 {% endfor %}
 
                 {% if formset.forms %}
-                <button type="button" class="btn btn-ghost" id="add-task-btn">+ 작업 추가하기</button>
-                <button type="submit" class="btn btn-brand" style="float:right;">다음</button>
-                <div style="clear:both;"></div>
+                <button type="submit" class="btn btn-brand btn-block" style="margin-top:8px;">변경사항 저장</button>
                 {% endif %}
             </form>
 
@@ -97,10 +115,4 @@
         </div>
     </div>
 </div>
-
-<script>
-    document.getElementById('add-task-btn')?.addEventListener('click', () => {
-        window.location.href = "{% url 'exams:task_create' exam.id %}";
-    });
-</script>
 {% endblock %}
