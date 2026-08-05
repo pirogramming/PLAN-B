@@ -1,67 +1,101 @@
 {% extends "base.html" %}
 {% load static exam_extras %}
-{% block title %}과목 등록 - PLAN B{% endblock %}
+{% block title %}
+과목 등록 - PLAN B
+{% endblock %}
+
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
 
 {% block content %}
 {% include "exams/_topbar.html" %}
 {% get_period_exams period.id as period_exams %}
 
 <div class="container" style="max-width:900px; margin:0 auto; padding-bottom:60px;">
-    <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
-        <a href="{% url 'exams:period_detail' period.id %}" style="color:inherit; text-decoration:none;">PLAN B</a>
-        &nbsp;›&nbsp; 과목 등록
-    </div>
-    <div class="page-title">과목 등록하기</div>
-    <div class="page-sub">시험일과 우선순위를 입력하세요</div>
+  <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
+    <a href="{% url 'exams:period_detail' period.id %}" style="color:inherit; text-decoration:none;">
+      PLAN B
+    </a>
+    &nbsp;›&nbsp; 과목 등록
+  </div>
+  <div class="page-title">
+    과목 등록하기
+  </div>
+  <div class="page-sub">
+    시험일과 우선순위를 입력하세요
+  </div>
 
-    {% if form.non_field_errors %}<div class="form-error-box">{{ form.non_field_errors|striptags }}</div>{% endif %}
+  {% if form.non_field_errors %}
+  <div class="form-error-box">
+    {{ form.non_field_errors|striptags }}
+  </div>
+  {% endif %}
 
-    <div class="two-col">
-        <div class="card" style="flex:1;">
-            <form method="post" novalidate>
-                {% csrf_token %}
+  <div class="two-col">
+    <div class="card" style="flex:1;">
+      <form method="post" novalidate>
+        {% csrf_token %}
 
-                <div class="form-group">
-                    <label class="form-label" for="{{ form.subject_name.id_for_label }}">과목명</label>
-                    {{ form.subject_name }}
-                    {% if form.subject_name.errors %}<div class="field-error">{{ form.subject_name.errors|striptags }}
-                    </div>{% endif %}
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="{{ form.exam_date.id_for_label }}">시험일</label>
-                    {{ form.exam_date }}
-                    {% if form.exam_date.errors %}<div class="field-error">{{ form.exam_date.errors|striptags }}</div>{%
-                    endif %}
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label" for="{{ form.priority.id_for_label }}">우선순위 (선택)</label>
-                    {{ form.priority }}
-                </div>
-
-                <button type="submit" class="btn btn-ghost btn-block">+ 과목 추가</button>
-            </form>
+        <div class="form-group">
+          <label class="form-label" for="{{ form.subject_name.id_for_label }}">
+            과목명
+          </label>
+          {{ form.subject_name }}
+          {% if form.subject_name.errors %}
+          <div class="field-error">
+            {{ form.subject_name.errors|striptags }}
+          </div>
+          {% endif %}
         </div>
 
-        <div class="card" style="flex:1;">
-            <div style="font-size:13.5px; font-weight:700; margin-bottom:14px;">등록된 과목 {{ period_exams|length }}개</div>
-            {% for exam in period_exams %}
-            <div class="list-card" style="justify-content:flex-start;">
-                <span class="priority-dot priority-{{ exam.priority }}">{{ exam.priority|slice:":1"|upper }}</span>
-                <span class="grow" style="margin-left:2px;">{{ exam.subject_name }}</span>
-                <span class="num" style="color:var(--neutral7); font-size:12px;">{{ exam.exam_date|date:"n/j" }}</span>
-            </div>
-            {% empty %}
-            <div style="font-size:12.5px; color:var(--neutral7); text-align:center; padding:20px 0;">아직 등록된 과목이 없어요
-            </div>
-            {% endfor %}
+        <div class="form-group">
+          <label class="form-label" for="{{ form.exam_date.id_for_label }}">
+            시험일
+          </label>
+          {{ form.exam_date }}
+          {% if form.exam_date.errors %}
+          <div class="field-error">
+            {{ form.exam_date.errors|striptags }}
+          </div>
+          {% endif %}
         </div>
+
+        <div class="form-group">
+          <label class="form-label" for="{{ form.priority.id_for_label }}">
+            우선순위 (선택)
+          </label>
+          {{ form.priority }}
+        </div>
+
+        <button type="submit" class="btn btn-ghost btn-block">
+          + 과목 추가
+        </button>
+      </form>
     </div>
 
-    <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-brand"
-        style="margin-top:16px; {% if not period_exams %}pointer-events:none; opacity:.5;{% endif %}">다음</a>
+    <div class="card" style="flex:1;">
+      <div style="font-size:13.5px; font-weight:700; margin-bottom:14px;">
+        등록된 과목 {{ period_exams|length }}개
+      </div>
+      {% for exam in period_exams %}
+      <div class="list-card" style="justify-content:flex-start;">
+        <span class="priority-dot priority-{{ exam.priority }}">
+          {{ exam.priority|slice:":1"|upper }}
+        </span>
+        <span class="grow" style="margin-left:2px;">
+          {{ exam.subject_name }}
+        </span>
+        <span class="num" style="color:var(--neutral7); font-size:12px;">
+          {{ exam.exam_date|date:"n/j" }}
+        </span>
+      </div>
+      {% empty %}
+      <div style="font-size:12.5px; color:var(--neutral7); text-align:center; padding:20px 0;">
+        아직 등록된 과목이 없어요
+      </div>
+      {% endfor %}
+    </div>
+  </div>
 </div>
 {% endblock %}
