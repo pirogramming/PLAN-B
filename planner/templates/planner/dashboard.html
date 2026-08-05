@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}대시보드 · PLAN B{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+
+{% block body %}
+<div class="app">
+
+  {% include "planner/includes/sidebar.html" with nav="dashboard" %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>대시보드</h2>
+    </header>
+
+    <div class="content">
+
+    {% if not exam_period %}
+      {# ===== 1단계 : 시험기간 없음 ===== #}
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 등록된 시험기간이 없습니다" desc="시험기간을 만들고 과목과 공부 가능시간을 입력하면, PLAN B가 날짜별 계획을 대신 계산해 드립니다." btn_label="시험기간 만들기" show_steps=True %}
+      </div>
+
+    {% elif not has_plan %}
+      {# ===== 2단계 : 시험기간은 있지만 계획이 아직 없음 ===== #}
+      <div class="page-head">
+        <div>
+          <h1>{{ exam_period.title }}</h1>
+          <div class="sub">{{ exam_period.start_date|date:"n월 j일" }} ~ {{ exam_period.end_date|date:"n월 j일" }}</div>
+        </div>
+      </div>
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 계획이 만들어지지 않았습니다" desc="과목과 시험 범위를 입력하고 학습 작업을 확정하면 계획을 생성할 수 있습니다." btn_label=next_step_label btn_url=next_step_url %}
+      </div>
+
+    {% else %}
+      {# ===== 3단계 : 평소 대시보드 ===== #}
+      <div class="page-head">
+        <div>
+          <h1>{{ today|date:"n월 j일 l" }}</h1>
+          <div class="sub">
+            공부할 수 있는 날 <b class="num">{{ remaining_days }}일</b> 남음
+            · 오늘 배정 <b class="num">{{ today_minutes }}분</b>
+          </div>
+        </div>
+        {# TODO: {% url 'planner:today' %} 로 교체 #}
+        <a class="btn btn-primary btn-lg ml-auto" href="#">
+          오늘의 공부 시작<svg class="ico"><use href="#i-arrow-right"/></svg>
+        </a>
+      </div>
+
+      {% if pending_recovery %}
+        <div class="banner" style="margin-bottom:22px">
+          <svg class="ico"><use href="#i-alert"/></svg>
+          <div class="body">
+            <h4>적용 대기 중인 복구안이 있습니다</h4>
+            <p>{{ pending_recovery.created_at|date:"n월 j일" }}에 만든 복구안을 아직 선택하지 않으셨습니다.
+               지금 계획은 <b>{{ overall.status_label }}</b> 상태 그대로입니다.</p>
+          </div>
+          <div class="actions">
+            <a class="btn btn-accent btn-sm" href="#">복구안 보기</a>
+          </div>
+        </div>
+      {% endif %}
+
+      {# ---- 전체 판정 ---- #}
+      <div class="card" style="margin-bottom:22px">
+        <div class="card-body">
+          <div class="row" style="justify-content:space-between;margin-bottom:24px">
+            <div class="row">
+              <b style="font-size:15px;color:var(--neutral10)">시험기간 전체 판정</b>
+              <span class="badge badge-{{ overall.status }}">
+                <i class="dot dot-{{ overall.status }}"></i>{{ overall.status_label }}
+              </span>
+            </div>
+            <span class="num" style="font-size:11.5px;color:var(--neutral7)">
+              {{ overall.viewed_at|date:"n.j H:i" }} 조회 기준
+            </span>
+          </div>
+
+          {% include "planner/includes/fit_bar.html" with status=overall.status min_pct=overall.min_pct band_pct=overall.band_pct mark_pct=overall.mark_pct need_label_pct=overall.need_label_pct min_minutes=overall.min_minutes max_minutes=overall.max_minutes available_minutes=overall.available_minutes axis_max=overall.axis_max %}
+
+          <div class="grid-4" style="margin-top:26px;padding-top:24px;border-top:1px solid var(--neutral4)">
+            <div>
+              <div class="kpi-label">남은 가능시간</div>
+              <div class="kpi-value">{{ overall.available_minutes }}<small>분</small></div>
+            </div>
+            <div>
+              <div class="kpi-label">최소 필요시간</div>
+              <div class="kpi-value">{{ overall.min_minutes }}<small>분</small></div>
+            </div>
+            <div>
+              <div class="kpi-label">최대 필요시간</div>
+              <div class="kpi-value">{{ overall.max_minutes }}<small>분</small></div>
+            </div>
+            <div>
+              <div class="kpi-label">가능까지 부족</div>
+              <div class="kpi-value {% if overall.max_shortage_minutes %}warn{% endif %}">
+                {% if overall.max_shortage_minutes %}-{{ overall.max_shortage_minutes }}{% else %}0{% endif %}<small>분</small>
+              </div>
+              {% if overall.daily_extra_minutes %}
+                <div class="kpi-sub">남은 {{ remaining_days }}일 동안 하루 <b class="num">+{{ overall.daily_extra_minutes }}분</b>이면 가능</div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h3>과목</h3>
+        <a class="btn btn-ghost btn-sm" href="#">
+          전체 계획 보기<svg class="ico"><use href="#i-chevron-right"/></svg>
+        </a>
+      </div>
+
+      <div class="card" style="margin-bottom:32px">
+        {% for s in subject_summary %}
+          <div class="subject-card">
+            <span class="dday {% if s.is_near %}near{% endif %}">D-{{ s.d_day }}</span>
+            <div class="info">
+              <div class="name">{{ s.subject_name }}</div>
+              <div class="date">시험 {{ s.exam_date|date:"n월 j일" }}</div>
+            </div>
+            <div class="left">
+              <div class="v num">{{ s.remaining_minutes }}분</div>
+              <div class="l">남은 예상시간</div>
+            </div>
+            <div class="left">
+              <div class="v num">{{ s.remaining_task_count }}개</div>
+              <div class="l">남은 작업</div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+
+      <div class="section-head">
+        <h3>진행 상황</h3>
+        <span class="note">완료 환산 기준</span>
+      </div>
+
+      <div class="grid-3">
+        <div class="card card-pad">
+          <div class="kpi-label">오늘 완료율</div>
+          <div class="kpi-value">{{ progress.today_percent }}<small>%</small></div>
+          <div class="meter" style="margin-top:13px"><i style="width:{{ progress.today_percent }}%"></i></div>
+          <div class="kpi-sub num">{{ progress.today_done_minutes }} / {{ progress.today_total_minutes }}분</div>
+        </div>
+
+        <div class="card card-pad">
+          <div class="kpi-label">전체 진행률</div>
+          <div class="kpi-value">{{ progress.total_percent }}<small>%</small></div>
+          <div class="meter" style="margin-top:13px"><i style="width:{{ progress.total_percent }}%"></i></div>
+          <div class="kpi-sub num">{{ progress.total_done_minutes }} / {{ progress.total_minutes }}분</div>
+        </div>
+
+        <div class="card card-pad">
+          <div class="kpi-label">남은 CORE 작업</div>
+          <div class="kpi-value">{{ progress.core_left }}<small>개</small></div>
+          <div class="kpi-sub">필수 학습만 남긴 기준</div>
+        </div>
+      </div>
+    {% endif %}
+
+    </div>
+  </div>
+</div>
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}

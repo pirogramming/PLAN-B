@@ -1,0 +1,27 @@
+<div class="empty">
+  <div class="empty-icon"><svg class="ico"><use href="#{{ icon }}"/></svg></div>
+
+  <h3>{{ title }}</h3>
+  {% if desc %}<p>{{ desc }}</p>{% endif %}
+
+  {% if btn_label %}
+    <a class="btn btn-primary" href="{{ btn_url|default:'#' }}">{{ btn_label }}</a>
+  {% endif %}
+
+  {% if show_steps %}
+    <div class="steps">
+      <div class="step">
+        <div class="no">STEP 1</div><b>시험기간과 과목 등록</b>
+        <span>기간, 과목명, 시험일을 입력합니다</span>
+      </div>
+      <div class="step">
+        <div class="no">STEP 2</div><b>공부 가능시간 입력</b>
+        <span>날짜별 전체 시간만 넣으면 됩니다</span>
+      </div>
+      <div class="step">
+        <div class="no">STEP 3</div><b>시험 범위 넣기</b>
+        <span>PDF 또는 직접 입력</span>
+      </div>
+    </div>
+  {% endif %}
+</div>
