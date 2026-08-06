@@ -440,10 +440,10 @@ def material_analysis_status(request, material_id):
 
     extraction_status = material.status
     extraction_error = material.error_message
-    analysis_status = analysis_data["status"]
-    analysis_error = analysis_data["error_message"]
-    retry_count = analysis_data["retry_count"]
-    retry_remaining = analysis_data["retry_remaining"]
+    analysis_status = analysis_data.get("status") or analysis_data.get("analysis_status")
+    analysis_error = analysis_data.get("error_message") or analysis_data.get("analysis_error_message")
+    retry_count = analysis_data.get("retry_count", material.analysis_retry_count)
+    retry_remaining = analysis_data.get("retry_remaining", max(0, 2 - material.analysis_retry_count))
 
     # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
