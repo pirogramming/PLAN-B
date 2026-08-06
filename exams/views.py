@@ -372,7 +372,8 @@ def material_analyze(request, material_id):
 
     try:
         analyze_and_estimate(material)
-        messages.success(request, "AI 분석 및 예상 시간 산출이 시작되었습니다.")
+        # 피드백 3번 반영: 동기식이므로 "시작되었습니다" 메시지 제거하고 완료 메시지만 노출
+        messages.success(request, "AI 분석이 완료되었습니다.")
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -384,7 +385,6 @@ def material_analyze(request, material_id):
         messages.error(request, "AI 분석 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    messages.success(request, "AI 분석이 완료되었습니다.")
     return redirect('exams:task_review', exam_id=material.exam_id)
 
 
@@ -409,7 +409,6 @@ def material_retry_analyze(request, material_id):
     except RetryLimitExceededError as e:
         messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
-    # except Exception 제거 및 서비스 예외만 처리
     except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -435,15 +434,17 @@ def material_analysis_status(request, material_id):
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    # 리뷰 요청 반영: get_analysis_status(material) 호출 및 필드 매핑
+    # get_analysis_status(material) 호출 복원
     analysis_data = get_analysis_status(material)
 
     extraction_status = material.status
     extraction_error = material.error_message
-    analysis_status = analysis_data.get("status") or analysis_data.get("analysis_status")
-    analysis_error = analysis_data.get("error_message") or analysis_data.get("analysis_error_message")
-    retry_count = analysis_data.get("retry_count", material.analysis_retry_count)
-    retry_remaining = analysis_data.get("retry_remaining", max(0, 2 - material.analysis_retry_count))
+    
+    # 피드백 4번 반영: 확정된 키 직접 사용 (fallback 제거)
+    analysis_status = analysis_data["status"]
+    analysis_error = analysis_data["error_message"]
+    retry_count = analysis_data["retry_count"]
+    retry_remaining = analysis_data["retry_remaining"]
 
     # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
