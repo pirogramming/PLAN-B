@@ -5,6 +5,7 @@ from django.views.decorators.http import require_http_methods
 from django.contrib import messages
 from django.http import JsonResponse
 from django.db import transaction
+import logging
 
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
@@ -30,6 +31,8 @@ from .services.analysis_orchestrator import (
     RetryLimitExceededError,
     AnalysisPipelineError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -369,11 +372,16 @@ def material_analyze(request, material_id):
 
     try:
         analyze_and_estimate(material)
+        messages.success(request, "AI 분석 및 예상 시간 산출이 시작되었습니다.")
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError, Exception):
+    except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except Exception:
+        logger.exception(f"AI 분석 실행 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        messages.error(request, "AI 분석 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
     messages.success(request, "AI 분석이 완료되었습니다.")
@@ -401,8 +409,13 @@ def material_retry_analyze(request, material_id):
     except RetryLimitExceededError as e:
         messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError, Exception):
+    # except Exception 제거 및 서비스 예외만 처리
+    except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except Exception:
+        logger.exception(f"AI 분석 재시도 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        messages.error(request, "AI 분석 재시도 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
     messages.success(request, "AI 분석이 완료되었습니다.")
@@ -422,12 +435,17 @@ def material_analysis_status(request, material_id):
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
+    # 리뷰 요청 반영: get_analysis_status(material) 호출 및 필드 매핑
+    analysis_data = get_analysis_status(material)
+
     extraction_status = material.status
     extraction_error = material.error_message
-    analysis_status = material.analysis_status
-    analysis_error = material.analysis_error_message
+    analysis_status = analysis_data["status"]
+    analysis_error = analysis_data["error_message"]
+    retry_count = analysis_data["retry_count"]
+    retry_remaining = analysis_data["retry_remaining"]
 
-    # 1. 전체 stage 판정 로직
+    # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
 
     # ① 재추출 진행 중이면 이전 분석 실패보다 최우선으로 "EXTRACTING"
@@ -455,15 +473,11 @@ def material_analysis_status(request, material_id):
     ):
         stage = "COMPLETED"
 
-    # ⑥ 아무것도 안 한 PENDING 상태 (PENDING이 튜플에서 빠져서 여기로 옴)
+    # ⑥ 아무것도 안 한 PENDING 상태
     else:
         stage = "PENDING"
 
-    # 2. 재시도 정보 계산 (API 계약 필수 필드)
-    retry_count = material.analysis_retry_count
-    retry_remaining = max(0, MAX_RETRY_COUNT - retry_count)
-
-    # 3. 약속된 JSON 응답 스펙 반환
+    # 2. 약속된 JSON 응답 스펙 반환
     return JsonResponse({
         "stage": stage,
         "extraction_status": extraction_status,
