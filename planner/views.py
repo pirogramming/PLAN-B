@@ -210,12 +210,13 @@ def dashboard(request):
     today_count = today_plan.items.count() if today_plan else 0
     today_minutes = today_plan.planned_minutes if today_plan else 0
 
-    pending_recovery_item = (
-        RecoveryPlan.objects
-        .filter(source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING)
-        .order_by('-created_at')
-        .first()
+    pending_recovery_qs = RecoveryPlan.objects.filter(
+        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
     )
+    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
+    # 분량유지형/핵심집중형 두 row가 한 그룹이라 recovery_group_id 기준으로 세야
+    # 실제 "밀린 날짜 수"가 나온다
+    pending_recovery_count = pending_recovery_qs.values('recovery_group_id').distinct().count()
 
     context = {
         'exam_period': exam_period,
@@ -227,6 +228,7 @@ def dashboard(request):
             {
                 'recovery_group_id': pending_recovery_item.recovery_group_id,
                 'created_at': pending_recovery_item.created_at,
+                'count': pending_recovery_count,
             }
             if pending_recovery_item else None
         ),

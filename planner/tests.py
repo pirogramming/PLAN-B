@@ -2027,3 +2027,57 @@ class DashboardViewTests(TestCase):
         response = self.client.get(reverse('planner:dashboard'))
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.context['pending_recovery'])
+
+    def test_dashboard_pending_recovery_count_reflects_multiple_pending_groups(self):
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today - timedelta(days=2), end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+
+        # 복구안은 마감 시점과 무관하게 항상 "오늘+1"부터 배치되므로,
+        # 두 마감(plan_1, plan_2) 모두 이 날짜의 가용시간을 참조한다.
+        AvailableTime.objects.create(
+            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=100,
+        )
+
+        task_1 = StudyTask.objects.create(
+            exam=exam, title="작업1", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        plan_1 = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today - timedelta(days=2),
+            available_minutes=60, planned_minutes=40,
+        )
+        item_1 = DailyPlanItem.objects.create(
+            daily_plan=plan_1, study_task=task_1, planned_minutes=40, order=1,
+        )
+        record_progress(daily_plan_item=item_1, status="not_done", actual_minutes=0)
+        finalize_daily_plan(plan_1)
+
+        task_2 = StudyTask.objects.create(
+            exam=exam, title="작업2", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        plan_2 = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today - timedelta(days=1),
+            available_minutes=60, planned_minutes=40,
+        )
+        item_2 = DailyPlanItem.objects.create(
+            daily_plan=plan_2, study_task=task_2, planned_minutes=40, order=1,
+        )
+        record_progress(daily_plan_item=item_2, status="not_done", actual_minutes=0)
+        finalize_daily_plan(plan_2)
+
+        response = self.client.get(reverse('planner:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.context['pending_recovery'])
+        self.assertEqual(response.context['pending_recovery']['count'], 2)
