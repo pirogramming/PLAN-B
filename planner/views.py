@@ -362,61 +362,6 @@ def today(request):
     })
     return render(request, 'planner/today.html', context)
 
-@login_required
-@require_http_methods(["POST"])
-def progress_record(request, item_id):
-    item = get_object_or_404(
-        DailyPlanItem, id=item_id, daily_plan__exam_period__user=request.user
-    )
-
-    try:
-        payload = json.loads(request.body)
-    except (json.JSONDecodeError, TypeError):
-        return JsonResponse(
-            {"isSuccess": False, "code": "COMMON400", "message": "잘못된 요청입니다.", "result": None},
-            status=400,
-        )
-
-    status = payload.get('status')
-    actual_minutes = payload.get('actual_minutes')
-    completion_percent = payload.get('completion_percent')
-
-    try:
-        result = record_progress(
-            daily_plan_item=item,
-            status=status,
-            actual_minutes=actual_minutes,
-            completion_percent=completion_percent,
-        )
-    except FinalizedDailyPlanEditError:
-        return JsonResponse(
-            {
-                "isSuccess": False,
-                "code": "PROGRESS4091",
-                "message": "마감된 계획의 진행 기록은 수정할 수 없습니다.",
-                "result": None,
-            },
-            status=409,
-        )
-    except (ValueError, KeyError):
-        return JsonResponse(
-            {"isSuccess": False, "code": "COMMON400", "message": "입력값이 올바르지 않습니다.", "result": None},
-            status=400,
-        )
-
-    progress_log = result["progress_log"]
-    return JsonResponse({
-        "isSuccess": True,
-        "code": "COMMON200",
-        "message": "성공입니다.",
-        "result": {
-            "item_id": item.id,
-            "status": progress_log.progress_status,
-            "actual_minutes": progress_log.actual_minutes,
-            "completion_percent": progress_log.completion_percent,
-            "daily_plan_status": result["daily_plan_status"],
-        },
-    })
 
 @login_required
 @require_http_methods(["POST"])
