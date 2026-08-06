@@ -22,6 +22,14 @@
   --judge2:#8A6212;  --judge2-bg:#FBF3E3;  --judge2-line:#EEDFBB;
   --judge3:#A3382F;  --judge3-bg:#FBECEA;  --judge3-line:#F1D3CF;
 
+  /* 어두운(neutral11) 배경 위에 얹는 흰 글자/트랙 — 불투명도 단계 */
+  --on-dark-caption:rgba(255,255,255,.55);  /* 오늘 요약 캡션·범례 */
+  --on-dark-unit:rgba(255,255,255,.5);      /* 오늘 요약 큰 숫자 옆 단위 */
+  --on-dark-track:rgba(255,255,255,.14);    /* stack-bar 배경 트랙 */
+  --on-dark-fill:rgba(255,255,255,.45);     /* stack-bar 일부완료 채움 */
+  --on-dark-sub:rgba(255,255,255,.6);       /* 선택된 pick-item 보조 텍스트 */
+  --overlay:rgba(20,24,43,.34);             /* 모달 배경 딤 처리 (neutral11 34%) */
+
   --ui:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
   --mono:'IBM Plex Mono',monospace;   /* 숫자용 */
 

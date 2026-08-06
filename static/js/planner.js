@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', function () {
     hour:   document.getElementById('rmHour'),
     min:    document.getElementById('rmMin'),
     total:  document.getElementById('rmTotal'),
+    timeHint:document.getElementById('rmTimeHint'),
     pctBox: document.getElementById('rmPercent'),
     pct:    document.getElementById('rmPct'),
     pctHint:document.getElementById('rmPctHint'),
@@ -103,15 +104,27 @@ document.addEventListener('DOMContentLoaded', function () {
     el.pctBox.hidden = status !== 'partial';
     el.none.hidden   = status !== 'not_done';
 
-    const h = parseInt(el.hour.value, 10) || 0;
-    const m = parseInt(el.min.value, 10) || 0;
-    const minutes = h * 60 + m;
+    const hourRaw = el.hour.value;
+    const minRaw  = el.min.value;
+    const h = Number(hourRaw);
+    const m = Number(minRaw);
+
+    const hourOk = hourRaw !== '' && Number.isInteger(h) && h >= 0 && h <= 23;
+    const minOk  = minRaw  !== '' && Number.isInteger(m) && m >= 0 && m <= 59;
+    const hourTyped = hourRaw !== '';
+    const minTyped  = minRaw !== '';
+
+    const minutes = (hourOk ? h : 0) * 60 + (minOk ? m : 0);
+    const timeOk = hourOk && minOk && minutes > 0;
 
     el.total.textContent = minutes >= 60
       ? Math.floor(minutes / 60) + '시간 ' + (minutes % 60) + '분'
       : minutes + '분';
-    el.hour.classList.toggle('zero', h === 0);
-    el.min.classList.toggle('zero', m === 0);
+    el.hour.classList.toggle('zero', hourOk && h === 0);
+    el.min.classList.toggle('zero', minOk && m === 0);
+    el.hour.classList.toggle('err', hourTyped && !hourOk);
+    el.min.classList.toggle('err', minTyped && !minOk);
+    el.timeHint.classList.toggle('err', (hourTyped && !hourOk) || (minTyped && !minOk));
 
     const pct = parseInt(el.pct.value, 10);
     const pctOk = Number.isInteger(pct) && pct >= 1 && pct <= 99;
@@ -121,8 +134,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
     let ok = false;
     if (status === 'not_done')      ok = true;
-    else if (status === 'done')     ok = minutes > 0;
-    else if (status === 'partial')  ok = minutes > 0 && pctOk;
+    else if (status === 'done')     ok = timeOk;
+    else if (status === 'partial')  ok = timeOk && pctOk;
 
     el.submit.disabled = !ok;
     el.submit.textContent =

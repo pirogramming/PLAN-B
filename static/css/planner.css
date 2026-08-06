@@ -264,19 +264,19 @@
   background:var(--neutral11);border-radius:var(--r-md);
   padding:26px 28px;margin-bottom:24px;
 }
-.today-summary .cap{font-size:12.5px;color:rgba(255,255,255,.55)}
+.today-summary .cap{font-size:12.5px;color:var(--on-dark-caption)}
 .today-summary .big{font-size:40px;font-weight:600;color:var(--neutral1);
                     letter-spacing:-0.04em;line-height:1.15;margin-top:6px}
 .today-summary .big span{font-family:var(--ui);font-size:17px;
-                         color:rgba(255,255,255,.5);margin-left:5px}
+                         color:var(--on-dark-unit);margin-left:5px}
 .today-summary .bar-wrap{flex:1;min-width:0}
-.stack-bar{height:8px;border-radius:999px;background:rgba(255,255,255,.14);
+.stack-bar{height:8px;border-radius:999px;background:var(--on-dark-track);
            overflow:hidden;display:flex}
 .stack-bar i{display:block;height:100%}
 .stack-bar i.done{background:var(--neutral1)}
-.stack-bar i.partial{background:rgba(255,255,255,.45)}
+.stack-bar i.partial{background:var(--on-dark-fill)}
 .today-summary .legend{display:flex;justify-content:space-between;margin-top:11px;
-                       font-size:12px;color:rgba(255,255,255,.55)}
+                       font-size:12px;color:var(--on-dark-caption)}
 .today-summary .legend b{color:var(--neutral1)}
 
 
@@ -305,7 +305,7 @@
 
 
 /* ===== 결과 입력 모달 ===== */
-.modal-bg{position:fixed;inset:0;z-index:100;background:rgba(20,24,43,.34);
+.modal-bg{position:fixed;inset:0;z-index:100;background:var(--overlay);
           display:flex;align-items:center;justify-content:center;padding:40px 20px}
 .modal-bg[hidden]{display:none}
 .modal{width:100%;max-width:520px;background:var(--neutral1);
@@ -335,7 +335,7 @@
 .pick-item.on{border-color:var(--neutral11);background:var(--neutral11)}
 .pick-item.on .ico{color:var(--neutral1)}
 .pick-item.on b{color:var(--neutral1)}
-.pick-item.on span{color:rgba(255,255,255,.6)}
+.pick-item.on span{color:var(--on-dark-sub)}
 
 /* 조건부 입력 묶음 */
 .fieldset{border:1px solid var(--neutral4);border-radius:var(--r-md);
