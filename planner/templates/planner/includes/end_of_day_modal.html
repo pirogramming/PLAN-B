@@ -1,0 +1,72 @@
+<div class="modal-bg" id="eodModal" hidden>
+  <div class="modal">
+
+    <div id="eodConfirm">
+      <div class="modal-head">
+        <div style="flex:1">
+          <h3>오늘 공부를 마칠까요?</h3>
+          <div class="meta">
+            종료하면 오늘 기록이 확정됩니다. 완료하지 못한 작업이 있으면
+            복구 방법을 선택할 수 있는 화면으로 안내해드릴게요.
+          </div>
+        </div>
+        <button class="icon-btn js-close" type="button" aria-label="닫기">
+          <svg class="ico"><use href="#i-close"/></svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="sum-list">
+          <div class="sum-row">
+            <span><svg class="ico" style="color:var(--judge1)"><use href="#i-done"/></svg>완료</span>
+            <b class="num">{{ eod.done_count }}개 · {{ eod.done_minutes }}분</b>
+          </div>
+          <div class="sum-row">
+            <span><svg class="ico" style="color:var(--judge2)"><use href="#i-partial"/></svg>일부완료</span>
+            <b class="num">{{ eod.partial_count }}개 · {{ eod.partial_minutes }}분</b>
+          </div>
+          <div class="sum-row muted">
+            <span><svg class="ico"><use href="#i-not-done"/></svg>못함으로 기록됨</span>
+            <b class="num">{{ eod.not_done_count }}개 · {{ eod.not_done_minutes }}분</b>
+          </div>
+        </div>
+
+        {% if eod.pending_count %}
+          <div class="banner" style="margin-top:16px;padding:14px 16px">
+            <svg class="ico"><use href="#i-alert"/></svg>
+            <div class="body">
+              <h4 style="font-size:13.5px">
+                아직 결과를 입력하지 않은 작업 {{ eod.pending_count }}개가 못함으로 기록됩니다
+              </h4>
+              <p style="font-size:12.5px;margin-top:4px">
+                일부라도 했다면 돌아가서 입력하는 편이 다음 계획을 더 정확하게 만듭니다.
+              </p>
+            </div>
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="modal-foot">
+        <button class="btn btn-primary js-close" type="button">돌아가서 입력</button>
+        <button class="btn btn-secondary ml-auto" id="eodSubmit" type="button">
+          종료하기
+        </button>
+      </div>
+    </div>
+
+    <div id="eodProgress" hidden>
+      <div class="modal-body" style="padding:36px 30px">
+        <ol class="steps-run">
+          <li data-step="1"><svg class="ico"><use href="#i-save"/></svg>오늘 기록을 확정하는 중</li>
+        </ol>
+        <p class="field-hint" style="margin-top:24px;padding-top:18px;border-top:1px solid var(--neutral4)">
+          잠시만 기다려 주세요.
+        </p>
+      </div>
+      <div class="modal-foot" id="eodProgressFoot" hidden>
+        <button class="btn btn-primary ml-auto" id="eodProgressDone" type="button">확인</button>
+      </div>
+    </div>
+
+  </div>
+</div>

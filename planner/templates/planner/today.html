@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}오늘의 공부 · PLAN B{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+
+{% block body %}
+<div class="app">
+
+  {% include "planner/includes/sidebar.html" with nav="today" %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>오늘의 공부</h2>
+      <span class="num ml-auto" style="font-size:12.5px;color:var(--neutral7)">
+        {{ today|date:"n월 j일 (D)" }}
+      </span>
+    </header>
+
+    <div class="content">
+
+    {% if not tasks %}
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title=empty_title|default:"오늘 배정된 학습 작업이 없습니다" desc=empty_desc btn_label="전체 계획 보기" btn_url=calendar_url %}
+      </div>
+
+    {% elif is_finalized %}
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-done" title="오늘 공부를 마쳤습니다" desc="내일 계획은 전체 계획에서 확인하실 수 있습니다." btn_label="전체 계획 보기" btn_url=calendar_url %}
+      </div>
+
+    {% else %}
+      {% if changes %}
+        {% include "planner/includes/change_notice.html" with changes=changes summary=change_summary %}
+      {% endif %}
+
+      <div class="today-summary">
+        <div>
+          <div class="cap">오늘 남은 공부</div>
+          <div class="big num">{{ summary.remaining_minutes }}<span>분</span></div>
+        </div>
+        <div class="bar-wrap">
+          <div class="stack-bar">
+            <i class="done" style="width:{{ summary.done_percent }}%"></i>
+            <i class="partial" style="width:{{ summary.partial_percent }}%"></i>
+          </div>
+          <div class="legend">
+            <span>완료 <b class="num">{{ summary.done_minutes }}분</b> · 일부완료 <b class="num">{{ summary.partial_minutes }}분</b></span>
+            <span class="num">계획 {{ summary.total_minutes }}분</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <div class="row">
+          <h3>학습 작업 <span class="num" style="color:var(--neutral7);font-weight:500">{{ tasks|length }}</span></h3>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="chip on js-filter" type="button" data-filter="all">모든 작업</button>
+          <button class="chip js-filter" type="button" data-filter="left">안 끝난 것</button>
+        </div>
+      </div>
+
+      <div class="card" id="taskList">
+        {% for t in tasks %}
+          {% include "planner/includes/task_row.html" with task=t editable=True %}
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    </div>
+
+    {% if tasks and not is_finalized %}
+      <div class="bottom-bar">
+        <div>
+          <div class="info">
+            아직 결과를 입력하지 않은 작업 <span class="num">{{ summary.pending_count }}</span>개
+          </div>
+          <div class="desc">
+            하루 공부 종료를 누르면 미입력 작업은 못함으로 기록되고, 복구 대상에 포함됩니다.
+          </div>
+        </div>
+        <button class="btn btn-primary btn-lg ml-auto js-end-day" type="button">
+          하루 공부 종료<svg class="ico"><use href="#i-arrow-right"/></svg>
+        </button>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if tasks and not is_finalized %}
+  {% include "planner/includes/result_modal.html" %}
+  {% include "planner/includes/end_of_day_modal.html" %}
+{% endif %}
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}
