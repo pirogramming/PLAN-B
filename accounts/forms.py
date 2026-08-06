@@ -63,6 +63,12 @@ class CustomAuthenticationForm(AuthenticationForm):
     """
     로그인
     """
+
+    error_messages = {
+        **AuthenticationForm.error_messages,
+        'invalid_login': "이메일 또는 비밀번호가 올바르지 않습니다.",
+    }
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
