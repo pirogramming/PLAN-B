@@ -2216,3 +2216,195 @@ class TodayViewTests(TestCase):
         response = self.client.get(reverse('planner:today'))
         self.assertEqual(response.context['eod']['pending_count'], 1)
         self.assertEqual(response.context['eod']['not_done_count'], 1)
+
+class DailyPlanFinalizeViewTests(TestCase):
+    """
+    #79 daily_plan_finalize API 테스트.
+    공통 셋업: 사용자 1명, 활성 시험기간(오늘~오늘+10일).
+    URL에 plan_id/날짜를 받지 않으므로 '오늘 아닌 계획' 케이스는 없음
+    (FutureDailyPlanFinalizeError는 이 View 경로에서 발생할 수 없음).
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="finalize_view_tester", email="finalize_view@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.client.login(username="finalize_view@example.com", password="pass1234")
+        self.url = reverse('planner:daily_plan_finalize')
+
+    def _make_active_exam_period(self, user=None):
+        from exams.models import ExamPeriod
+        return ExamPeriod.objects.create(
+            user=user or self.user,
+            title="마감 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def _make_exam(self, exam_period, exam_date=None):
+        from exams.models import Exam
+        return Exam.objects.create(
+            exam_period=exam_period,
+            subject_name="테스트 과목",
+            exam_date=exam_date or self.today + timedelta(days=5),
+        )
+
+    def _make_task(self, exam, importance="high", depth="core"):
+        from exams.models import StudyTask
+        return StudyTask.objects.create(
+            exam=exam, title="마감 대상 작업", importance=importance, depth=depth,
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+
+    def _make_today_plan_with_item(self, exam_period, importance="high", depth="core"):
+        exam = self._make_exam(exam_period)
+        task = self._make_task(exam, importance=importance, depth=depth)
+        daily_plan = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today,
+            available_minutes=40, planned_minutes=40,
+        )
+        item = DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=40, order=1,
+        )
+        return daily_plan, item
+
+    def test_no_active_exam_period_returns_404(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+
+    def test_no_today_plan_returns_404(self):
+        self._make_active_exam_period()
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+
+    def test_other_users_today_plan_returns_404(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        other_user = User.objects.create_user(
+            username="other_finalize_tester", email="other_finalize@example.com", password="pass1234"
+        )
+        other_period = self._make_active_exam_period(user=other_user)
+        self._make_today_plan_with_item(other_period)
+
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+
+    def test_all_done_finalize_needs_recovery_false(self):
+        exam_period = self._make_active_exam_period()
+        daily_plan, item = self._make_today_plan_with_item(exam_period)
+        record_progress(daily_plan_item=item, status="done", actual_minutes=35)
+
+        response = self.client.post(self.url)
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body['isSuccess'])
+        self.assertEqual(body['code'], 'DAILY_PLAN_FINALIZED')
+        self.assertFalse(body['result']['needs_recovery'])
+        self.assertFalse(body['result']['recovery_available'])
+        self.assertIsNone(body['result']['recovery_group_id'])
+        self.assertEqual(body['result']['auto_marked_not_done_count'], 0)
+
+    def test_partial_or_not_done_needs_recovery_true(self):
+        exam_period = self._make_active_exam_period()
+        daily_plan, item = self._make_today_plan_with_item(
+            exam_period, importance="low", depth="optional"
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+        AvailableTime.objects.create(
+            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+
+        response = self.client.post(self.url)
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body['result']['needs_recovery'])
+
+    def test_unrecorded_task_auto_marked_not_done(self):
+        exam_period = self._make_active_exam_period()
+        daily_plan, item = self._make_today_plan_with_item(
+            exam_period, importance="low", depth="optional"
+        )
+        AvailableTime.objects.create(
+            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+        # 진행 기록 아예 입력 안 한 상태
+
+        response = self.client.post(self.url)
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['result']['auto_marked_not_done_count'], 1)
+        self.assertTrue(body['result']['needs_recovery'])
+        item.refresh_from_db()
+        self.assertEqual(item.progress_log.progress_status, "not_done")
+
+    def test_recovery_available_true_returns_group_id(self):
+        exam_period = self._make_active_exam_period()
+        daily_plan, item = self._make_today_plan_with_item(
+            exam_period, importance="low", depth="optional"
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+        AvailableTime.objects.create(
+            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+
+        response = self.client.post(self.url)
+        body = response.json()
+
+        self.assertTrue(body['result']['recovery_available'])
+        self.assertIsNotNone(body['result']['recovery_group_id'])
+        self.assertTrue(
+            RecoveryPlan.objects.filter(
+                recovery_group_id=body['result']['recovery_group_id']
+            ).exists()
+        )
+
+    def test_recovery_unavailable_when_both_types_fail(self):
+        exam_period = self._make_active_exam_period()
+        # importance=high, depth=core: 핵심집중형 제외 후보 자체가 없음.
+        # 미래 가용시간을 아예 만들지 않아 분량유지형도 배치 불가.
+        daily_plan, item = self._make_today_plan_with_item(
+            exam_period, importance="high", depth="core"
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+
+        response = self.client.post(self.url)
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body['result']['needs_recovery'])
+        self.assertFalse(body['result']['recovery_available'])
+        self.assertIsNone(body['result']['recovery_group_id'])
+
+    def test_already_finalized_returns_409(self):
+        exam_period = self._make_active_exam_period()
+        daily_plan, item = self._make_today_plan_with_item(exam_period)
+        record_progress(daily_plan_item=item, status="done", actual_minutes=35)
+
+        first = self.client.post(self.url)
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(self.url)
+        body = second.json()
+
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(body['code'], 'DAILY_PLAN_ALREADY_FINALIZED')
+
+    def test_get_method_not_allowed(self):
+        exam_period = self._make_active_exam_period()
+        self._make_today_plan_with_item(exam_period)
+
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 405)

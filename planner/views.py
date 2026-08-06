@@ -1,5 +1,6 @@
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
@@ -16,7 +17,10 @@ from planner.services.schedule_generator import (
     MismatchedExamPeriodError,
     DuplicateTaskAllocationError,
 )
-
+from planner.services.progress_recorder import (
+    finalize_daily_plan,
+    DailyPlanAlreadyFinalizedError,
+)
 
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
@@ -359,3 +363,63 @@ def today(request):
         },
     })
     return render(request, 'planner/today.html', context)
+
+def _get_today_daily_plan(user):
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=user, status=ExamPeriodStatus.ACTIVE)
+        .order_by('-created_at')
+        .first()
+    )
+
+    if exam_period is None:
+        return None
+
+    return DailyPlan.objects.filter(
+        exam_period=exam_period, date=timezone.localdate()
+    ).first()
+
+
+@login_required
+@require_http_methods(["POST"])
+def daily_plan_finalize(request):
+    daily_plan = _get_today_daily_plan(request.user)
+
+    if daily_plan is None:
+        return JsonResponse({
+            "isSuccess": False,
+            "code": "DAILY_PLAN_NOT_FOUND",
+            "message": "오늘 마감할 계획이 없습니다.",
+            "result": None,
+        }, status=404)
+
+    try:
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+    except DailyPlanAlreadyFinalizedError:
+        return JsonResponse({
+            "isSuccess": False,
+            "code": "DAILY_PLAN_ALREADY_FINALIZED",
+            "message": "이미 마감된 계획입니다.",
+            "result": None,
+        }, status=409)
+
+    recovery_plans = result["recovery_plans"] or {}
+    recovery_plan = (
+        recovery_plans.get("maintain_volume")
+        or recovery_plans.get("core_focus")
+    )
+    recovery_group_id = (
+        str(recovery_plan.recovery_group_id) if recovery_plan else None
+    )
+
+    return JsonResponse({
+        "isSuccess": True,
+        "code": "DAILY_PLAN_FINALIZED",
+        "message": "오늘 계획을 마감했습니다.",
+        "result": {
+            "needs_recovery": result["needs_recovery"],
+            "recovery_available": recovery_plan is not None,
+            "recovery_group_id": recovery_group_id,
+            "auto_marked_not_done_count": result["auto_marked_not_done_count"],
+        },
+    })
