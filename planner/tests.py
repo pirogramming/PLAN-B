@@ -1992,3 +1992,38 @@ class DashboardViewTests(TestCase):
 
         response = self.client.get(reverse('planner:dashboard'))
         self.assertIsNone(response.context['exam_period'])
+
+    def test_dashboard_shows_pending_recovery_from_yesterday(self):
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today - timedelta(days=1), end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        task = StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        yesterday_plan = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today - timedelta(days=1),
+            available_minutes=60, planned_minutes=40,
+        )
+        item = DailyPlanItem.objects.create(
+            daily_plan=yesterday_plan, study_task=task, planned_minutes=40, order=1,
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+
+        AvailableTime.objects.create(
+            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+        finalize_daily_plan(yesterday_plan)  # 어제 계획을 오늘 마감 -> 오늘은 아직 today_plan 없음
+
+        response = self.client.get(reverse('planner:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.context['pending_recovery'])

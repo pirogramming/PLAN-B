@@ -2,6 +2,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
+from core.choices import ExamPeriodStatus, RecoveryPlanStatus
 from django.utils import timezone
 from django.urls import reverse
 from planner.models import RecoveryPlan
@@ -175,7 +176,7 @@ def dashboard(request):
     """
     exam_period = (
         ExamPeriod.objects
-        .filter(user=request.user, status='active')
+        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
         .order_by('-created_at')
         .first()
     )
@@ -209,13 +210,12 @@ def dashboard(request):
     today_count = today_plan.items.count() if today_plan else 0
     today_minutes = today_plan.planned_minutes if today_plan else 0
 
-    pending_recovery_item = None
-    if today_plan and today_plan.finalized_at:
-        pending_recovery_item = (
-            RecoveryPlan.objects
-            .filter(source_daily_plan=today_plan, status='pending')
-            .first()
-        )
+    pending_recovery_item = (
+        RecoveryPlan.objects
+        .filter(source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING)
+        .order_by('-created_at')
+        .first()
+    )
 
     context = {
         'exam_period': exam_period,
