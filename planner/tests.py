@@ -2220,27 +2220,35 @@ class TodayViewTests(TestCase):
 class DailyPlanFinalizeViewTests(TestCase):
     """
     #79 daily_plan_finalize API 테스트.
-    공통 셋업: 사용자 1명, 활성 시험기간(오늘~오늘+10일).
-    URL에 plan_id/날짜를 받지 않으므로 '오늘 아닌 계획' 케이스는 없음
-    (FutureDailyPlanFinalizeError는 이 View 경로에서 발생할 수 없음).
+
+    로그인한 사용자의 ACTIVE 시험기간에 속한 오늘 DailyPlan을 조회하고,
+    finalize_daily_plan()을 호출해 하루 계획을 마감하는 JSON API를 검증한다.
     """
 
     def setUp(self):
         from django.contrib.auth import get_user_model
 
         User = get_user_model()
+
         self.user = User.objects.create_user(
-            username="finalize_view_tester", email="finalize_view@example.com", password="pass1234"
+            username="finalize_view_tester",
+            email="finalize_view@example.com",
+            password="pass1234",
         )
         self.today = django_timezone.localdate()
-        self.client.login(username="finalize_view@example.com", password="pass1234")
-        self.url = reverse('planner:daily_plan_finalize')
 
-    def _make_active_exam_period(self, user=None):
+        self.client.login(
+            username="finalize_view@example.com",
+            password="pass1234",
+        )
+        self.url = reverse("planner:daily_plan_finalize")
+
+    def _make_active_exam_period(self, user=None, title="마감 테스트 시험기간"):
         from exams.models import ExamPeriod
+
         return ExamPeriod.objects.create(
             user=user or self.user,
-            title="마감 테스트 시험기간",
+            title=title,
             start_date=self.today - timedelta(days=1),
             end_date=self.today + timedelta(days=10),
             status="active",
@@ -2248,6 +2256,7 @@ class DailyPlanFinalizeViewTests(TestCase):
 
     def _make_exam(self, exam_period, exam_date=None):
         from exams.models import Exam
+
         return Exam.objects.create(
             exam_period=exam_period,
             subject_name="테스트 과목",
@@ -2256,155 +2265,410 @@ class DailyPlanFinalizeViewTests(TestCase):
 
     def _make_task(self, exam, importance="high", depth="core"):
         from exams.models import StudyTask
+
         return StudyTask.objects.create(
-            exam=exam, title="마감 대상 작업", importance=importance, depth=depth,
-            task_type="concept", difficulty="normal", order=1,
-            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+            exam=exam,
+            title="마감 대상 작업",
+            importance=importance,
+            depth=depth,
+            task_type="concept",
+            difficulty="normal",
+            order=1,
+            estimated_min_minutes=20,
+            estimated_max_minutes=40,
+            is_confirmed=True,
         )
 
-    def _make_today_plan_with_item(self, exam_period, importance="high", depth="core"):
+    def _make_today_plan_with_item(
+        self,
+        exam_period,
+        importance="high",
+        depth="core",
+    ):
         exam = self._make_exam(exam_period)
-        task = self._make_task(exam, importance=importance, depth=depth)
+        task = self._make_task(
+            exam,
+            importance=importance,
+            depth=depth,
+        )
+
         daily_plan = DailyPlan.objects.create(
-            exam_period=exam_period, date=self.today,
-            available_minutes=40, planned_minutes=40,
+            exam_period=exam_period,
+            date=self.today,
+            available_minutes=40,
+            planned_minutes=40,
         )
         item = DailyPlanItem.objects.create(
-            daily_plan=daily_plan, study_task=task, planned_minutes=40, order=1,
+            daily_plan=daily_plan,
+            study_task=task,
+            planned_minutes=40,
+            order=1,
         )
+
         return daily_plan, item
 
     def test_no_active_exam_period_returns_404(self):
         response = self.client.post(self.url)
+
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+        self.assertEqual(
+            response.json()["message"],
+            "오늘 마감할 계획이 없습니다.",
+        )
 
     def test_no_today_plan_returns_404(self):
         self._make_active_exam_period()
+
         response = self.client.post(self.url)
+
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+        self.assertEqual(
+            response.json()["message"],
+            "오늘 마감할 계획이 없습니다.",
+        )
 
     def test_other_users_today_plan_returns_404(self):
         from django.contrib.auth import get_user_model
 
         User = get_user_model()
+
         other_user = User.objects.create_user(
-            username="other_finalize_tester", email="other_finalize@example.com", password="pass1234"
+            username="other_finalize_tester",
+            email="other_finalize@example.com",
+            password="pass1234",
         )
         other_period = self._make_active_exam_period(user=other_user)
         self._make_today_plan_with_item(other_period)
 
         response = self.client.post(self.url)
+
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()['code'], 'DAILY_PLAN_NOT_FOUND')
+        self.assertEqual(
+            response.json()["message"],
+            "오늘 마감할 계획이 없습니다.",
+        )
 
     def test_all_done_finalize_needs_recovery_false(self):
         exam_period = self._make_active_exam_period()
         daily_plan, item = self._make_today_plan_with_item(exam_period)
-        record_progress(daily_plan_item=item, status="done", actual_minutes=35)
+
+        record_progress(
+            daily_plan_item=item,
+            status="done",
+            actual_minutes=35,
+        )
 
         response = self.client.post(self.url)
         body = response.json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(body['isSuccess'])
-        self.assertEqual(body['code'], 'DAILY_PLAN_FINALIZED')
-        self.assertFalse(body['result']['needs_recovery'])
-        self.assertFalse(body['result']['recovery_available'])
-        self.assertIsNone(body['result']['recovery_group_id'])
-        self.assertEqual(body['result']['auto_marked_not_done_count'], 0)
+        self.assertFalse(body["needs_recovery"])
+        self.assertFalse(body["recovery_available"])
+        self.assertIsNone(body["recovery_group_id"])
+        self.assertEqual(body["auto_marked_not_done_count"], 0)
+
+        daily_plan.refresh_from_db()
+        self.assertIsNotNone(daily_plan.finalized_at)
 
     def test_partial_or_not_done_needs_recovery_true(self):
         exam_period = self._make_active_exam_period()
-        daily_plan, item = self._make_today_plan_with_item(
-            exam_period, importance="low", depth="optional"
+        _daily_plan, item = self._make_today_plan_with_item(
+            exam_period,
+            importance="low",
+            depth="optional",
         )
-        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+
+        record_progress(
+            daily_plan_item=item,
+            status="not_done",
+            actual_minutes=0,
+        )
         AvailableTime.objects.create(
-            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+            exam_period=exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
         )
 
         response = self.client.post(self.url)
         body = response.json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(body['result']['needs_recovery'])
+        self.assertTrue(body["needs_recovery"])
 
     def test_unrecorded_task_auto_marked_not_done(self):
         exam_period = self._make_active_exam_period()
-        daily_plan, item = self._make_today_plan_with_item(
-            exam_period, importance="low", depth="optional"
+        _daily_plan, item = self._make_today_plan_with_item(
+            exam_period,
+            importance="low",
+            depth="optional",
         )
         AvailableTime.objects.create(
-            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+            exam_period=exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
         )
-        # 진행 기록 아예 입력 안 한 상태
 
         response = self.client.post(self.url)
         body = response.json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(body['result']['auto_marked_not_done_count'], 1)
-        self.assertTrue(body['result']['needs_recovery'])
+        self.assertEqual(body["auto_marked_not_done_count"], 1)
+        self.assertTrue(body["needs_recovery"])
+
         item.refresh_from_db()
-        self.assertEqual(item.progress_log.progress_status, "not_done")
+        self.assertEqual(
+            item.progress_log.progress_status,
+            "not_done",
+        )
 
     def test_recovery_available_true_returns_group_id(self):
         exam_period = self._make_active_exam_period()
-        daily_plan, item = self._make_today_plan_with_item(
-            exam_period, importance="low", depth="optional"
+        _daily_plan, item = self._make_today_plan_with_item(
+            exam_period,
+            importance="low",
+            depth="optional",
         )
-        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+
+        record_progress(
+            daily_plan_item=item,
+            status="not_done",
+            actual_minutes=0,
+        )
         AvailableTime.objects.create(
-            exam_period=exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+            exam_period=exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
         )
 
         response = self.client.post(self.url)
         body = response.json()
 
-        self.assertTrue(body['result']['recovery_available'])
-        self.assertIsNotNone(body['result']['recovery_group_id'])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body["recovery_available"])
+        self.assertIsNotNone(body["recovery_group_id"])
+
         self.assertTrue(
             RecoveryPlan.objects.filter(
-                recovery_group_id=body['result']['recovery_group_id']
+                recovery_group_id=body["recovery_group_id"],
             ).exists()
         )
 
     def test_recovery_unavailable_when_both_types_fail(self):
         exam_period = self._make_active_exam_period()
-        # importance=high, depth=core: 핵심집중형 제외 후보 자체가 없음.
-        # 미래 가용시간을 아예 만들지 않아 분량유지형도 배치 불가.
-        daily_plan, item = self._make_today_plan_with_item(
-            exam_period, importance="high", depth="core"
+
+        # high/core 작업은 핵심 집중형 제외 후보가 아니다.
+        # 미래 가용시간도 없으므로 분량 유지형도 생성되지 않는다.
+        _daily_plan, item = self._make_today_plan_with_item(
+            exam_period,
+            importance="high",
+            depth="core",
         )
-        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+
+        record_progress(
+            daily_plan_item=item,
+            status="not_done",
+            actual_minutes=0,
+        )
 
         response = self.client.post(self.url)
         body = response.json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(body['result']['needs_recovery'])
-        self.assertFalse(body['result']['recovery_available'])
-        self.assertIsNone(body['result']['recovery_group_id'])
+        self.assertTrue(body["needs_recovery"])
+        self.assertFalse(body["recovery_available"])
+        self.assertIsNone(body["recovery_group_id"])
 
     def test_already_finalized_returns_409(self):
         exam_period = self._make_active_exam_period()
-        daily_plan, item = self._make_today_plan_with_item(exam_period)
-        record_progress(daily_plan_item=item, status="done", actual_minutes=35)
+        _daily_plan, item = self._make_today_plan_with_item(exam_period)
 
-        first = self.client.post(self.url)
-        self.assertEqual(first.status_code, 200)
+        record_progress(
+            daily_plan_item=item,
+            status="done",
+            actual_minutes=35,
+        )
 
-        second = self.client.post(self.url)
-        body = second.json()
+        first_response = self.client.post(self.url)
+        self.assertEqual(first_response.status_code, 200)
 
-        self.assertEqual(second.status_code, 409)
-        self.assertEqual(body['code'], 'DAILY_PLAN_ALREADY_FINALIZED')
+        second_response = self.client.post(self.url)
+
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(
+            second_response.json()["message"],
+            "이미 마감된 계획입니다.",
+        )
 
     def test_get_method_not_allowed(self):
         exam_period = self._make_active_exam_period()
         self._make_today_plan_with_item(exam_period)
 
         response = self.client.get(self.url)
+
         self.assertEqual(response.status_code, 405)
+
+    def test_finds_today_plan_in_older_active_exam_period(self):
+        """
+        더 최근에 생성된 ACTIVE 시험기간에는 오늘 계획이 없고,
+        이전 ACTIVE 시험기간에만 오늘 계획이 있어도 정상 마감해야 한다.
+        """
+        from exams.models import ExamPeriod
+
+        older_period = self._make_active_exam_period(
+            title="이전 시험기간",
+        )
+        daily_plan, item = self._make_today_plan_with_item(older_period)
+
+        newer_period = self._make_active_exam_period(
+            title="최근 시험기간",
+        )
+
+        # 생성 시각의 우선순위를 명확하게 만든다.
+        ExamPeriod.objects.filter(pk=older_period.pk).update(
+            created_at=django_timezone.now() - timedelta(minutes=1),
+        )
+        ExamPeriod.objects.filter(pk=newer_period.pk).update(
+            created_at=django_timezone.now(),
+        )
+
+        record_progress(
+            daily_plan_item=item,
+            status="done",
+            actual_minutes=35,
+        )
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 200)
+
+        daily_plan.refresh_from_db()
+        self.assertIsNotNone(daily_plan.finalized_at)
+
+class ProgressRecordViewTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="progress_view_tester", email="progressview@example.com", password="pass1234"
+        )
+        self.other_user = User.objects.create_user(
+            username="other_progress_view", email="other_progressview@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=40,
+        )
+        self.item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.task, planned_minutes=40, order=1,
+        )
+        self.client.login(username="progressview@example.com", password="pass1234")
+
+    def _post(self, item_id, payload):
+        import json
+        return self.client.post(
+            reverse('planner:progress_record', kwargs={'item_id': item_id}),
+            data=json.dumps(payload),
+            content_type='application/json',
+        )
+
+    def test_record_done_status(self):
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 45})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['status'], 'done')
+        self.assertEqual(data['actual_minutes'], 45)
+
+    def test_record_partial_status(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 50}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['completion_percent'], 50)
+
+    def test_record_not_done_status(self):
+        response = self._post(self.item.id, {"status": "not_done"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['actual_minutes'], 0)
+
+    def test_invalid_completion_percent_rejected(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 0}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_string_actual_minutes_rejected_not_500(self):
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": "30"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_float_completion_percent_rejected(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 10, "completion_percent": 50.5}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_dict_body_rejected_not_500(self):
+        response = self.client.post(
+            reverse('planner:progress_record', kwargs={'item_id': self.item.id}),
+            data='[]',
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_resubmit_updates_existing_record_not_duplicate(self):
+        self._post(self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 50})
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 40})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ProgressLog.objects.filter(daily_plan_item=self.item).count(), 1)
+
+    def test_rejects_other_user_item_with_json_404(self):
+        self.client.login(username="other_progressview@example.com", password="pass1234")
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 30})
+        self.assertEqual(response.status_code, 404)
+        # HTML이 아니라 JSON으로 응답하는지 확인
+        data = response.json()
+        self.assertIn('message', data)
+
+    def test_rejects_non_today_plan_item(self):
+        future_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=60, planned_minutes=40,
+        )
+        future_item = DailyPlanItem.objects.create(
+            daily_plan=future_plan, study_task=self.task, planned_minutes=40, order=1,
+        )
+        response = self._post(future_item.id, {"status": "done", "actual_minutes": 30})
+        self.assertEqual(response.status_code, 404)
+
+    def test_rejects_edit_after_finalized(self):
+        self._post(self.item.id, {"status": "not_done"})
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+        finalize_daily_plan(self.daily_plan)
+
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 40})
+        self.assertEqual(response.status_code, 409)
+
+    def test_speed_factor_updated_after_record(self):
+        self._post(self.item.id, {"status": "done", "actual_minutes": 60})
+        self.exam.refresh_from_db()
+        self.assertNotEqual(self.exam.speed_factor, 1.0)
