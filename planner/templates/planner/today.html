@@ -26,19 +26,20 @@
     <div class="content">
 
     {% if not tasks %}
-      {# ===== 오늘 배정된 계획이 없음 ===== #}
       <div class="card">
         {% include "planner/includes/empty_state.html" with icon="i-calendar" title=empty_title|default:"오늘 배정된 학습 작업이 없습니다" desc=empty_desc btn_label="전체 계획 보기" btn_url=calendar_url %}
       </div>
 
     {% elif is_finalized %}
-      {# ===== 이미 하루를 마감함 ===== #}
       <div class="card">
         {% include "planner/includes/empty_state.html" with icon="i-done" title="오늘 공부를 마쳤습니다" desc="내일 계획은 전체 계획에서 확인하실 수 있습니다." btn_label="전체 계획 보기" btn_url=calendar_url %}
       </div>
 
     {% else %}
-      {# ===== 오늘의 공부 ===== #}
+      {% if changes %}
+        {% include "planner/includes/change_notice.html" with changes=changes summary=change_summary %}
+      {% endif %}
+
       <div class="today-summary">
         <div>
           <div class="cap">오늘 남은 공부</div>
@@ -85,8 +86,7 @@
             하루 공부 종료를 누르면 미입력 작업은 못함으로 기록되고, 복구 대상에 포함됩니다.
           </div>
         </div>
-        {# TODO: 하루 종료 확인 모달 연결 (다음 이슈) #}
-        <button class="btn btn-primary btn-lg ml-auto" type="button">
+        <button class="btn btn-primary btn-lg ml-auto js-end-day" type="button">
           하루 공부 종료<svg class="ico"><use href="#i-arrow-right"/></svg>
         </button>
       </div>
@@ -96,6 +96,7 @@
 
 {% if tasks and not is_finalized %}
   {% include "planner/includes/result_modal.html" %}
+  {% include "planner/includes/end_of_day_modal.html" %}
 {% endif %}
 
 {% include "includes/icons.html" %}

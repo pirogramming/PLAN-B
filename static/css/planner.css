@@ -98,7 +98,11 @@
 .card-pad{padding:20px}
 
 .tag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;
-     font-size:11.5px;font-weight:650;background:var(--neutral11);color:var(--neutral1)}
+     font-size:11.5px;font-weight:650;
+     background:var(--neutral3);color:var(--neutral9);border:1px solid var(--neutral4)}
+.tag-core{background:var(--neutral11);color:var(--neutral1);border-color:var(--neutral11)}
+.tag-subject{background:var(--brand1);color:var(--brand5);border-color:var(--brand2)}
+.tag-optional{background:transparent;color:var(--neutral7);border:1px dashed var(--neutral6)}
 
 .badge{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;
        border-radius:999px;font-size:12px;font-weight:700;border:1px solid;
@@ -131,11 +135,14 @@
 /* ===== 배너 ===== */
 .banner{display:flex;gap:14px;padding:18px 20px;border-radius:var(--r-md);
         border:1px solid var(--judge2-line);background:var(--judge2-bg);color:var(--judge2)}
+.banner[hidden]{display:none}
 .banner .ico{width:19px;height:19px;margin-top:1px}
 .banner .body{flex:1}
 .banner h4{font-size:14.5px;font-weight:700;margin-bottom:5px}
 .banner p{font-size:13.5px;line-height:1.65}
 .banner .actions{display:flex;gap:8px;align-self:center}
+.banner.info{border-color:var(--brand2);background:var(--brand1);color:var(--brand5)}
+.banner.info p{color:var(--neutral9)}
 
 
 /* ===== 숫자 ===== */
@@ -376,6 +383,42 @@
 .box[type=number]{-moz-appearance:textfield}
 
 
+.sum-list{border:1px solid var(--neutral5);border-radius:12px;overflow:hidden}
+.sum-row{display:flex;align-items:center;justify-content:space-between;
+         padding:13px 16px;border-bottom:1px solid var(--neutral4)}
+.sum-row:last-child{border-bottom:0}
+.sum-row.muted{background:var(--neutral2)}
+.sum-row span{display:flex;align-items:center;gap:9px;
+              font-size:13.5px;color:var(--neutral9)}
+.sum-row span .ico{width:16px;height:16px;color:var(--neutral7)}
+.sum-row b{font-size:13.5px;font-weight:600;color:var(--neutral10)}
+
+
+.steps-run{display:flex;flex-direction:column;gap:18px}
+.steps-run li{display:flex;align-items:center;gap:12px;
+              font-size:14px;color:var(--neutral6);transition:.2s}
+.steps-run li .ico{width:17px;height:17px}
+.steps-run li.doing{color:var(--neutral11);font-weight:650}
+.steps-run li.doing .ico{color:var(--brand4);animation:spin 1s linear infinite}
+.steps-run li.done{color:var(--neutral8)}
+.steps-run li.done .ico{color:var(--judge1)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.steps-run li.doing .ico{animation:none}}
+
+
+.ico-sm{width:14px;height:14px}
+
+.change-row{display:flex;align-items:center;gap:14px;padding:12px 22px}
+.change-row .info{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
+.change-row .title{font-size:14px;font-weight:650;color:var(--neutral9)}
+.change-row .dates{display:flex;align-items:center;gap:8px;
+                   font-size:13px;color:var(--neutral7);flex:none}
+.change-row .dates .to{color:var(--neutral10);font-weight:600}
+.change-row .dates .to.muted{color:var(--neutral7);font-weight:500}
+.change-row .dates .ico{width:14px;height:14px;color:var(--neutral6)}
+.badge-gray{background:var(--neutral3);color:var(--neutral9);border-color:var(--neutral5)}
+
+
 /* ===== 오늘의 공부 : 모바일 =====
    (앞의 스타일을 덮어써야 하므로 파일 끝에 둡니다) */
 @media (max-width:767px){
@@ -404,4 +447,9 @@
   .time-input .unit{flex:1}
   .time-input .box{width:100%}
   .percent-input .box{flex:1}
+
+  .sum-row{padding:12px 14px}
+  .change-row{flex-wrap:wrap;gap:10px;padding:12px 16px}
+  .change-row .info{flex:1 1 100%}
+  .change-row .dates{margin-left:auto}
 }
