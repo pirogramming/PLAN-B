@@ -1,3 +1,7 @@
+import json
+from django.http import JsonResponse
+from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan
+from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
@@ -5,9 +9,7 @@ from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
 from django.utils import timezone
 from django.urls import reverse
-from planner.models import RecoveryPlan
 from exams.models import ExamPeriod, StudyTask, AvailableTime
-from planner.models import DailyPlan
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE
 from planner.services.schedule_generator import (
     generate_schedule,
@@ -359,3 +361,145 @@ def today(request):
         },
     })
     return render(request, 'planner/today.html', context)
+
+@login_required
+@require_http_methods(["POST"])
+def progress_record(request, item_id):
+    item = get_object_or_404(
+        DailyPlanItem, id=item_id, daily_plan__exam_period__user=request.user
+    )
+
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return JsonResponse(
+            {"isSuccess": False, "code": "COMMON400", "message": "잘못된 요청입니다.", "result": None},
+            status=400,
+        )
+
+    status = payload.get('status')
+    actual_minutes = payload.get('actual_minutes')
+    completion_percent = payload.get('completion_percent')
+
+    try:
+        result = record_progress(
+            daily_plan_item=item,
+            status=status,
+            actual_minutes=actual_minutes,
+            completion_percent=completion_percent,
+        )
+    except FinalizedDailyPlanEditError:
+        return JsonResponse(
+            {
+                "isSuccess": False,
+                "code": "PROGRESS4091",
+                "message": "마감된 계획의 진행 기록은 수정할 수 없습니다.",
+                "result": None,
+            },
+            status=409,
+        )
+    except (ValueError, KeyError):
+        return JsonResponse(
+            {"isSuccess": False, "code": "COMMON400", "message": "입력값이 올바르지 않습니다.", "result": None},
+            status=400,
+        )
+
+    progress_log = result["progress_log"]
+    return JsonResponse({
+        "isSuccess": True,
+        "code": "COMMON200",
+        "message": "성공입니다.",
+        "result": {
+            "item_id": item.id,
+            "status": progress_log.progress_status,
+            "actual_minutes": progress_log.actual_minutes,
+            "completion_percent": progress_log.completion_percent,
+            "daily_plan_status": result["daily_plan_status"],
+        },
+    })
+
+@login_required
+@require_http_methods(["POST"])
+def progress_record(request, item_id):
+    item = (
+        DailyPlanItem.objects
+        .select_related('daily_plan', 'study_task__exam')
+        .filter(
+            id=item_id,
+            daily_plan__exam_period__user=request.user,
+            daily_plan__exam_period__status=ExamPeriodStatus.ACTIVE,
+            daily_plan__date=timezone.localdate(),
+        )
+        .first()
+    )
+
+    if item is None:
+        return JsonResponse(
+            {"message": "오늘 학습 작업을 찾을 수 없습니다."}, status=404,
+        )
+
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse(
+            {"message": "올바른 JSON 요청이 아닙니다."}, status=400,
+        )
+
+    if not isinstance(payload, dict):
+        return JsonResponse(
+            {"message": "요청 본문은 JSON 객체여야 합니다."}, status=400,
+        )
+
+    status = payload.get('status')
+    actual_minutes = payload.get('actual_minutes')
+    completion_percent = payload.get('completion_percent')
+
+    if status not in ProgressStatus.values:
+        return JsonResponse(
+            {"message": "올바르지 않은 학습 상태입니다."}, status=400,
+        )
+
+    if status in (ProgressStatus.DONE, ProgressStatus.PARTIAL):
+        if (
+            isinstance(actual_minutes, bool)
+            or not isinstance(actual_minutes, int)
+            or not 1 <= actual_minutes <= 1439
+        ):
+            return JsonResponse(
+                {"message": "실제 공부시간은 1~1439분 사이의 정수여야 합니다."}, status=400,
+            )
+    else:
+        actual_minutes = None
+
+    if status == ProgressStatus.PARTIAL:
+        if (
+            isinstance(completion_percent, bool)
+            or not isinstance(completion_percent, int)
+            or not 1 <= completion_percent <= 99
+        ):
+            return JsonResponse(
+                {"message": "일부완료 진행률은 1~99 사이의 정수여야 합니다."}, status=400,
+            )
+    else:
+        completion_percent = None
+
+    try:
+        result = record_progress(
+            daily_plan_item=item,
+            status=status,
+            actual_minutes=actual_minutes,
+            completion_percent=completion_percent,
+        )
+    except FinalizedDailyPlanEditError as exc:
+        return JsonResponse({"message": str(exc)}, status=409)
+    except (ValueError, TypeError) as exc:
+        return JsonResponse({"message": str(exc)}, status=400)
+
+    progress_log = result['progress_log']
+    return JsonResponse({
+        "item_id": item.id,
+        "status": progress_log.progress_status,
+        "actual_minutes": progress_log.actual_minutes,
+        "completion_percent": progress_log.completion_percent,
+        "daily_plan_status": result['daily_plan_status'],
+    })
