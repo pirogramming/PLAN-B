@@ -6,8 +6,8 @@
         <div style="flex:1">
           <h3>오늘 공부를 마칠까요?</h3>
           <div class="meta">
-            종료하면 아래 내용이 확정되고, <b>내일부터 시험일까지</b>의 계획이 다시 계산됩니다.
-            오늘까지의 기록은 바뀌지 않습니다.
+            종료하면 오늘 기록이 확정됩니다. 완료하지 못한 작업이 있으면
+            복구 방법을 선택할 수 있는 화면으로 안내해드릴게요.
           </div>
         </div>
         <button class="icon-btn js-close" type="button" aria-label="닫기">
@@ -49,7 +49,7 @@
       <div class="modal-foot">
         <button class="btn btn-primary js-close" type="button">돌아가서 입력</button>
         <button class="btn btn-secondary ml-auto" id="eodSubmit" type="button">
-          종료하고 다시 계산
+          종료하기
         </button>
       </div>
     </div>
@@ -57,13 +57,10 @@
     <div id="eodProgress" hidden>
       <div class="modal-body" style="padding:36px 30px">
         <ol class="steps-run">
-          <li data-step="1"><svg class="ico"><use href="#i-save"/></svg>오늘 기록 저장</li>
-          <li data-step="2"><svg class="ico"><use href="#i-calculator"/></svg>과목별 남은 학습량 계산</li>
-          <li data-step="3"><svg class="ico"><use href="#i-loader"/></svg>학습 속도 반영</li>
-          <li data-step="4"><svg class="ico"><use href="#i-recalc"/></svg>내일부터의 계획 다시 계산</li>
+          <li data-step="1"><svg class="ico"><use href="#i-save"/></svg>오늘 기록을 확정하는 중</li>
         </ol>
         <p class="field-hint" style="margin-top:24px;padding-top:18px;border-top:1px solid var(--neutral4)">
-          보통 2초 안에 끝납니다. 창을 닫아도 계산은 계속됩니다.
+          잠시만 기다려 주세요.
         </p>
       </div>
       <div class="modal-foot" id="eodProgressFoot" hidden>
