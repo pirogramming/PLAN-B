@@ -2216,3 +2216,133 @@ class TodayViewTests(TestCase):
         response = self.client.get(reverse('planner:today'))
         self.assertEqual(response.context['eod']['pending_count'], 1)
         self.assertEqual(response.context['eod']['not_done_count'], 1)
+
+
+class ProgressRecordViewTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="progress_view_tester", email="progressview@example.com", password="pass1234"
+        )
+        self.other_user = User.objects.create_user(
+            username="other_progress_view", email="other_progressview@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=40,
+        )
+        self.item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.task, planned_minutes=40, order=1,
+        )
+        self.client.login(username="progressview@example.com", password="pass1234")
+
+    def _post(self, item_id, payload):
+        import json
+        return self.client.post(
+            reverse('planner:progress_record', kwargs={'item_id': item_id}),
+            data=json.dumps(payload),
+            content_type='application/json',
+        )
+
+    def test_record_done_status(self):
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 45})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['status'], 'done')
+        self.assertEqual(data['actual_minutes'], 45)
+
+    def test_record_partial_status(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 50}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['completion_percent'], 50)
+
+    def test_record_not_done_status(self):
+        response = self._post(self.item.id, {"status": "not_done"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['actual_minutes'], 0)
+
+    def test_invalid_completion_percent_rejected(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 0}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_string_actual_minutes_rejected_not_500(self):
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": "30"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_float_completion_percent_rejected(self):
+        response = self._post(
+            self.item.id, {"status": "partial", "actual_minutes": 10, "completion_percent": 50.5}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_dict_body_rejected_not_500(self):
+        response = self.client.post(
+            reverse('planner:progress_record', kwargs={'item_id': self.item.id}),
+            data='[]',
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_resubmit_updates_existing_record_not_duplicate(self):
+        self._post(self.item.id, {"status": "partial", "actual_minutes": 20, "completion_percent": 50})
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 40})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ProgressLog.objects.filter(daily_plan_item=self.item).count(), 1)
+
+    def test_rejects_other_user_item_with_json_404(self):
+        self.client.login(username="other_progressview@example.com", password="pass1234")
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 30})
+        self.assertEqual(response.status_code, 404)
+        # HTML이 아니라 JSON으로 응답하는지 확인
+        data = response.json()
+        self.assertIn('message', data)
+
+    def test_rejects_non_today_plan_item(self):
+        future_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=60, planned_minutes=40,
+        )
+        future_item = DailyPlanItem.objects.create(
+            daily_plan=future_plan, study_task=self.task, planned_minutes=40, order=1,
+        )
+        response = self._post(future_item.id, {"status": "done", "actual_minutes": 30})
+        self.assertEqual(response.status_code, 404)
+
+    def test_rejects_edit_after_finalized(self):
+        self._post(self.item.id, {"status": "not_done"})
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+        finalize_daily_plan(self.daily_plan)
+
+        response = self._post(self.item.id, {"status": "done", "actual_minutes": 40})
+        self.assertEqual(response.status_code, 409)
+
+    def test_speed_factor_updated_after_record(self):
+        self._post(self.item.id, {"status": "done", "actual_minutes": 60})
+        self.exam.refresh_from_db()
+        self.assertNotEqual(self.exam.speed_factor, 1.0)
