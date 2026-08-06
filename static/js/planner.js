@@ -1,8 +1,5 @@
-// PLAN B — planner 화면 공통 스크립트
-
 document.addEventListener('DOMContentLoaded', function () {
 
-  /* ---------- 사이드바 접기 ---------- */
   const app = document.querySelector('.app');
   const toggleBtns = [document.getElementById('toggleSide'), document.getElementById('openSide')];
 
@@ -17,7 +14,6 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
 
-  /* ---------- 작업 필터 ---------- */
   document.querySelectorAll('.js-filter').forEach(function (btn) {
     btn.addEventListener('click', function () {
       document.querySelectorAll('.js-filter').forEach(b => b.classList.remove('on'));
@@ -25,36 +21,98 @@ document.addEventListener('DOMContentLoaded', function () {
 
       const onlyLeft = btn.dataset.filter === 'left';
       document.querySelectorAll('.task').forEach(function (row) {
-        // '안 끝난 것' = 완료를 제외한 나머지 (미입력 + 일부완료 + 못함)
         row.hidden = onlyLeft && row.classList.contains('is-done');
       });
     });
   });
 
 
-  /* ---------- 결과 입력 모달 ---------- */
+  document.querySelectorAll('.js-hide-notice').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btn.closest('.banner').hidden = true;
+    });
+  });
+
+
+  const eod = document.getElementById('eodModal');
+  if (eod) {
+    const confirmView   = document.getElementById('eodConfirm');
+    const progressView  = document.getElementById('eodProgress');
+    const progressFoot  = document.getElementById('eodProgressFoot');
+    const progressDone  = document.getElementById('eodProgressDone');
+    const steps = eod.querySelectorAll('.steps-run li');
+    let recalcDone = false;
+
+    document.querySelectorAll('.js-end-day').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        confirmView.hidden = false;
+        progressView.hidden = true;
+        progressFoot.hidden = true;
+        recalcDone = false;
+        steps.forEach(s => s.classList.remove('doing', 'done'));
+        eod.hidden = false;
+        document.body.style.overflow = 'hidden';
+      });
+    });
+
+    function closeEod() {
+      if (!progressView.hidden && !recalcDone) return;
+      eod.hidden = true;
+      document.body.style.overflow = '';
+    }
+    eod.querySelectorAll('.js-close').forEach(b => b.addEventListener('click', closeEod));
+    eod.addEventListener('click', e => { if (e.target === eod) closeEod(); });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !eod.hidden) closeEod();
+    });
+    if (progressDone) progressDone.addEventListener('click', closeEod);
+
+    const eodSubmit = document.getElementById('eodSubmit');
+    if (eodSubmit) {
+      eodSubmit.addEventListener('click', function () {
+        confirmView.hidden = true;
+        progressView.hidden = false;
+        runSteps(0);
+      });
+    }
+
+    function runSteps(i) {
+      if (i > 0) {
+        steps[i - 1].classList.remove('doing');
+        steps[i - 1].classList.add('done');
+      }
+      if (i >= steps.length) {
+        recalcDone = true;
+        progressFoot.hidden = false;
+        return;
+      }
+      steps[i].classList.add('doing');
+      setTimeout(() => runSteps(i + 1), 500);
+    }
+  }
+
+
   const modal = document.getElementById('resultModal');
   if (!modal) return;
 
   const el = {
-    tags:   document.getElementById('rmTags'),
-    title:  document.getElementById('rmTitle'),
-    meta:   document.getElementById('rmMeta'),
-    time:   document.getElementById('rmTime'),
-    hour:   document.getElementById('rmHour'),
-    min:    document.getElementById('rmMin'),
-    total:  document.getElementById('rmTotal'),
+    tags:    document.getElementById('rmTags'),
+    title:   document.getElementById('rmTitle'),
+    meta:    document.getElementById('rmMeta'),
+    time:    document.getElementById('rmTime'),
+    hour:    document.getElementById('rmHour'),
+    min:     document.getElementById('rmMin'),
+    total:   document.getElementById('rmTotal'),
     timeHint:document.getElementById('rmTimeHint'),
-    pctBox: document.getElementById('rmPercent'),
-    pct:    document.getElementById('rmPct'),
-    pctHint:document.getElementById('rmPctHint'),
-    none:   document.getElementById('rmNone'),
-    submit: document.getElementById('rmSubmit'),
+    pctBox:  document.getElementById('rmPercent'),
+    pct:     document.getElementById('rmPct'),
+    pctHint: document.getElementById('rmPctHint'),
+    none:    document.getElementById('rmNone'),
+    submit:  document.getElementById('rmSubmit'),
   };
 
-  let status = null;   // done / partial / not_done
+  let status = null;
 
-  /* 열기 */
   document.querySelectorAll('.js-result').forEach(function (btn) {
     btn.addEventListener('click', function () {
       const row = btn.closest('.task');
@@ -73,7 +131,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   });
 
-  /* 닫기 */
   modal.querySelectorAll('.js-close').forEach(b => b.addEventListener('click', close));
   modal.addEventListener('click', e => { if (e.target === modal) close(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.hidden) close(); });
@@ -83,7 +140,6 @@ document.addEventListener('DOMContentLoaded', function () {
     document.body.style.overflow = '';
   }
 
-  /* 상태 선택 */
   document.querySelectorAll('#rmPick .pick-item').forEach(function (item) {
     item.addEventListener('click', function () {
       status = item.dataset.value;
@@ -91,10 +147,8 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   });
 
-  /* 입력 감지 */
   [el.hour, el.min, el.pct].forEach(i => i.addEventListener('input', paint));
 
-  /* 화면 갱신 + 버튼 활성화 검증 */
   function paint() {
     document.querySelectorAll('#rmPick .pick-item').forEach(function (item) {
       item.classList.toggle('on', item.dataset.value === status);

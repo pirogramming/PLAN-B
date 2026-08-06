@@ -7,7 +7,7 @@
     </a>
     <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
       <svg class="ico"><use href="#i-today"/></svg>오늘의 공부
-      {% if today_count %}<span class="count">{{ today_count }}</span>{% endif %}
+      {% if today_count %}<span class="count" title="오늘 계획된 작업 {{ today_count }}개">{{ today_count }}</span>{% endif %}
     </a>
     <a class="nav-i {% if nav == 'calendar' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
       <svg class="ico"><use href="#i-calendar"/></svg>전체 계획
