@@ -27,6 +27,25 @@ def _confirmed_tasks(exam_period):
         exam__exam_period=exam_period, is_confirmed=True
     ).select_related('exam')
 
+def _get_pending_recovery(exam_period):
+    """
+    exam_period 전체 범위에서 아직 선택 안 된 복구안을 조회한다.
+    (dashboard, today 양쪽에서 공유 — 한쪽만 고치는 사고 방지)
+    """
+    pending_recovery_qs = RecoveryPlan.objects.filter(
+        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
+    )
+    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
+
+    if pending_recovery_item is None:
+        return None
+
+    return {
+        'recovery_group_id': pending_recovery_item.recovery_group_id,
+        'created_at': pending_recovery_item.created_at,
+        'count': pending_recovery_qs.values('recovery_group_id').distinct().count(),
+    }
+
 
 def _available_times(exam_period):
     """
@@ -210,28 +229,13 @@ def dashboard(request):
     today_count = today_plan.items.count() if today_plan else 0
     today_minutes = today_plan.planned_minutes if today_plan else 0
 
-    pending_recovery_qs = RecoveryPlan.objects.filter(
-        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
-    )
-    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
-    # 분량유지형/핵심집중형 두 row가 한 그룹이라 recovery_group_id 기준으로 세야
-    # 실제 "밀린 날짜 수"가 나온다
-    pending_recovery_count = pending_recovery_qs.values('recovery_group_id').distinct().count()
-
     context = {
         'exam_period': exam_period,
         'has_plan': True,
         'today': today,
         'today_count': today_count,
         'today_minutes': today_minutes,
-        'pending_recovery': (
-            {
-                'recovery_group_id': pending_recovery_item.recovery_group_id,
-                'created_at': pending_recovery_item.created_at,
-                'count': pending_recovery_count,
-            }
-            if pending_recovery_item else None
-        ),
+        'pending_recovery': _get_pending_recovery(exam_period),
     }
     return render(request, 'planner/dashboard.html', context)
 
@@ -264,18 +268,9 @@ def today(request):
         })
         return render(request, 'planner/today.html', context)
 
-    pending_recovery_qs = RecoveryPlan.objects.filter(
-        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
-    )
-    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
-    pending_recovery_count = pending_recovery_qs.values('recovery_group_id').distinct().count()
-
-    if pending_recovery_item:
-        context['pending_recovery'] = {
-            'recovery_group_id': pending_recovery_item.recovery_group_id,
-            'created_at': pending_recovery_item.created_at,
-            'count': pending_recovery_count,
-        }
+    pending_recovery = _get_pending_recovery(exam_period)
+    if pending_recovery:
+        context['pending_recovery'] = pending_recovery
 
     today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today_date).first()
 
@@ -330,6 +325,12 @@ def today(request):
             'planned_minutes': planned_minutes,
         })
 
+    # 주의: recovery.py의 _remaining_minutes()와 "completion_percent로 남은 비율을
+    # 계산한다"는 방식은 같지만, 기준값이 다르다.
+    # - recovery.py: 복구 시점의 최신 speed_factor로 다시 계산한 estimated_max 사용
+    #   (미래 재배치를 위한 보수적 재추정)
+    # - 여기(today): 스케줄링 당시 저장된 planned_minutes 스냅샷 사용
+    #   (오늘 계획 대비 진행률 표시 목적)
     remaining_minutes = max(total_minutes - done_progress_minutes - partial_progress_minutes, 0)
     done_percent = round(done_progress_minutes / total_minutes * 100) if total_minutes else 0
     partial_percent = round(partial_progress_minutes / total_minutes * 100) if total_minutes else 0
