@@ -2,7 +2,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
-from core.choices import ExamPeriodStatus, RecoveryPlanStatus
+from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
 from django.utils import timezone
 from django.urls import reverse
 from planner.models import RecoveryPlan
@@ -234,3 +234,127 @@ def dashboard(request):
         ),
     }
     return render(request, 'planner/dashboard.html', context)
+
+@login_required
+@require_http_methods(["GET"])
+def today(request):
+    today_date = timezone.localdate()
+
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
+        .order_by('-created_at')
+        .first()
+    )
+
+    context = {
+        'today': today_date,
+        'exam_period': exam_period,
+        'today_count': 0,
+        'tasks': [],
+        'is_finalized': False,
+        'pending_recovery': None,
+        'calendar_url': reverse('planner:dashboard'),
+    }
+
+    if exam_period is None:
+        context.update({
+            'empty_title': "등록된 시험기간이 없습니다",
+            'empty_desc': "먼저 시험기간을 등록해주세요.",
+        })
+        return render(request, 'planner/today.html', context)
+
+    pending_recovery_qs = RecoveryPlan.objects.filter(
+        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
+    )
+    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
+    pending_recovery_count = pending_recovery_qs.values('recovery_group_id').distinct().count()
+
+    if pending_recovery_item:
+        context['pending_recovery'] = {
+            'recovery_group_id': pending_recovery_item.recovery_group_id,
+            'created_at': pending_recovery_item.created_at,
+            'count': pending_recovery_count,
+        }
+
+    today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today_date).first()
+
+    if today_plan is None:
+        return render(request, 'planner/today.html', context)
+
+    items = list(
+        today_plan.items
+        .select_related('study_task__exam', 'progress_log')
+        .order_by('order', 'id')
+    )
+
+    tasks = []
+    total_minutes = 0
+    done_progress_minutes = 0
+    partial_progress_minutes = 0
+    done_actual_minutes = 0
+    partial_actual_minutes = 0
+    done_count = 0
+    partial_count = 0
+    not_done_count = 0
+    pending_count = 0
+
+    for item in items:
+        planned_minutes = item.planned_minutes
+        total_minutes += planned_minutes
+
+        log = getattr(item, 'progress_log', None)
+        status = log.progress_status if log else None
+
+        if status == ProgressStatus.DONE:
+            done_count += 1
+            done_progress_minutes += planned_minutes
+            done_actual_minutes += log.actual_minutes or 0
+        elif status == ProgressStatus.PARTIAL:
+            partial_count += 1
+            partial_actual_minutes += log.actual_minutes or 0
+            partial_progress_minutes += planned_minutes * (log.completion_percent or 0) // 100
+        elif status == ProgressStatus.NOT_DONE:
+            not_done_count += 1
+        else:
+            pending_count += 1
+
+        tasks.append({
+            'id': item.id,
+            'status': status,
+            'subject_name': item.study_task.exam.subject_name,
+            'depth': item.study_task.depth,
+            'title': item.study_task.title,
+            'completion_percent': log.completion_percent if log else None,
+            'actual_minutes': log.actual_minutes if log else None,
+            'planned_minutes': planned_minutes,
+        })
+
+    remaining_minutes = max(total_minutes - done_progress_minutes - partial_progress_minutes, 0)
+    done_percent = round(done_progress_minutes / total_minutes * 100) if total_minutes else 0
+    partial_percent = round(partial_progress_minutes / total_minutes * 100) if total_minutes else 0
+
+    context.update({
+        'tasks': tasks,
+        'today_count': len(tasks),
+        'is_finalized': today_plan.finalized_at is not None,
+        'summary': {
+            'remaining_minutes': remaining_minutes,
+            'done_minutes': done_progress_minutes,
+            'partial_minutes': partial_progress_minutes,
+            'total_minutes': total_minutes,
+            'done_percent': done_percent,
+            'partial_percent': partial_percent,
+            'pending_count': pending_count,
+        },
+        'eod': {
+            'done_count': done_count,
+            'done_minutes': done_actual_minutes,
+            'partial_count': partial_count,
+            'partial_minutes': partial_actual_minutes,
+            'not_done_count': not_done_count + pending_count,
+            'not_done_minutes': 0,
+            'pending_count': pending_count,
+        },
+    })
+    return render(request, 'planner/today.html', context)
