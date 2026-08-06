@@ -2,8 +2,10 @@ from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
+from core.choices import ExamPeriodStatus, RecoveryPlanStatus
 from django.utils import timezone
-
+from django.urls import reverse
+from planner.models import RecoveryPlan
 from exams.models import ExamPeriod, StudyTask, AvailableTime
 from planner.models import DailyPlan
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE
@@ -164,3 +166,71 @@ def plan_complete(request, period_id):
         'total_planned_minutes': total_planned_minutes,
     }
     return render(request, 'planner/plan_complete.html', context)
+
+@login_required
+@require_http_methods(["GET"])
+def dashboard(request):
+    """
+    1단계 최소 버전: 시험기간 존재 여부, 계획 존재 여부, 오늘 할 일 개수만 보여준다.
+    Fit Bar/과목별 요약/진행률 집계는 #51 머지 후 데이터 파이프라인이 갖춰지면 추가한다.
+    """
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
+        .order_by('-created_at')
+        .first()
+    )
+
+    if exam_period is None:
+        return render(request, 'planner/dashboard.html', {'exam_period': None})
+
+    has_plan = DailyPlan.objects.filter(exam_period=exam_period).exists()
+
+    if not has_plan:
+        is_ready, _ = _validate_task_readiness(exam_period)
+        if is_ready:
+            next_step_label, next_step_url = "계획 생성하기", reverse(
+                'planner:feasibility', kwargs={'period_id': exam_period.id}
+            )
+        else:
+            next_step_label, next_step_url = "학습 작업 확인하기", reverse(
+                'exams:period_detail', kwargs={'period_id': exam_period.id}
+            )
+
+        context = {
+            'exam_period': exam_period,
+            'has_plan': False,
+            'next_step_label': next_step_label,
+            'next_step_url': next_step_url,
+        }
+        return render(request, 'planner/dashboard.html', context)
+
+    today = timezone.localdate()
+    today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today).first()
+    today_count = today_plan.items.count() if today_plan else 0
+    today_minutes = today_plan.planned_minutes if today_plan else 0
+
+    pending_recovery_qs = RecoveryPlan.objects.filter(
+        source_daily_plan__exam_period=exam_period, status=RecoveryPlanStatus.PENDING
+    )
+    pending_recovery_item = pending_recovery_qs.order_by('-created_at').first()
+    # 분량유지형/핵심집중형 두 row가 한 그룹이라 recovery_group_id 기준으로 세야
+    # 실제 "밀린 날짜 수"가 나온다
+    pending_recovery_count = pending_recovery_qs.values('recovery_group_id').distinct().count()
+
+    context = {
+        'exam_period': exam_period,
+        'has_plan': True,
+        'today': today,
+        'today_count': today_count,
+        'today_minutes': today_minutes,
+        'pending_recovery': (
+            {
+                'recovery_group_id': pending_recovery_item.recovery_group_id,
+                'created_at': pending_recovery_item.created_at,
+                'count': pending_recovery_count,
+            }
+            if pending_recovery_item else None
+        ),
+    }
+    return render(request, 'planner/dashboard.html', context)
