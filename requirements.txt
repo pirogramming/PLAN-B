@@ -23,4 +23,4 @@ charset-normalizer==3.4.9
 google-genai==2.16.0
 
 #소셜 로그인
-django-allauth==65.18.0
+django-allauth[socialaccount]==65.18.0
