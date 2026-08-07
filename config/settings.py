@@ -44,7 +44,16 @@ INSTALLED_APPS = [
     'exams',
     'planner',
     'core',
+
+    'django.contrib.sites',
+    'allauth',
+    'allauth.account',
+    'allauth.socialaccount',
+    'allauth.socialaccount.providers.google',
+    'allauth.socialaccount.providers.naver',
 ]
+
+SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -54,6 +63,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -128,13 +138,58 @@ MEDIA_ROOT = BASE_DIR / 'media'
 AUTH_USER_MODEL = 'accounts.User' 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-LOGIN_URL = 'accounts:login'
-LOGIN_REDIRECT_URL = 'exams:period_list'
-LOGOUT_REDIRECT_URL = 'accounts:login'
+
 GOOGLE_API_KEY = config('GOOGLE_API_KEY', default='')
- 
+
 
 #AI 모델임시설정
 AI_MODEL_NAME = config('AI_MODEL_NAME', default='gemini-3.1-flash-lite')
 # True면 실제 API를 호출하지 않고 고정 샘플 응답 사용 
 AI_MOCK_MODE = config('AI_MOCK_MODE', default=True, cast=bool)
+
+
+# ------------------------------------------------------------------------------
+# Authentication & Allauth Settings
+# ------------------------------------------------------------------------------
+
+AUTHENTICATION_BACKENDS = (
+    'django.contrib.auth.backends.ModelBackend',
+    'allauth.account.auth_backends.AuthenticationBackend',
+)
+
+# 로그인/로그아웃 리다이렉트 (중복 제거 및 정돈)
+LOGIN_URL = 'accounts:login'
+LOGIN_REDIRECT_URL = 'exams:period_list'  # 로그인 성공 시 이동할 URL
+LOGOUT_REDIRECT_URL = 'accounts:login'
+ACCOUNT_LOGOUT_REDIRECT_URL = 'accounts:login'
+
+# Custom Adapters & Allauth v65.x 설정
+ACCOUNT_ADAPTER = 'accounts.adapters.CustomAccountAdapter'
+SOCIALACCOUNT_ADAPTER = 'accounts.adapters.CustomSocialAccountAdapter'
+
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
+
+# Social Providers (Google & Naver)
+SOCIALACCOUNT_PROVIDERS = {
+    'google': {
+        'APP': {
+            'client_id': config('GOOGLE_CLIENT_ID', default=''),
+            'secret': config('GOOGLE_CLIENT_SECRET', default=''),
+            'key': ''
+        },
+        'SCOPE': ['profile', 'email'],
+        'AUTH_PARAMS': {'access_type': 'online'},
+    },
+    'naver': {
+        'APP': {
+            'client_id': config('NAVER_CLIENT_ID', default=''),
+            'secret': config('NAVER_CLIENT_SECRET', default=''),
+            'key': ''
+        }
+    }
+}
+
+ACCOUNT_UNIQUE_EMAIL = True
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
+SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True

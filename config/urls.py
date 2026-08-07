@@ -24,6 +24,7 @@ urlpatterns = [
     path('accounts/', include('accounts.urls')),
     path('exams/', include('exams.urls')),
     path('planner/', include('planner.urls')),
+    path('accounts/', include('allauth.urls')),
 ]
 
 if settings.DEBUG:

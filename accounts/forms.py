@@ -1,13 +1,16 @@
+# accounts/forms.py
+
 from django import forms
 from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
 from django.contrib.auth import get_user_model
+from accounts.utils import sync_username_with_email
 
 User = get_user_model()
 
 
 class CustomUserCreationForm(UserCreationForm):
     """
-    회원가입 
+    회원가입 폼
     """
     class Meta(UserCreationForm.Meta):
         model = User
@@ -16,7 +19,7 @@ class CustomUserCreationForm(UserCreationForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # 아이디 
+        # 이메일 (아이디 역할)
         if 'email' in self.fields:
             self.fields['email'].required = True
             self.fields['email'].widget.attrs.update({
@@ -53,7 +56,11 @@ class CustomUserCreationForm(UserCreationForm):
 
     def save(self, commit=True):
         user = super().save(commit=False)
-        user.username = self.cleaned_data['email']
+        user.email = self.cleaned_data['email']
+        
+        # 공통 유틸리티 함수를 사용해 username = email 설정
+        sync_username_with_email(user)
+        
         if commit:
             user.save()
         return user
@@ -61,8 +68,14 @@ class CustomUserCreationForm(UserCreationForm):
 
 class CustomAuthenticationForm(AuthenticationForm):
     """
-    로그인
+    로그인 폼
     """
+
+    error_messages = {
+        **AuthenticationForm.error_messages,
+        'invalid_login': "이메일 또는 비밀번호가 올바르지 않습니다.",
+    }
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
