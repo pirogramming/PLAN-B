@@ -445,6 +445,10 @@ def material_analysis_status(request, material_id):
     analysis_error = analysis_data["error_message"]
     retry_count = analysis_data["retry_count"]
     retry_remaining = analysis_data["retry_remaining"]
+    # 이슈 #52: 프론트가 "5분 지났는지"를 직접 계산하지 않고, 이 값만 보고
+    # 재시도 버튼을 켜고 끄면 되도록 서버가 판단한 결과를 그대로 내려준다.
+    can_retry = analysis_data["can_retry"]
+    retry_after_seconds = analysis_data["retry_after_seconds"]
 
     # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
@@ -488,6 +492,8 @@ def material_analysis_status(request, material_id):
         "failed_stage": failed_stage,
         "retry_count": retry_count,
         "retry_remaining": retry_remaining,
+        "can_retry": can_retry,
+        "retry_after_seconds": retry_after_seconds,
         "study_material_id": material.id,
         "exam_id": material.exam_id,
     })

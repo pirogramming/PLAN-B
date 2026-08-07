@@ -1,10 +1,12 @@
 import datetime
 import io
 import pypdf
+import uuid
 from unittest.mock import patch
 from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings, Client
 from django.urls import reverse
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -24,7 +26,13 @@ from exams.services.analysis_orchestrator import (
     AnalysisPipelineError,
     DuplicateAnalysisRequestError,
     MAX_RETRY_COUNT,
+    PROCESSING_TIMEOUT_SECONDS,
     RetryLimitExceededError,
+    StaleAnalysisRunError,
+    _finish_failure,
+    _finish_success,
+    _save_tasks_with_estimates,
+    _start_processing,
     analyze_and_estimate,
     get_analysis_status,
     retry_analysis,
@@ -458,6 +466,62 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.assertEqual(data["analysis_error_message"], "테스트 실패 사유")
         self.assertEqual(data["retry_count"], 1)
         self.assertEqual(data["retry_remaining"], MAX_RETRY_COUNT - 1)
+
+    def test_stage_response_includes_can_retry_true_when_failed_with_retries_left(self):
+        """이슈 #52: FAILED고 재시도 횟수가 남아있으면 실제 응답에서도 can_retry=True여야 한다."""
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_retry_count = 0
+        self.material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        data = self._get_stage()
+
+        self.assertTrue(data["can_retry"])
+        self.assertIsNone(data["retry_after_seconds"])
+
+    def test_stage_response_includes_can_retry_false_within_5min_processing(self):
+        """분석 시작 5분 이내에는 실제 응답에서도 can_retry=False + 남은 초가 내려가야 한다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.analysis_started_at = timezone.now() - datetime.timedelta(minutes=1)
+        self.material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        data = self._get_stage()
+
+        self.assertFalse(data["can_retry"])
+        self.assertIsNotNone(data["retry_after_seconds"])
+        self.assertTrue(200 <= data["retry_after_seconds"] <= 240)
+
+    def test_stage_response_includes_can_retry_true_when_processing_over_5min(self):
+        """PROCESSING이 5분을 넘긴 좀비 상태면 실제 응답에서도 can_retry=True여야 한다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        self.material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        data = self._get_stage()
+
+        self.assertTrue(data["can_retry"])
+        self.assertIsNone(data["retry_after_seconds"])
+
+    def test_stage_response_includes_can_retry_false_when_retries_exhausted(self):
+        """재시도 2회를 다 쓰면 실제 응답에서도 can_retry=False여야 한다 (버튼 숨김/비활성)."""
+        self.material.analysis_status = MaterialStatus.FAILED
+        self.material.analysis_retry_count = MAX_RETRY_COUNT
+        self.material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        data = self._get_stage()
+
+        self.assertFalse(data["can_retry"])
+
+    def test_stage_response_includes_can_retry_false_when_completed(self):
+        """분석이 끝났으면 실제 응답에서도 can_retry=False여야 한다 (버튼 숨김)."""
+        self.material.status = MaterialStatus.COMPLETED
+        self.material.analysis_status = MaterialStatus.COMPLETED
+        self.material.save(update_fields=["status", "analysis_status"])
+
+        data = self._get_stage()
+
+        self.assertFalse(data["can_retry"])
 
     def test_stage_response_includes_extraction_fields(self):
         self.material.status = MaterialStatus.FAILED
@@ -1199,3 +1263,322 @@ class AITransactionIsolationTestCase(TransactionTestCase):
         self.assertTrue(
             StudyTask.objects.filter(pk=old_task.pk, title="기존 작업").exists()
         )
+
+class ProcessingTimeoutTestCase(TestCase):
+    """
+    이슈 #52: 서버가 AI 분석 도중 비정상 종료되면 analysis_status가 PROCESSING으로
+    영원히 남아, 이후 어떤 분석/재시도 요청도 거부되는(좀비 상태) 문제 검증.
+
+    - 좀비 구제는 retry_analysis()에서만 허용 (analyze_and_estimate()는 PENDING 전용)
+    - 재시도 횟수 제한을 FAILED/좀비 PROCESSING 양쪽에 동일하게 적용
+    - analysis_started_at이 NULL인 PROCESSING도 좀비로 취급
+    - 실행 소유권(analysis_run_id)으로 늦게 끝난 예전 실행이 최신 실행 결과를
+      덮어쓰지 못하게 방지
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="timeout_tester@example.com", email="timeout_tester@example.com", password="pass1234!"
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="타임아웃 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="테스트과목", exam_date=datetime.date(2026, 8, 18),
+        )
+
+    def _make_material(self, text="1장 개념 정리"):
+        return StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료", extracted_text=text,
+            status=MaterialStatus.COMPLETED,
+        )
+
+    def _make_stale_processing(self, retry_count=0, started_at="stale"):
+        """PROCESSING + 좀비 조건을 만족하는 StudyMaterial을 만든다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_retry_count = retry_count
+        material.analysis_run_id = uuid.uuid4()  # 원래(이제 좀비가 된) 실행의 run_id
+        if started_at == "stale":
+            material.analysis_started_at = (
+                timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+            )
+        elif started_at is None:
+            material.analysis_started_at = None
+        else:
+            material.analysis_started_at = started_at
+        material.save(update_fields=[
+            "analysis_status", "analysis_retry_count", "analysis_started_at", "analysis_run_id",
+        ])
+        return material
+
+    # ---------- 기본 동작 ----------
+
+    def test_start_processing_records_started_at_and_run_id(self):
+        material = self._make_material()
+        before = timezone.now()
+
+        analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertIsNotNone(material.analysis_started_at)
+        self.assertGreaterEqual(material.analysis_started_at, before)
+        self.assertIsNotNone(material.analysis_run_id)
+
+    def test_fresh_processing_still_blocks_duplicate_request(self):
+        """방금 시작된 PROCESSING(좀비 아님)은 그대로 중복 요청을 거부해야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = timezone.now()
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            retry_analysis(material)
+
+    # ---------- 최초 분석은 좀비를 구제하지 않는다 ----------
+
+    def test_initial_analysis_does_not_rescue_zombie_processing(self):
+        material = self._make_stale_processing(retry_count=0)
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            analyze_and_estimate(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
+        self.assertEqual(material.analysis_retry_count, 0)
+
+    def test_retry_can_rescue_zombie_processing(self):
+        material = self._make_stale_processing(retry_count=0)
+
+        tasks = retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertTrue(len(tasks) > 0)
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.analysis_retry_count, 1)
+
+    # ---------- 좀비여도 재시도 횟수 제한은 그대로 적용 ----------
+
+    def test_retry_rejected_when_retry_count_maxed_even_if_zombie(self):
+        material = self._make_stale_processing(retry_count=MAX_RETRY_COUNT)
+
+        with self.assertRaises(RetryLimitExceededError):
+            retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_retry_count, MAX_RETRY_COUNT)
+        self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
+
+    # ---------- analysis_started_at이 NULL인 좀비도 구제 ----------
+
+    def test_retry_can_rescue_zombie_with_null_started_at(self):
+        material = self._make_stale_processing(retry_count=0, started_at=None)
+
+        tasks = retry_analysis(material)
+
+        material.refresh_from_db()
+        self.assertTrue(len(tasks) > 0)
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.analysis_retry_count, 1)
+
+    def test_get_analysis_status_is_stale_true_when_started_at_null(self):
+        material = self._make_stale_processing(retry_count=0, started_at=None)
+        result = get_analysis_status(material)
+        self.assertTrue(result["is_stale"])
+
+    # ---------- is_stale 조회 ----------
+
+    def test_get_analysis_status_is_stale_true_when_zombie(self):
+        material = self._make_stale_processing(retry_count=0)
+        result = get_analysis_status(material)
+        self.assertTrue(result["is_stale"])
+
+    def test_get_analysis_status_is_stale_false_when_fresh(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = timezone.now()
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        result = get_analysis_status(material)
+        self.assertFalse(result["is_stale"])
+
+    def test_get_analysis_status_is_stale_false_when_not_processing(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PENDING
+        result = get_analysis_status(material)
+        self.assertFalse(result["is_stale"])
+
+    # ---------- can_retry / retry_after_seconds (프론트가 버튼 상태를 서버 응답만으로 판단) ----------
+
+    def test_can_retry_false_within_5min_processing(self):
+        """분석 시작 5분 이내(진짜 진행 중)에는 재시도 버튼을 켜면 안 된다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PROCESSING
+        material.analysis_started_at = timezone.now() - datetime.timedelta(minutes=2)
+        material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["can_retry"])
+        self.assertIsNotNone(result["retry_after_seconds"])
+        # 2분 지났으니 남은 시간은 3분(180초) 근처여야 한다
+        self.assertTrue(170 <= result["retry_after_seconds"] <= 180)
+
+    def test_can_retry_true_when_processing_over_5min(self):
+        """PROCESSING이 5분을 넘긴 좀비 상태면 재시도 버튼을 켜야 한다."""
+        material = self._make_stale_processing(retry_count=0)
+        result = get_analysis_status(material)
+
+        self.assertTrue(result["can_retry"])
+        self.assertIsNone(result["retry_after_seconds"])
+
+    def test_can_retry_true_when_failed_with_retries_left(self):
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = 1
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        result = get_analysis_status(material)
+
+        self.assertTrue(result["can_retry"])
+        self.assertIsNone(result["retry_after_seconds"])
+
+    def test_can_retry_false_when_retries_exhausted_even_if_failed(self):
+        """재시도 2회를 다 쓰면 FAILED여도 재시도 버튼을 숨겨야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = MAX_RETRY_COUNT
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["can_retry"])
+        self.assertIsNone(result["retry_after_seconds"])
+
+    def test_can_retry_false_when_completed(self):
+        """분석이 끝난 자료는 재시도 버튼을 숨겨야 한다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.COMPLETED
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["can_retry"])
+        self.assertIsNone(result["retry_after_seconds"])
+
+    def test_can_retry_false_when_pending(self):
+        """아직 최초 분석도 시작 안 한 자료는 "재시도" 대상이 아니다."""
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.PENDING
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["can_retry"])
+        self.assertIsNone(result["retry_after_seconds"])
+
+    def test_can_retry_false_when_extraction_not_completed(self):
+        """텍스트 추출이 아직 안 끝났으면, analysis_status가 뭐든 재시도는 불가능하다."""
+        material = self._make_material()
+        material.status = MaterialStatus.PROCESSING
+        material.analysis_status = MaterialStatus.FAILED
+        material.save(update_fields=["status", "analysis_status"])
+
+        result = get_analysis_status(material)
+
+        self.assertFalse(result["can_retry"])
+
+    # ---------- 실행 소유권 (analysis_run_id) ----------
+
+    def test_save_discards_result_when_run_superseded(self):
+        """
+        DB 쓰기 직전에 소유권을 다시 확인하므로, 이미 다른 실행이 선점했다면
+        StudyTask를 저장하지 않고 StaleAnalysisRunError를 던져야 한다.
+        """
+        material = self._make_material()
+        run_id = _start_processing(material, is_retry=False)
+        self.assertIsNotNone(run_id)
+
+        # 다른(더 최신) 실행이 이 자리를 이어받았다고 가정
+        StudyMaterial.objects.filter(pk=material.pk).update(analysis_run_id=uuid.uuid4())
+
+        fake_tasks = [
+            task_extractor.ExtractedTask(
+                unit_name="1장", title="가짜 작업", task_type="concept",
+                importance="high", depth="core", difficulty="normal",
+                ai_reason="테스트용",
+            )
+        ]
+
+        with self.assertRaises(StaleAnalysisRunError):
+            _save_tasks_with_estimates(material, fake_tasks, material.extracted_text, run_id)
+
+        self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
+
+    def test_finish_success_ignored_when_run_superseded(self):
+        """뒤늦게 도착한 성공 처리가 최신 실행의 상태를 덮어쓰면 안 된다."""
+        material = self._make_material()
+        old_run_id = _start_processing(material, is_retry=False)
+
+        new_run_id = uuid.uuid4()
+        StudyMaterial.objects.filter(pk=material.pk).update(
+            analysis_status=MaterialStatus.PROCESSING, analysis_run_id=new_run_id,
+        )
+
+        _finish_success(material, [], old_run_id)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
+        self.assertEqual(material.analysis_run_id, new_run_id)
+
+    def test_finish_failure_ignored_when_run_superseded(self):
+        """뒤늦게 도착한 실패 처리가 최신 실행의 상태를 덮어쓰면 안 된다."""
+        material = self._make_material()
+        old_run_id = _start_processing(material, is_retry=False)
+
+        new_run_id = uuid.uuid4()
+        StudyMaterial.objects.filter(pk=material.pk).update(
+            analysis_status=MaterialStatus.PROCESSING, analysis_run_id=new_run_id,
+        )
+
+        _finish_failure(material, "예전 실행의 실패 메시지", old_run_id)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
+        self.assertIsNone(material.analysis_error_message)
+        self.assertEqual(material.analysis_run_id, new_run_id)
+
+    def test_new_run_after_zombie_gets_fresh_run_id(self):
+        """좀비를 이어받은 새 실행은 예전 실행과 다른 run_id를 받아야 한다."""
+        material = self._make_stale_processing(retry_count=0)
+        old_run_id = material.analysis_run_id
+
+        new_run_id = _start_processing(material, is_retry=True)
+
+        self.assertIsNotNone(new_run_id)
+        self.assertNotEqual(new_run_id, old_run_id)
+
+    def test_end_to_end_zombie_takeover_new_run_wins(self):
+        """
+        엔드 투 엔드: 좀비를 새 실행이 이어받아 끝까지 성공시키면, 예전 실행이
+        뒤늦게 같은 자리에 성공/실패를 기록하려 해도 반영되지 않아야 한다.
+        """
+        material = self._make_stale_processing(retry_count=0)
+        old_run_id = material.analysis_run_id
+
+        tasks = retry_analysis(material)  # 새 실행이 좀비를 이어받아 정상 완료
+
+        material.refresh_from_db()
+        self.assertTrue(len(tasks) > 0)
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        new_run_id = material.analysis_run_id
+        self.assertNotEqual(new_run_id, old_run_id)
+
+        # 예전(이제는 죽은) 실행이 뒤늦게 실패를 기록하려는 상황을 재현
+        _finish_failure(material, "예전 실행의 뒤늦은 실패", old_run_id)
+
+        material.refresh_from_db()
+        self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertIsNone(material.analysis_error_message)
