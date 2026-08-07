@@ -10,4 +10,5 @@ urlpatterns = [
     path('today/', views.today, name='today'),
     path('', views.dashboard, name='dashboard'),
     path('progress/<int:item_id>/', views.progress_record, name='progress_record'),
+    path('daily-plans/finalize/', views.daily_plan_finalize, name='daily_plan_finalize'),
 ]

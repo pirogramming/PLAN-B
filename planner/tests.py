@@ -2346,3 +2346,97 @@ class ProgressRecordViewTests(TestCase):
         self._post(self.item.id, {"status": "done", "actual_minutes": 60})
         self.exam.refresh_from_db()
         self.assertNotEqual(self.exam.speed_factor, 1.0)
+
+class DailyPlanFinalizeViewTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="finalize_view_tester", email="finalizeview@example.com", password="pass1234"
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=40,
+        )
+        self.item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.task, planned_minutes=40, order=1,
+        )
+        self.client.login(username="finalizeview@example.com", password="pass1234")
+
+    def _finalize(self):
+        return self.client.post(reverse('planner:daily_plan_finalize'))
+
+    def test_finalize_without_unfinished_tasks_no_recovery(self):
+        record_progress(daily_plan_item=self.item, status="done", actual_minutes=40)
+
+        response = self._finalize()
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data['needs_recovery'])
+        self.assertIsNone(data['recovery_group_id'])
+
+        self.daily_plan.refresh_from_db()
+        self.assertIsNotNone(self.daily_plan.finalized_at)
+
+    def test_finalize_with_unfinished_task_creates_recovery(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1), available_minutes=60,
+        )
+        # 진행 기록 없이 마감 -> mark_unrecorded_as_not_done=True로 자동 못함 처리됨
+
+        response = self._finalize()
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['needs_recovery'])
+        self.assertIsNotNone(data['recovery_group_id'])
+
+    def test_finalize_no_plan_today_returns_404(self):
+        self.daily_plan.delete()
+        response = self._finalize()
+        self.assertEqual(response.status_code, 404)
+
+    def test_finalize_twice_returns_409(self):
+        record_progress(daily_plan_item=self.item, status="done", actual_minutes=40)
+        self._finalize()
+
+        response = self._finalize()
+        self.assertEqual(response.status_code, 409)
+
+    def test_finalize_future_plan_rejected(self):
+        future_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=60, planned_minutes=0,
+        )
+        # today_date 기준 조회라 future_plan은 애초에 조회 안 됨 -> 404
+        self.daily_plan.delete()
+
+        response = self._finalize()
+        self.assertEqual(response.status_code, 404)
+
+    def test_finalize_does_not_show_other_user_plan(self):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        other_user = User.objects.create_user(
+            username="other_finalize_view", email="other_finalizeview@example.com", password="pass1234"
+        )
+        self.client.login(username="other_finalizeview@example.com", password="pass1234")
+
+        response = self._finalize()
+        self.assertEqual(response.status_code, 404)

@@ -11,6 +11,12 @@ from django.utils import timezone
 from django.urls import reverse
 from exams.models import ExamPeriod, StudyTask, AvailableTime
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE
+from planner.services.progress_recorder import (
+    finalize_daily_plan,
+    DailyPlanAlreadyFinalizedError,
+    FutureDailyPlanFinalizeError,
+    IncompleteProgressError,
+)
 from planner.services.schedule_generator import (
     generate_schedule,
     ScheduleAlreadyExistsError,
@@ -447,4 +453,51 @@ def progress_record(request, item_id):
         "actual_minutes": progress_log.actual_minutes,
         "completion_percent": progress_log.completion_percent,
         "daily_plan_status": result['daily_plan_status'],
+    })
+
+@login_required
+@require_http_methods(["POST"])
+def daily_plan_finalize(request):
+    today_date = timezone.localdate()
+
+    daily_plan = (
+        DailyPlan.objects
+        .filter(
+            exam_period__user=request.user,
+            exam_period__status=ExamPeriodStatus.ACTIVE,
+            date=today_date,
+        )
+        .first()
+    )
+
+    if daily_plan is None:
+        return JsonResponse(
+            {"message": "오늘 마감할 계획을 찾을 수 없습니다."}, status=404,
+        )
+
+    try:
+        result = finalize_daily_plan(daily_plan, mark_unrecorded_as_not_done=True)
+    except DailyPlanAlreadyFinalizedError as exc:
+        return JsonResponse({"message": str(exc)}, status=409)
+    except FutureDailyPlanFinalizeError as exc:
+        return JsonResponse({"message": str(exc)}, status=400)
+    except IncompleteProgressError as exc:
+        return JsonResponse({"message": str(exc)}, status=400)
+
+    recovery_plans = result.get('recovery_plans')
+    recovery_group_id = None
+    if recovery_plans:
+        candidate = recovery_plans.get('maintain_volume') or recovery_plans.get('core_focus')
+        if candidate:
+            recovery_group_id = str(candidate.recovery_group_id)
+
+    if result['needs_recovery'] and recovery_group_id:
+        redirect_url = "#"  # TODO: recovery_compare View 생기면 교체
+    else:
+        redirect_url = reverse('planner:dashboard')
+
+    return JsonResponse({
+        "needs_recovery": result['needs_recovery'],
+        "recovery_group_id": recovery_group_id,
+        "redirect_url": redirect_url,
     })
