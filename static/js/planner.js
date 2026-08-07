@@ -34,6 +34,20 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
 
+  /* ---------- 복구안 선택 ---------- */
+  const recLabel = document.getElementById('recLabel');
+  document.querySelectorAll('.js-rec').forEach(function (input) {
+    input.addEventListener('change', function () {
+      document.querySelectorAll('.rec-card').forEach(function (card) {
+        card.classList.toggle('on', card.contains(input) && input.checked);
+      });
+      if (recLabel) {
+        recLabel.textContent = input.closest('.rec-card').querySelector('h3').textContent;
+      }
+    });
+  });
+
+
   const eod = document.getElementById('eodModal');
   if (eod) {
     const confirmView   = document.getElementById('eodConfirm');

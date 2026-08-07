@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}복구안 미리보기 · PLAN B{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+
+{% block body %}
+<div class="app">
+
+  {% include "planner/includes/sidebar.html" with nav="dashboard" %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>복구안 미리보기</h2>
+      <span class="badge badge-warn ml-auto">
+        <i class="dot dot-warn"></i>아직 적용되지 않음
+      </span>
+    </header>
+
+    <div class="content">
+
+      <div class="page-head">
+        <div>
+          <h1>{{ plan.type_label }}</h1>
+          <div class="sub">{{ preview.start_date|date:"n월 j일" }}부터 각 과목 시험일까지의 계획만 바뀝니다</div>
+        </div>
+      </div>
+
+      {# ---- 날짜별 공부량 변화 ---- #}
+      <div class="section-head">
+        <h3>날짜별 공부량</h3>
+        <div class="row" style="gap:16px;font-size:11.5px;color:var(--neutral7)">
+          <span class="row" style="gap:6px">
+            <i style="width:12px;height:8px;border-radius:2px;background:var(--judge2);display:block"></i>가능시간 초과
+          </span>
+          <span class="row" style="gap:6px">
+            <i style="width:2px;height:12px;background:var(--neutral11);opacity:.35;display:block"></i>입력한 가능시간
+          </span>
+        </div>
+      </div>
+
+      <div class="diff">
+        <div class="diff-col">
+          <div class="diff-head">
+            <svg class="ico"><use href="#i-clock"/></svg>지금 계획
+          </div>
+          {% for d in preview.days %}
+            <div class="diff-row">
+              <span class="date num">{{ d.date|date:"n/j" }}</span>
+              {% if d.is_exam_day %}
+                <div class="bar exam"></div>
+                <span class="min num">시험</span>
+              {% else %}
+                <div class="bar">
+                  <i class="{% if d.before_over %}over{% endif %}" style="width:{{ d.before_pct }}%"></i>
+                  <em style="left:{{ d.limit_pct }}%"></em>
+                </div>
+                <span class="min num">{{ d.before_minutes }}분</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="diff-arrow"><svg class="ico"><use href="#i-arrow-right"/></svg></div>
+
+        <div class="diff-col after">
+          <div class="diff-head">
+            <svg class="ico"><use href="#i-done"/></svg>복구 후
+          </div>
+          {% for d in preview.days %}
+            <div class="diff-row">
+              <span class="date num">{{ d.date|date:"n/j" }}</span>
+              {% if d.is_exam_day %}
+                <div class="bar exam"></div>
+                <span class="min num">시험</span>
+              {% else %}
+                <div class="bar">
+                  <i class="acc" style="width:{{ d.after_pct }}%"></i>
+                  <em style="left:{{ d.limit_pct }}%"></em>
+                </div>
+                <span class="min num">{{ d.after_minutes }}분</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      {# ---- 요약 ---- #}
+      <div class="grid-3" style="margin-top:28px">
+        <div class="card card-pad">
+          <div class="kpi-label">유지되는 작업</div>
+          <div class="kpi-value">{{ preview.keep_count }}<small>개</small></div>
+          <div class="kpi-sub">CORE {{ preview.keep_core_count }}개 포함 · 전부 유지</div>
+        </div>
+        <div class="card card-pad">
+          <div class="kpi-label">날짜가 바뀌는 작업</div>
+          <div class="kpi-value">{{ preview.move_count }}<small>개</small></div>
+          <div class="kpi-sub">남은 날짜로 분산</div>
+        </div>
+        <div class="card card-pad excluded">
+          <div class="kpi-label">계획에서 빠지는 작업</div>
+          <div class="kpi-value bad">{{ preview.exclude_count }}<small>개 · {{ preview.exclude_minutes }}분</small></div>
+          <div class="kpi-sub">{{ preview.exclude_summary }}</div>
+        </div>
+      </div>
+
+      <div class="banner info" style="margin-top:24px">
+        <svg class="ico"><use href="#i-recalc"/></svg>
+        <div class="body">
+          <h4>적용해도 나중에 다시 바꿀 수 있습니다</h4>
+          <p>공부가 또 밀리면 그때의 상태로 새 복구안을 만들어 드립니다.
+             빠진 작업은 삭제되지 않고 &lsquo;제외됨&rsquo;으로 남습니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottom-bar">
+      {# TODO: 비교 화면 URL 로 교체 #}
+      <a class="btn btn-secondary" href="#">비교로 돌아가기</a>
+      <div class="row ml-auto" style="gap:8px">
+        <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
+        {# TODO: 복구안 적용 POST 연결 #}
+        <button class="btn btn-accent btn-lg" type="button">
+          {{ plan.type_label }} 적용<svg class="ico"><use href="#i-check"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}
