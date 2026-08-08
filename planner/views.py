@@ -7,7 +7,7 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.http import Http404
 from core.choices import RecoveryActionType, RecoveryType
-from planner.services.recovery import _future_available_capacity
+from planner.services.recovery import _future_available_capacity, get_future_available_minutes
 from planner.services.time_estimator import estimate_task_minutes
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
@@ -591,9 +591,9 @@ def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
         "id": recovery_plan.id,
         "recovery_type": recovery_plan.recovery_type,
         "type_label": type_label,
-        "desc": desc,
-        "status": status,
-        "status_label": status_label,
+        "summary": desc,
+        "feasibility_status": status,
+        "feasibility_status_label": status_label,
         "excluded_count": len(excluded_items),
         "excluded_minutes": sum(i.remaining_minutes for i in excluded_items),
         "total_minutes": max_total,
@@ -613,6 +613,14 @@ def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
         **_fit_bar_context(min_total, max_total, available_minutes, axis_max),
     }
 
+def _speed_added_minutes(items):
+    added = 0
+    for item in items:
+        task = item.study_task
+        _base_min, base_max = estimate_task_minutes(task.task_type, task.difficulty, 1.0)
+        _real_min, real_max = estimate_task_minutes(task.task_type, task.difficulty, task.exam.speed_factor)
+        added += max(real_max - base_max, 0)
+    return added
 
 @login_required
 @require_http_methods(["GET"])
@@ -636,10 +644,7 @@ def recovery_compare(request, group_id):
 
     exam_period = plans[0].exam_period
     source_daily_plan = plans[0].source_daily_plan
-    available_minutes = sum(
-        at.available_minutes
-        for at in _future_available_capacity(exam_period, source_daily_plan.date)
-    )
+    available_minutes = get_future_available_minutes(exam_period, source_daily_plan.date)
 
     totals_by_plan = {p.id: _plan_totals(p) for p in plans}
     axis_max = max(
@@ -653,8 +658,27 @@ def recovery_compare(request, group_id):
         for p in plans
     ]
 
+    representative_id = next(
+        (p.id for p in plans if p.recovery_type == RecoveryType.MAINTAIN_VOLUME),
+        plans[0].id,
+    )
+    rep_totals = totals_by_plan[representative_id]
+    rep_all_items = rep_totals["reschedule_items"] + rep_totals["excluded_items"]
+
+    reason = {
+        "headline": "오늘 계획한 학습을 다 마치지 못했습니다",
+        "detail": f"{len(rep_all_items)}개 작업, {sum(i.remaining_minutes for i in rep_all_items)}분이 남아 계획을 다시 세워야 합니다.",
+        "remaining_minutes": sum(i.remaining_minutes for i in rep_all_items),
+        "remaining_count": len(rep_all_items),
+        "speed_added_minutes": _speed_added_minutes(rep_all_items),
+        "available_minutes": available_minutes,
+        "available_days": len({
+            at.date for at in _future_available_capacity(exam_period, source_daily_plan.date)
+        }),
+    }
+
     return render(request, "planner/recovery_compare.html", {
         "exam_period": exam_period,
         "plans": plan_contexts,
-        "reason": None,
+        "reason": reason,
     })
