@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}전체 계획 · PLAN B{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+
+{% block body %}
+<div class="app">
+
+  {% include "planner/includes/sidebar.html" with nav="calendar" %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>전체 계획</h2>
+    </header>
+
+    <div class="content">
+    {% if not exam_period %}
+      <div class="card">
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 등록된 시험기간이 없습니다" desc="시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다." %}
+      </div>
+
+    {% else %}
+      <div class="cal-head">
+        <a class="icon-btn" href="?year={{ prev_year }}&month={{ prev_month }}" aria-label="이전 달">
+          <svg class="ico"><use href="#i-chevron-left"/></svg>
+        </a>
+        <h1 class="num">{{ year }}년 {{ month }}월</h1>
+        <a class="icon-btn" href="?year={{ next_year }}&month={{ next_month }}" aria-label="다음 달">
+          <svg class="ico"><use href="#i-chevron-right"/></svg>
+        </a>
+
+        <div class="cal-legend">
+          <span><i style="background:var(--neutral9)"></i>배정된 공부량</span>
+          <span><i style="background:var(--judge2)"></i>가능시간 초과</span>
+        </div>
+      </div>
+
+      <div class="cal">
+        <div class="cal-dow sun">일</div>
+        <div class="cal-dow">월</div>
+        <div class="cal-dow">화</div>
+        <div class="cal-dow">수</div>
+        <div class="cal-dow">목</div>
+        <div class="cal-dow">금</div>
+        <div class="cal-dow">토</div>
+
+        {% for week in weeks %}
+          {% for d in week %}
+            <button type="button"
+                    class="cal-day js-day {% if not d.in_period %}out{% endif %} {% if d.is_today %}today{% endif %} {% if d.exam_subject %}exam{% endif %}"
+                    data-date="{{ d.date|date:'Y-m-d' }}"
+                    {% if not d.in_period %}disabled{% endif %}>
+              <span class="cal-num">{{ d.date|date:"j" }}</span>
+
+              {% if d.in_period %}
+                {% if d.planned_minutes %}
+                  <span class="cal-min">{{ d.planned_minutes }}</span>
+                {% endif %}
+
+                {% if d.exam_subject %}
+                  <span class="cal-exam">{{ d.exam_subject }} 시험</span>
+                {% endif %}
+
+                {% if d.planned_minutes %}
+                  <span class="cal-load">
+                    <i class="{% if d.is_over %}over{% endif %}"
+                       style="width:{% if d.load_percent > 100 %}100{% else %}{{ d.load_percent }}{% endif %}%"></i>
+                  </span>
+
+                  <span class="cal-tasks">
+                    {% for t in d.tasks %}
+                      <span class="cal-t"><i class="sh-{{ t.shade_index }}"></i>{{ t.title }}</span>
+                    {% endfor %}
+                    {% if d.more_count %}
+                      <span class="cal-more">외 {{ d.more_count }}개</span>
+                    {% endif %}
+                  </span>
+                {% endif %}
+              {% endif %}
+            </button>
+          {% endfor %}
+        {% endfor %}
+      </div>
+
+      <div class="card cal-detail" id="calDetail">
+        <div class="cal-detail-head">
+          <h3 id="calDetailDate">날짜를 선택해 주세요</h3>
+          <span class="sum" id="calDetailSum"></span>
+        </div>
+
+        <div class="cal-detail-empty" id="calDetailEmpty">
+          위 달력에서 날짜를 누르면 그날 학습 작업이 여기에 표시됩니다
+        </div>
+
+        {% for key, detail in day_details.items %}
+          <div class="cal-pane" data-date="{{ key }}"
+               data-sum="계획 {{ detail.planned_minutes }}분 · 가능 {{ detail.available_minutes }}분" hidden>
+            {% for t in detail.tasks %}
+              {% include "planner/includes/task_row.html" with task=t %}
+            {% empty %}
+              <div class="cal-detail-empty">이날은 배정된 학습 작업이 없습니다</div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    </div>
+  </div>
+</div>
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}
