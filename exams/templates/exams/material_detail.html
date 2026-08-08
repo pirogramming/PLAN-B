@@ -225,13 +225,13 @@ function handleStatus(data) {
     return;
   }
 
-  if (data.extraction_status === 'PENDING') {
+  if (data.extraction_status === 'pending') {
     fired = true;
     showAutoLoading('PDF 텍스트를 추출하고 있어요');
     document.getElementById('auto-extract-form').submit();
     return;
   }
-  if (data.analysis_status === 'PENDING') {
+  if (data.analysis_status === 'pending') {
     fired = true;
     showAutoLoading('AI 학습 작업을 분석하고 있어요');
     document.getElementById('auto-analyze-form').submit();

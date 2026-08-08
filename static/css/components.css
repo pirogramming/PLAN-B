@@ -648,3 +648,43 @@
   color: var(--neutral11);
   margin-bottom: 8px;
 }
+
+/* 디버그 박스 - 상태 조회 응답을 화면에 그대로 표시 */
+.debug-box {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: var(--neutral2);
+  border: 1px solid var(--neutral4);
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--neutral9);
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
+  text-align: left;
+}
+.auto-loading-stuck-actions {
+  display: flex;
+  justify-content: center;
+}
+
+/* 소셜 로그인 */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  font-size: 11.5px;
+  color: var(--neutral6);
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--neutral4);
+}
+.social-btn {
+  margin-bottom: 8px;
+}
