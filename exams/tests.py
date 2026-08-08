@@ -467,6 +467,16 @@ class MaterialAnalysisViewTestCase(TestCase):
         self.assertEqual(data["retry_count"], 1)
         self.assertEqual(data["retry_remaining"], MAX_RETRY_COUNT - 1)
 
+    def test_stage_response_includes_extraction_fields(self):
+        self.material.status = MaterialStatus.FAILED
+        self.material.error_message = "PDF 추출 실패 사유"
+        self.material.save(update_fields=["status", "error_message"])
+
+        data = self._get_stage()
+
+        self.assertEqual(data["extraction_status"], MaterialStatus.FAILED)
+        self.assertEqual(data["extraction_error_message"], "PDF 추출 실패 사유")
+
     def test_stage_response_includes_can_retry_true_when_failed_with_retries_left(self):
         """이슈 #52: FAILED고 재시도 횟수가 남아있으면 실제 응답에서도 can_retry=True여야 한다."""
         self.material.analysis_status = MaterialStatus.FAILED
@@ -522,16 +532,6 @@ class MaterialAnalysisViewTestCase(TestCase):
         data = self._get_stage()
 
         self.assertFalse(data["can_retry"])
-
-    def test_stage_response_includes_extraction_fields(self):
-        self.material.status = MaterialStatus.FAILED
-        self.material.error_message = "PDF 추출 실패 사유"
-        self.material.save(update_fields=["status", "error_message"])
-
-        data = self._get_stage()
-
-        self.assertEqual(data["extraction_status"], MaterialStatus.FAILED)
-        self.assertEqual(data["extraction_error_message"], "PDF 추출 실패 사유")
 
     @patch("exams.services.analysis_orchestrator.estimate_task_minutes")
     def test_analyze_unexpected_exception_redirects_instead_of_500(self, mock_estimate):
@@ -1518,7 +1518,12 @@ class ProcessingTimeoutTestCase(TestCase):
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
     def test_finish_success_ignored_when_run_superseded(self):
-        """뒤늦게 도착한 성공 처리가 최신 실행의 상태를 덮어쓰면 안 된다."""
+        """
+        뒤늦게 도착한 성공 처리는 최신 실행의 상태를 덮어쓰면 안 된다.
+        리뷰 반영: 이제 조용히 무시하는 대신 StaleAnalysisRunError를 던진다
+        (호출부인 _execute_analysis가 이걸 "성공"이 아니라 "다른 실행에 넘어감"으로
+        처리하게 하기 위함).
+        """
         material = self._make_material()
         old_run_id = _start_processing(material, is_retry=False)
 
@@ -1527,7 +1532,8 @@ class ProcessingTimeoutTestCase(TestCase):
             analysis_status=MaterialStatus.PROCESSING, analysis_run_id=new_run_id,
         )
 
-        _finish_success(material, [], old_run_id)
+        with self.assertRaises(StaleAnalysisRunError):
+            _finish_success(material, [], old_run_id)
 
         material.refresh_from_db()
         self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
@@ -1582,3 +1588,36 @@ class ProcessingTimeoutTestCase(TestCase):
         material.refresh_from_db()
         self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.analysis_error_message)
+
+    def test_ownership_lost_between_save_and_finish_does_not_report_success(self):
+        """
+        리뷰 반영: StudyTask 저장(_save_tasks_with_estimates)이 커밋된 직후,
+        _finish_success() 호출 "사이"에 다른 실행이 소유권을 가져가면, 이 실행은
+        tasks를 정상 반환하면 안 된다 (사용자에게 거짓 "분석 완료" 응답이 나가는
+        것을 막기 위함 - StudyTask 저장은 이미 끝났지만 최종 완료 처리는 아직
+        안 된 그 짧은 창에서 다른 실행이 좀비를 이어받는 경우를 재현한다).
+        """
+        material = self._make_material()
+
+        original_finish_success = _finish_success
+
+        def hijacking_finish_success(study_material, tasks, run_id):
+            # StudyTask 저장은 이미 끝난 시점 - 그 직후 다른 실행이
+            # 이 자료의 소유권을 가져갔다고 가정한다.
+            StudyMaterial.objects.filter(pk=study_material.pk).update(
+                analysis_run_id=uuid.uuid4()
+            )
+            return original_finish_success(study_material, tasks, run_id)
+
+        with patch(
+            "exams.services.analysis_orchestrator._finish_success",
+            side_effect=hijacking_finish_success,
+        ):
+            with self.assertRaises(StaleAnalysisRunError):
+                analyze_and_estimate(material)
+
+        # StudyTask 저장 자체는 이미 성공적으로 끝난 뒤였으므로 그대로 남아있어야
+        # 하지만, analysis_status가 COMPLETED로 잘못 갱신되면 안 된다.
+        material.refresh_from_db()
+        self.assertNotEqual(material.analysis_status, MaterialStatus.COMPLETED)
+        self.assertTrue(StudyTask.objects.filter(study_material=material).exists())

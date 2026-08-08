@@ -51,7 +51,7 @@ PDF 추출 시작과 AI 분석 시작이 동시에 성공하는 경쟁 상태:
   추가해서, material_extract() 쪽 방어와 서로 대칭을 이루게 했다. 두 요청 중 DB에
   먼저 도달해 조건부 UPDATE를 통과한 쪽만 성공하고 나머지는 원자적으로 실패한다.
 
-PROCESSING 타임아웃 / 좀비 상태 복구 :
+PROCESSING 타임아웃 / 좀비 상태 복구 (이슈 #52):
 - 서버가 분석 도중 비정상 종료되면 analysis_status가 PROCESSING인 채로 영원히
   남을 수 있다. analysis_started_at 기준 PROCESSING_TIMEOUT_SECONDS(5분) 이상
   지났거나, analysis_started_at이 NULL인(이 필드가 생기기 전부터 PROCESSING이었던
@@ -236,8 +236,15 @@ def _save_tasks_with_estimates(
 
 def _finish_success(study_material: StudyMaterial, tasks: list[StudyTask], run_id: uuid.UUID) -> None:
     """
-    run_id가 여전히 "현재 실행"일 때만 COMPLETED로 갱신한다. 이미 다른 실행으로
-    대체됐다면 아무 것도 하지 않는다 (늦게 도착한 성공 결과가 최신 상태를 덮으면 안 됨).
+    run_id가 여전히 "현재 실행"일 때만 COMPLETED로 갱신한다.
+
+    리뷰 반영: StudyTask 저장(_save_tasks_with_estimates)이 커밋된 "이후"부터 이
+    함수가 호출되는 "사이"에도 소유권이 넘어갈 수 있는 짧은 창이 있다. 그 사이에
+    다른 실행이 좀비 상태를 이어받으면, 이 실행은 StudyTask 저장까지는 끝냈어도
+    최종적으로 "성공"으로 끝나면 안 된다 - 그대로 넘어가면 _execute_analysis()가
+    tasks를 정상 반환해서, 이미 소유권을 잃은 실행이 사용자에게 "분석 완료"라고
+    잘못 응답할 수 있다. 그래서 여기서도 StaleAnalysisRunError를 던져서
+    _execute_analysis()가 이걸 성공이 아니라 "다른 실행에 넘어감"으로 처리하게 한다.
     """
     updated_count = StudyMaterial.objects.filter(
         pk=study_material.pk, analysis_run_id=run_id,
@@ -245,10 +252,14 @@ def _finish_success(study_material: StudyMaterial, tasks: list[StudyTask], run_i
 
     if not updated_count:
         logger.warning(
-            "실행(run_id=%s)이 완료됐지만 이미 다른 실행으로 대체되어 "
-            "상태 갱신을 건너뜁니다: study_material_id=%s", run_id, study_material.id,
+            "실행(run_id=%s)의 StudyTask 저장은 끝났지만, 최종 완료 처리 시점에 "
+            "이미 다른 실행으로 대체되어 성공으로 마무리하지 않습니다: "
+            "study_material_id=%s", run_id, study_material.id,
         )
-        return
+        raise StaleAnalysisRunError(
+            f"실행(run_id={run_id})이 StudyTask 저장 이후 최종 완료 처리 시점에 "
+            f"다른 실행으로 대체되었습니다. study_material_id={study_material.pk}"
+        )
 
     study_material.analysis_status = MaterialStatus.COMPLETED
     study_material.analysis_error_message = None
@@ -284,7 +295,8 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
     그 전이 시점에 _start_processing()이 발급한 값이어야 한다.
 
     예외 처리:
-        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함. analysis_status를
+        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함 (StudyTask 저장 전이든,
+          저장은 끝났지만 최종 완료 처리 직전이든 마찬가지). analysis_status를
           건드리지 않고(이미 그 다른 실행이 관리 중이므로) 그대로 다시 던진다.
         - StaleAnalysisRequestError: 입력이 바뀜. 이 실행은 여전히 소유자이므로
           안전하게 FAILED로 마무리한다.
@@ -332,7 +344,17 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
         )
         raise AIResponseValidationError(message)
 
-    _finish_success(study_material, tasks, run_id)
+    try:
+        _finish_success(study_material, tasks, run_id)
+    except StaleAnalysisRunError:
+        # StudyTask 저장까지는 이 실행이 끝냈지만, 그 직후(완료 처리 시점) 다른
+        # 실행에게 선점당한 경우다. 이미 저장된 tasks를 그대로 반환해서 "성공"으로
+        # 보고하면 안 되므로, 다른 StaleAnalysisRunError 케이스와 동일하게 처리한다.
+        logger.info(
+            "실행(run_id=%s)이 StudyTask 저장 이후 완료 처리 시점에 다른 실행으로 "
+            "대체됨: study_material_id=%s", run_id, study_material.id,
+        )
+        raise
     return tasks
 
 
@@ -406,7 +428,7 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> uuid.
 
 def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
     """
-    텍스트 추출(status)이 COMPLETED이고 analysis_status가
+    E-AI-01 진입점. 텍스트 추출(status)이 COMPLETED이고 analysis_status가
     PENDING일 때만 분석을 시작한다. (좀비 PROCESSING 구제는 retry_analysis() 전용)
 
     Raises:
@@ -429,6 +451,8 @@ def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
 
 def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
     """
+    E-AI-03 진입점. 텍스트 추출(status)이 COMPLETED이고, 재시도 횟수가 남아있으며
+    아래 중 하나일 때 재시도한다.
         - analysis_status가 FAILED
         - analysis_status가 PROCESSING이고 타임아웃을 넘긴 "좀비" 상태
 
@@ -479,6 +503,8 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
 
 def get_analysis_status(study_material: StudyMaterial) -> dict:
     """
+    E-AI-02: StudyMaterial의 AI 분석 진행 상태를 조회한다.
+
     Returns:
         {
             "status": "pending" | "processing" | "completed" | "failed",
