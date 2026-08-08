@@ -1,8 +1,11 @@
+{# {% include "planner/includes/sidebar.html" with nav="dashboard" %} #}
+
 <aside class="side">
+  {# 로고를 누르면 사이드바가 접힙니다 (planner.js) #}
   <button class="brand" id="toggleSide" type="button">PLAN <em>B</em></button>
 
   <nav>
-    <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="#">
+    <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="{% url 'planner:dashboard' %}">
       <svg class="ico"><use href="#i-dashboard"/></svg>대시보드
     </a>
     <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="{% url 'planner:today' %}">
