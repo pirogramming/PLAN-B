@@ -29,6 +29,7 @@ from exams.services.analysis_orchestrator import (
     PROCESSING_TIMEOUT_SECONDS,
     RetryLimitExceededError,
     StaleAnalysisRunError,
+    _execute_analysis,
     _finish_failure,
     _finish_success,
     _save_tasks_with_estimates,
@@ -511,6 +512,53 @@ class MaterialAnalysisViewTestCase(TestCase):
         data = self._get_stage()
 
         self.assertTrue(data["can_retry"])
+        self.assertIsNone(data["retry_after_seconds"])
+
+    def test_stage_response_includes_is_stale_true_when_zombie(self):
+        """리뷰 반영(#84): 5분 넘긴 좀비 PROCESSING이면 실제 응답에도 is_stale=True가 담겨야 한다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        self.material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        data = self._get_stage()
+
+        self.assertTrue(data["is_stale"])
+
+    def test_stage_response_includes_is_stale_false_when_fresh_processing(self):
+        """5분 이내 PROCESSING(진짜 진행 중)이면 실제 응답에서도 is_stale=False여야 한다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.analysis_started_at = timezone.now() - datetime.timedelta(minutes=1)
+        self.material.save(update_fields=["analysis_status", "analysis_started_at"])
+
+        data = self._get_stage()
+
+        self.assertFalse(data["is_stale"])
+
+    def test_stage_response_distinguishes_zombie_with_retries_exhausted(self):
+        """
+        리뷰 반영(#84): 마지막(2번째) 재시도가 좀비가 되고 재시도 횟수까지 소진된
+        경우, "정상적으로 마지막 재시도가 진행 중인 상태"와 "이미 좀비이고 재시도도
+        더 못 하는 상태"를 stage(계속 ANALYZING)만으로는 구분할 수 없었다.
+        is_stale=True + can_retry=False 조합으로 실제 응답에서 구분 가능한지 확인한다.
+        """
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.analysis_retry_count = MAX_RETRY_COUNT  # 재시도 횟수 이미 소진
+        self.material.analysis_started_at = (
+            timezone.now() - datetime.timedelta(seconds=PROCESSING_TIMEOUT_SECONDS + 1)
+        )
+        self.material.save(update_fields=[
+            "analysis_status", "analysis_retry_count", "analysis_started_at",
+        ])
+
+        data = self._get_stage()
+
+        # stage 자체는 여전히 ANALYZING이라 이것만으로는 구분이 안 된다는 것도 같이 확인
+        self.assertEqual(data["stage"], "ANALYZING")
+        # is_stale + can_retry 조합으로 "재시도 불가, 직접 작업 추가 안내"를 구분할 수 있어야 한다
+        self.assertTrue(data["is_stale"])
+        self.assertFalse(data["can_retry"])
         self.assertIsNone(data["retry_after_seconds"])
 
     def test_stage_response_includes_can_retry_false_when_retries_exhausted(self):
@@ -1539,8 +1587,13 @@ class ProcessingTimeoutTestCase(TestCase):
         self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
         self.assertEqual(material.analysis_run_id, new_run_id)
 
-    def test_finish_failure_ignored_when_run_superseded(self):
-        """뒤늦게 도착한 실패 처리가 최신 실행의 상태를 덮어쓰면 안 된다."""
+    def test_finish_failure_raises_when_run_superseded(self):
+        """
+        뒤늦게 도착한 실패 처리는 최신 실행의 상태를 덮어쓰면 안 된다.
+        리뷰 반영(#84): _finish_success()와 대칭으로, 조용히 무시하는 대신
+        StaleAnalysisRunError를 던진다 (호출부가 "실패"가 아니라 "다른 실행에
+        넘어감"으로 정확히 처리하게 하기 위함).
+        """
         material = self._make_material()
         old_run_id = _start_processing(material, is_retry=False)
 
@@ -1549,7 +1602,8 @@ class ProcessingTimeoutTestCase(TestCase):
             analysis_status=MaterialStatus.PROCESSING, analysis_run_id=new_run_id,
         )
 
-        _finish_failure(material, "예전 실행의 실패 메시지", old_run_id)
+        with self.assertRaises(StaleAnalysisRunError):
+            _finish_failure(material, "예전 실행의 실패 메시지", old_run_id)
 
         material.refresh_from_db()
         self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
@@ -1583,7 +1637,8 @@ class ProcessingTimeoutTestCase(TestCase):
         self.assertNotEqual(new_run_id, old_run_id)
 
         # 예전(이제는 죽은) 실행이 뒤늦게 실패를 기록하려는 상황을 재현
-        _finish_failure(material, "예전 실행의 뒤늦은 실패", old_run_id)
+        with self.assertRaises(StaleAnalysisRunError):
+            _finish_failure(material, "예전 실행의 뒤늦은 실패", old_run_id)
 
         material.refresh_from_db()
         self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
@@ -1621,3 +1676,25 @@ class ProcessingTimeoutTestCase(TestCase):
         material.refresh_from_db()
         self.assertNotEqual(material.analysis_status, MaterialStatus.COMPLETED)
         self.assertTrue(StudyTask.objects.filter(study_material=material).exists())
+    @patch("exams.services.analysis_orchestrator._run_analysis_and_estimate")
+    def test_execute_analysis_reports_stale_run_instead_of_original_failure(self, mock_run):
+        """
+        리뷰 반영(#84): AI 분석 자체가 실패(AICallFailedError)한 시점에 이미
+        소유권을 잃었다면, 그 오래된 실패 사유가 아니라 StaleAnalysisRunError가
+        전파되어야 한다 - 안 그러면 이미 다른 실행이 정상 처리 중이거나 성공했을
+        수도 있는데, 사용자는 "실패했다"는 낡은 메시지를 보게 된다.
+        """
+        material = self._make_material()
+        run_id = _start_processing(material, is_retry=False)
+
+        # AI 호출 자체가 실패했다고 가정
+        mock_run.side_effect = AICallFailedError("네트워크 오류")
+        # 동시에, 그 사이 다른 실행이 소유권을 이미 가져갔다고 가정
+        StudyMaterial.objects.filter(pk=material.pk).update(analysis_run_id=uuid.uuid4())
+
+        with self.assertRaises(StaleAnalysisRunError):
+            _execute_analysis(material, run_id)
+
+        material.refresh_from_db()
+        # 원래 실패 메시지("네트워크 오류")로 덮어써지면 안 된다
+        self.assertIsNone(material.analysis_error_message)

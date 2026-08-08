@@ -270,7 +270,16 @@ def _finish_success(study_material: StudyMaterial, tasks: list[StudyTask], run_i
 
 
 def _finish_failure(study_material: StudyMaterial, message: str, run_id: uuid.UUID) -> None:
-    """run_id가 여전히 "현재 실행"일 때만 FAILED로 갱신한다 (_finish_success와 동일한 이유)."""
+    """
+    run_id가 여전히 "현재 실행"일 때만 FAILED로 갱신한다 (_finish_success와 동일한 이유).
+
+    리뷰 반영(#84): _finish_success()와 대칭으로, 소유권을 잃었으면 조용히 넘어가는
+    대신 StaleAnalysisRunError를 던진다. 이렇게 하면 호출부(_execute_analysis)가
+    "이 실행이 실패했다"는 원래 예외 대신 "이미 다른 실행에 넘어갔다"는 사실을
+    사용자에게 전달할 수 있다 - 안 그러면 이미 다른 실행이 성공적으로 처리
+    중이거나 처리를 마쳤을 수도 있는데, 사용자는 "실패했다"는 오래된(stale) 메시지를
+    보게 된다.
+    """
     updated_count = StudyMaterial.objects.filter(
         pk=study_material.pk, analysis_run_id=run_id,
     ).update(analysis_status=MaterialStatus.FAILED, analysis_error_message=message)
@@ -280,7 +289,10 @@ def _finish_failure(study_material: StudyMaterial, message: str, run_id: uuid.UU
             "실행(run_id=%s)이 실패했지만 이미 다른 실행으로 대체되어 "
             "상태 갱신을 건너뜁니다: study_material_id=%s", run_id, study_material.id,
         )
-        return
+        raise StaleAnalysisRunError(
+            f"실행(run_id={run_id})이 실패 처리 시점에 이미 다른 실행으로 "
+            f"대체되었습니다. study_material_id={study_material.pk}"
+        )
 
     study_material.analysis_status = MaterialStatus.FAILED
     study_material.analysis_error_message = message
@@ -295,9 +307,11 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
     그 전이 시점에 _start_processing()이 발급한 값이어야 한다.
 
     예외 처리:
-        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함 (StudyTask 저장 전이든,
-          저장은 끝났지만 최종 완료 처리 직전이든 마찬가지). analysis_status를
-          건드리지 않고(이미 그 다른 실행이 관리 중이므로) 그대로 다시 던진다.
+        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함. StudyTask 저장 전이든,
+          저장 후 완료/실패 처리 직전이든 마찬가지로 발생할 수 있다. 어느 시점에
+          발생했든 analysis_status를 건드리지 않고(이미 그 다른 실행이 관리
+          중이므로) 그대로 다시 던진다 - 이 경우 원래 실패하려던 사유
+          (AIAnalysisError, StaleAnalysisRequestError 등)보다 우선한다.
         - StaleAnalysisRequestError: 입력이 바뀜. 이 실행은 여전히 소유자이므로
           안전하게 FAILED로 마무리한다.
         - AIAnalysisError 계열: 실패 사유를 그대로 analysis_error_message에 저장
@@ -315,17 +329,26 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
         raise
     except StaleAnalysisRequestError as exc:
         message = "분석 도중 자료 내용이 변경되어 결과를 저장하지 않았습니다. 다시 시도해주세요."
-        _finish_failure(study_material, message, run_id)
         logger.warning(
             "분석 결과 저장 시점 재검증 실패: study_material_id=%s, 사유=%s",
             study_material.id, exc,
         )
+        try:
+            _finish_failure(study_material, message, run_id)
+        except StaleAnalysisRunError:
+            # 리뷰 반영(#84): _finish_failure() 자체도 소유권을 잃었다면, 이
+            # 실행이 "실패했다"는 오래된 사실보다 "이미 다른 실행에 넘어갔다"는
+            # 사실을 우선 전달한다 (_finish_success와 동일한 원칙).
+            raise
         raise AnalysisPipelineError(message) from exc
     except AIAnalysisError as exc:
-        _finish_failure(study_material, str(exc), run_id)
         logger.warning(
             "AI 분석 실패: study_material_id=%s, 사유=%s", study_material.id, exc,
         )
+        try:
+            _finish_failure(study_material, str(exc), run_id)
+        except StaleAnalysisRunError:
+            raise
         raise
     except Exception as exc:
         logger.exception(
@@ -333,15 +356,21 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
             study_material.id,
         )
         message = "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-        _finish_failure(study_material, message, run_id)
+        try:
+            _finish_failure(study_material, message, run_id)
+        except StaleAnalysisRunError:
+            raise
         raise AnalysisPipelineError(message) from exc
 
     if not tasks:
         message = "분석 결과 학습 작업이 생성되지 않았습니다."
-        _finish_failure(study_material, message, run_id)
         logger.warning(
             "AI 분석 결과 0개: study_material_id=%s", study_material.id,
         )
+        try:
+            _finish_failure(study_material, message, run_id)
+        except StaleAnalysisRunError:
+            raise
         raise AIResponseValidationError(message)
 
     try:
@@ -503,7 +532,6 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
 
 def get_analysis_status(study_material: StudyMaterial) -> dict:
     """
-    E-AI-02: StudyMaterial의 AI 분석 진행 상태를 조회한다.
 
     Returns:
         {
