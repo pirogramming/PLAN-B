@@ -58,9 +58,9 @@ document.addEventListener('DOMContentLoaded', function () {
  
         const [, m, dd] = key.split('-').map(Number);
         dateEl.textContent = m + '월 ' + dd + '일';
-        sumEl.textContent = found ? found.dataset.sum : '';
+        sumEl.textContent = '계획 ' + (btn.dataset.planned || 0) + '분 · 가능 ' + (btn.dataset.available || 0) + '분';
         emptyEl.hidden = !!found;
-        if (!found) emptyEl.textContent = '이날은 배정된 학습 작업이 없습니다';
+        if (!found) emptyEl.textContent = calDetail.dataset.emptyMsg;
  
         calDetail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });

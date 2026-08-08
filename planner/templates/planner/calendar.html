@@ -21,6 +21,11 @@
     </header>
 
     <div class="content">
+
+    {% for message in messages %}
+      <div class="banner" style="margin-bottom:20px">{{ message }}</div>
+    {% endfor %}
+
     {% if not exam_period %}
       <div class="card">
         {% include "planner/includes/empty_state.html" with icon="i-calendar" title="아직 등록된 시험기간이 없습니다" desc="시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다." %}
@@ -37,7 +42,7 @@
         </a>
 
         <div class="cal-legend">
-          <span><i style="background:var(--neutral9)"></i>배정된 공부량</span>
+          <span><i style="background:var(--neutral9)"></i>가능시간 대비 배정 비율</span>
           <span><i style="background:var(--judge2)"></i>가능시간 초과</span>
         </div>
       </div>
@@ -56,12 +61,14 @@
             <button type="button"
                     class="cal-day js-day {% if not d.in_period %}out{% endif %} {% if d.is_today %}today{% endif %} {% if d.exam_subject %}exam{% endif %}"
                     data-date="{{ d.date|date:'Y-m-d' }}"
+                    data-available="{{ d.available_minutes|default:0 }}"
+                    data-planned="{{ d.planned_minutes|default:0 }}"
                     {% if not d.in_period %}disabled{% endif %}>
               <span class="cal-num">{{ d.date|date:"j" }}</span>
 
               {% if d.in_period %}
                 {% if d.planned_minutes %}
-                  <span class="cal-min">{{ d.planned_minutes }}</span>
+                  <span class="cal-min">{{ d.planned_minutes }}분</span>
                 {% endif %}
 
                 {% if d.exam_subject %}
@@ -89,7 +96,7 @@
         {% endfor %}
       </div>
 
-      <div class="card cal-detail" id="calDetail">
+      <div class="card cal-detail" id="calDetail" data-empty-msg="이날은 배정된 학습 작업이 없습니다">
         <div class="cal-detail-head">
           <h3 id="calDetailDate">날짜를 선택해 주세요</h3>
           <span class="sum" id="calDetailSum"></span>
@@ -100,8 +107,7 @@
         </div>
 
         {% for key, detail in day_details.items %}
-          <div class="cal-pane" data-date="{{ key }}"
-               data-sum="계획 {{ detail.planned_minutes }}분 · 가능 {{ detail.available_minutes }}분" hidden>
+          <div class="cal-pane" data-date="{{ key }}" hidden>
             {% for t in detail.tasks %}
               {% include "planner/includes/task_row.html" with task=t %}
             {% empty %}
