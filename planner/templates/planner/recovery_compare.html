@@ -45,12 +45,9 @@
           <div class="kpi-sub">미완료 작업 {{ reason.remaining_count }}개의 남은 분량 (일부완료 포함)</div>
         </div>
         <div class="card card-pad">
-          <div class="kpi-label">학습 속도 보정</div>
-          <div class="kpi-value">×{{ reason.speed_factor }}</div>
-          <div class="kpi-sub">
-            {{ reason.speed_subject }} 예상시간
-            <b class="num" style="color:var(--judge2)">+{{ reason.speed_added_minutes }}분</b>
-          </div>
+          <div class="kpi-label">학습 속도 보정 반영</div>
+          <div class="kpi-value warn">+{{ reason.speed_added_minutes }}<small>분</small></div>
+          <div class="kpi-sub">재추정된 공부량</div>
         </div>
         <div class="card card-pad">
           <div class="kpi-label">시험까지 남은 가능시간</div>
@@ -92,8 +89,8 @@
         </div>
         <div class="row ml-auto" style="gap:8px">
           <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
-          {# TODO: 미리보기 URL 로 교체 #}
-          <a class="btn btn-accent btn-lg" href="#">
+          {# TODO: 미리보기 URL 로 교체. data-plan-id는 선택된 RecoveryPlan PK — BE에서 이 값 기준으로 미리보기 View 연결 #}
+          <a class="btn btn-accent btn-lg" href="#" id="previewBtn" data-plan-id="{{ selected_plan.id }}">
             미리보기<svg class="ico"><use href="#i-arrow-right"/></svg>
           </a>
         </div>
