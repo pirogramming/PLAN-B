@@ -1,8 +1,11 @@
+{% load static %}
 {# {% include "planner/includes/sidebar.html" with nav="dashboard" %} #}
 
 <aside class="side">
-  {# 로고를 누르면 사이드바가 접힙니다 (planner.js) #}
-  <button class="brand" id="toggleSide" type="button">PLAN <em>B</em></button>
+  {# 로고를 누르면 사이드바가 접힙니다 (planner.js). 접히면 CSS가 아이콘 부분만 남기고 자릅니다 #}
+  <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
+    <span class="brand-logo"><img src="{% static 'images/logo-lockup.png' %}" alt="PLAN B"></span>
+  </button>
 
   <nav>
     <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="{% url 'planner:dashboard' %}">

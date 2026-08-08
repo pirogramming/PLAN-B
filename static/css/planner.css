@@ -7,24 +7,29 @@
 
 /* ===== 화면 틀 ===== */
 .app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-.app.collapsed{grid-template-columns:0 1fr}
+.app.collapsed{grid-template-columns:56px 1fr}
 
 .side{
   background:var(--neutral1);border-right:1px solid var(--neutral4);
   display:flex;flex-direction:column;position:sticky;top:0;height:100vh;
   padding:0 12px 18px;overflow:hidden;transition:.2s;
 }
-.app.collapsed .side{padding:0;border-right:0}
-.app.collapsed .side>*{display:none}
+.app.collapsed .side{padding:0 8px 18px}
+.app.collapsed .side>*:not(.brand){display:none}
+.app.collapsed .brand{justify-content:center;padding:0;margin:0 -8px 12px}
+.app.collapsed .brand-logo{width:25px}
 
 /* 로고 — 상단바와 같은 높이(60px)라 수평이 맞습니다 */
 .brand{
   height:60px;display:flex;align-items:center;
-  margin:0 -12px 12px;padding:0 22px;
+  margin:0 -12px 12px;padding:0 18px;
   border-bottom:1px solid var(--neutral4);
-  font-size:17px;font-weight:800;color:var(--neutral11);letter-spacing:-0.035em;
 }
-.brand em{font-style:normal;color:var(--brand4);margin-left:5px}
+
+/* logo-lockup.png는 "아이콘+PLAN B" 통짜 이미지입니다.
+   접히면 .brand-logo 폭을 아이콘 폭(25px)만큼만 남기고 나머지는 overflow:hidden으로 자릅니다 */
+.brand-logo{display:block;overflow:hidden;height:28px;width:100px;flex:none;transition:width .2s}
+.brand-logo img{display:block;height:28px;width:auto;max-width:none}
 
 .nav-i{
   display:flex;align-items:center;gap:11px;height:38px;padding:0 10px;
