@@ -3,6 +3,7 @@
   {% include "planner/includes/recovery_card.html" with plan=p selected=True %}
 
   plan 에 필요한 값
+    id                 RecoveryPlan PK (라디오 value, 적용 대상 특정용)
     recovery_type      maintain_volume / core_focus
     type_label         분량 유지형 / 핵심 집중형
     desc               한 줄 설명
@@ -17,7 +18,7 @@
 {% endcomment %}
 
 <label class="rec-card {% if selected %}on{% endif %}">
-  <input type="radio" name="recovery" value="{{ plan.recovery_type }}"
+  <input type="radio" name="recovery" value="{{ plan.id }}"
          class="sr-only js-rec" {% if selected %}checked{% endif %}>
 
   <div class="rec-head">
