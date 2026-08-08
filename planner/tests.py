@@ -2783,14 +2783,30 @@ class RecoveryCompareViewTests(TestCase):
         self.assertEqual(plans[0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME)
         self.assertEqual(plans[1]["recovery_type"], RecoveryType.CORE_FOCUS)
 
-    # ── 2. 한쪽 복구안만 존재하면 404 ─────────────────────
-    def test_404_when_only_one_type_exists(self):
+    # ── 2. 한쪽 복구안만 존재해도 200 렌더 ─────────────────────
+    def test_returns_maintain_only_when_core_focus_missing(self):
         group_id = uuid.uuid4()
         self._make_recovery_plan(self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id)
 
         response = self._get(group_id)
 
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME
+        )
+
+    def test_returns_core_focus_only_when_maintain_missing(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(self.exam_period, RecoveryType.CORE_FOCUS, group_id)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.CORE_FOCUS
+        )
 
     # ── 3. 그룹 자체가 존재하지 않으면 404 ─────────────────
     def test_404_when_group_does_not_exist(self):

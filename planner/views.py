@@ -631,11 +631,6 @@ def recovery_compare(request, group_id):
     if not plans:
         raise Http404("복구안을 찾을 수 없습니다.")
 
-    plan_types = {p.recovery_type for p in plans}
-    expected_types = {RecoveryType.MAINTAIN_VOLUME, RecoveryType.CORE_FOCUS}
-    if plan_types != expected_types:
-        raise Http404("비교할 복구안이 모두 존재하지 않습니다.")
-
     order = {RecoveryType.MAINTAIN_VOLUME: 0, RecoveryType.CORE_FOCUS: 1}
     plans.sort(key=lambda p: order.get(p.recovery_type, 99))
 
