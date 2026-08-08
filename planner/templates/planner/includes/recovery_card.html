@@ -6,20 +6,21 @@
     id                       RecoveryPlan PK (라디오 value, 적용 대상 특정용)
     recovery_type            maintain_volume / core_focus
     type_label               분량 유지형 / 핵심 집중형
-    summary                  한 줄 설명 (RecoveryPlan.summary)
+    summary                  한 줄 설명. RecoveryPlan.summary는 생성 시 저장되지 않으므로
+                              모델 필드를 그대로 쓰지 말고 View에서 구성해서 넘길 것
     feasibility_status       ok / warn / bad   (적용 후 판정)
     feasibility_status_label 지금 가능 / 추가 시간 필요 / ...
-
-    주의: RecoveryPlan 모델에도 status 필드가 있지만 값이 다릅니다
-    (pending/applied/discarded). 여기 feasibility_status는 그것과 별개로
-    "적용 후 가능성 판정" 값이라 이름을 분리했습니다. 모델 인스턴스를
-    그대로 넘기지 말고 이 이름으로 매핑해서 넘겨주세요.
     min_pct band_pct mark_pct need_label_pct   Fit Bar 좌표
     min_minutes max_minutes available_minutes axis_max
     excluded_count excluded_minutes
     total_minutes daily_average_minutes daily_diff
     extra_minutes_needed          0이면 '없음'
     excluded_tasks[]              subject_name / title / depth / importance / minutes
+
+  주의: RecoveryPlan 모델에도 status 필드가 있지만 값이 다릅니다
+  (pending/applied/discarded). 여기 feasibility_status는 그것과 별개로
+  "적용 후 가능성 판정" 값이라 이름을 분리했습니다. 모델 인스턴스를
+  그대로 넘기지 말고 위 이름들로 매핑해서 넘겨주세요.
 {% endcomment %}
 
 <label class="rec-card {% if selected %}on{% endif %}">

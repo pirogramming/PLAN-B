@@ -84,3 +84,5 @@ temp/
 *.bak
 
 test_real_api_3subjects.py
+
+.claude/
