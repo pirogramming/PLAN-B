@@ -383,6 +383,7 @@
 .box[type=number]{-moz-appearance:textfield}
 
 
+/* ===== 하루 종료 : 결과 요약 ===== */
 .sum-list{border:1px solid var(--neutral5);border-radius:12px;overflow:hidden}
 .sum-row{display:flex;align-items:center;justify-content:space-between;
          padding:13px 16px;border-bottom:1px solid var(--neutral4)}
@@ -394,6 +395,7 @@
 .sum-row b{font-size:13.5px;font-weight:600;color:var(--neutral10)}
 
 
+/* ===== 하루 종료 : 재계산 진행 ===== */
 .steps-run{display:flex;flex-direction:column;gap:18px}
 .steps-run li{display:flex;align-items:center;gap:12px;
               font-size:14px;color:var(--neutral6);transition:.2s}
@@ -407,7 +409,10 @@
 
 
 .ico-sm{width:14px;height:14px}
+.ico-lg{width:24px;height:24px}
 
+
+/* ===== 계획 변경 안내 ===== */
 .change-row{display:flex;align-items:center;gap:14px;padding:12px 22px}
 .change-row .info{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
 .change-row .title{font-size:14px;font-weight:650;color:var(--neutral9)}
@@ -417,6 +422,83 @@
 .change-row .dates .to.muted{color:var(--neutral7);font-weight:500}
 .change-row .dates .ico{width:14px;height:14px;color:var(--neutral6)}
 .badge-gray{background:var(--neutral3);color:var(--neutral9);border-color:var(--neutral5)}
+
+
+/* ===== 복구안 카드 ===== */
+.rec-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;align-items:start}
+
+.rec-card{display:block;cursor:pointer;
+          background:var(--neutral1);border:1px solid var(--neutral5);
+          border-radius:var(--r-md);overflow:hidden;transition:.16s}
+.rec-card:hover{border-color:var(--neutral6)}
+.rec-card.on{border-color:var(--brand4);box-shadow:0 0 0 3px var(--brand2)}
+
+.rec-head{padding:20px 22px 18px;border-bottom:1px solid var(--neutral4)}
+.rec-card.on .rec-head{background:var(--brand1)}
+.rec-head .kind{font-size:10.5px;color:var(--neutral7);letter-spacing:.1em;margin-bottom:8px}
+.rec-card.on .rec-head .kind{color:var(--brand4)}
+.rec-head h3{font-size:18px;font-weight:750;color:var(--neutral11);letter-spacing:-0.03em}
+.rec-head p{font-size:13px;color:var(--neutral8);margin-top:7px;line-height:1.6}
+
+.rec-body{padding:20px 22px}
+.rec-stat{margin-top:20px}
+.rec-stat > div{display:flex;justify-content:space-between;align-items:baseline;
+                padding:11px 0;border-bottom:1px dashed var(--neutral4)}
+.rec-stat > div:last-child{border-bottom:0}
+.rec-stat dt{font-size:13px;color:var(--neutral8)}
+.rec-stat dd{font-size:14.5px;font-weight:600;color:var(--neutral10)}
+.rec-stat dd small{font-size:12px;font-weight:500;color:var(--neutral7);margin-left:3px}
+.rec-stat dd.bad{color:var(--judge3)}
+.rec-stat dd.warn{color:var(--judge2)}
+.rec-stat dd.ok{color:var(--judge1)}
+
+.rec-foot{padding:18px 22px;border-top:1px solid var(--neutral4);background:var(--neutral2)}
+.rec-card.on .rec-foot{background:var(--brand1)}
+.rec-foot-label{font-size:12px;font-weight:650;color:var(--neutral8);margin-bottom:10px}
+.rec-excluded{display:flex;flex-direction:column;gap:8px}
+.rec-excluded li{display:flex;align-items:center;gap:8px}
+.rec-excluded .t{font-size:12.5px;color:var(--neutral9);min-width:0;
+                 overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-excluded .m{margin-left:auto;font-size:12px;color:var(--neutral7);flex:none}
+.rec-keep{display:flex;align-items:center;gap:9px;
+          font-size:12.5px;color:var(--judge1)}
+.rec-keep .ico{width:16px;height:16px}
+
+
+/* ===== 복구 미리보기 : 날짜별 비교 ===== */
+.diff{display:grid;grid-template-columns:1fr 40px 1fr;align-items:start}
+.diff-col{background:var(--neutral1);border:1px solid var(--neutral5);
+          border-radius:var(--r-md);overflow:hidden}
+.diff-col.after{border-color:var(--brand2);box-shadow:0 0 0 3px var(--brand1)}
+.diff-arrow{display:flex;align-items:center;justify-content:center;
+            padding-top:60px;color:var(--neutral6)}
+
+.diff-head{display:flex;align-items:center;gap:9px;padding:14px 18px;
+           border-bottom:1px solid var(--neutral4);
+           font-size:13px;font-weight:650;color:var(--neutral9)}
+.diff-col.after .diff-head{color:var(--brand5)}
+.diff-head .ico{width:16px;height:16px}
+
+.diff-row{display:flex;align-items:center;gap:12px;padding:13px 18px;
+          border-bottom:1px solid var(--neutral4)}
+.diff-row:last-child{border-bottom:0}
+.diff-row .date{font-size:11.5px;color:var(--neutral7);width:44px;flex:none}
+.diff-row .bar{flex:1;height:22px;border-radius:5px;
+               background:var(--neutral3);position:relative;overflow:hidden}
+.diff-row .bar.exam{background:var(--neutral2)}
+.diff-row .bar i{position:absolute;left:0;top:0;bottom:0;
+                 background:var(--neutral9);border-radius:5px}
+.diff-row .bar i.over{background:var(--judge2)}
+.diff-row .bar i.acc{background:var(--brand4)}
+.diff-row .bar em{position:absolute;top:0;bottom:0;width:2px;
+                  background:var(--neutral11);opacity:.35}
+.diff-row .min{font-size:11.5px;color:var(--neutral8);width:52px;
+               text-align:right;flex:none}
+
+.card-pad.excluded{border-color:var(--judge3-line);background:var(--judge3-bg)}
+.card-pad.excluded .kpi-label,.card-pad.excluded .kpi-sub{color:var(--judge3)}
+.kpi-value.bad{color:var(--judge3)}
+.kpi-value.bad small{color:var(--judge3)}
 
 
 /* ===== 오늘의 공부 : 모바일 =====
@@ -433,7 +515,13 @@
   .task .btn{align-self:flex-end;margin-top:12px}
 
   .bottom-bar{flex-direction:column;align-items:stretch;padding:14px 16px;bottom:76px}
+  .bottom-bar .row{flex-direction:column;align-items:stretch;margin-left:0;width:100%}
   .bottom-bar .btn{width:100%}
+
+  /* Fit Bar 캡션 : 좁은 화면에서는 겹치므로 필요시간만 보여줍니다 */
+  .fit-caption{font-size:11px;text-align:center}
+  .fit-caption .start,.fit-caption .end{display:none}
+  .fit-caption .need{position:static;transform:none;white-space:nowrap}
 
   .modal-bg{align-items:flex-end;padding:0}
   .modal{max-width:100%;border-radius:var(--r-lg) var(--r-lg) 0 0;max-height:92vh}
@@ -448,6 +536,14 @@
   .time-input .box{width:100%}
   .percent-input .box{flex:1}
 
+  /* 복구안 */
+  .rec-grid{grid-template-columns:1fr;gap:16px}
+  .diff{grid-template-columns:1fr;gap:12px}
+  .diff-arrow{transform:rotate(90deg);padding:0;height:28px}
+  .diff-row{padding:12px 14px}
+  .diff-row .min{width:46px}
+
+  /* 하루 종료 · 변경 안내 */
   .sum-row{padding:12px 14px}
   .change-row{flex-wrap:wrap;gap:10px;padding:12px 16px}
   .change-row .info{flex:1 1 100%}
