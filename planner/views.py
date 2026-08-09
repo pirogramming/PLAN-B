@@ -7,7 +7,7 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.http import Http404
 from core.choices import RecoveryActionType, RecoveryType
-from planner.services.recovery import get_future_available_capacity, get_future_available_minutes
+from planner.services.recovery import get_future_available_capacity
 from planner.services.time_estimator import estimate_task_minutes
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
