@@ -30,6 +30,7 @@ from .services.analysis_orchestrator import (
     AnalysisNotSupportedError,
     RetryLimitExceededError,
     AnalysisPipelineError,
+    StaleAnalysisRunError,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,6 +378,13 @@ def material_analyze(request, material_id):
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
+    except StaleAnalysisRunError:
+        # 리뷰 반영(#84): 이 실행이 시작은 했지만, 완료 처리 직전에 다른(더 최신)
+        # 실행에게 선점당한 경우다. 진짜 시스템 오류가 아니라 정상적인 동시성
+        # 상황이므로, DuplicateAnalysisRequestError와 같은 계열의 안내로 처리한다.
+        logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
     except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -402,6 +410,12 @@ def material_retry_analyze(request, material_id):
         retry_analysis(material)
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중인 자료입니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except StaleAnalysisRunError:
+        # material_analyze()와 동일한 이유 - 완료 처리 직전에 다른 실행에게
+        # 선점당한 정상적인 동시성 상황이다.
+        logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
     except AnalysisNotSupportedError as e:
         messages.error(request, str(e))
@@ -440,11 +454,18 @@ def material_analysis_status(request, material_id):
     extraction_status = material.status
     extraction_error = material.error_message
     
-    # 피드백 4번 반영: 확정된 키 직접 사용 (fallback 제거)
     analysis_status = analysis_data["status"]
     analysis_error = analysis_data["error_message"]
     retry_count = analysis_data["retry_count"]
     retry_remaining = analysis_data["retry_remaining"]
+    # 재시도 버튼을 켜고 끄면 되도록 서버가 판단한 결과를 그대로 내려준다.
+    can_retry = analysis_data["can_retry"]
+    retry_after_seconds = analysis_data["retry_after_seconds"]
+    # 리뷰 반영(#84): stage="ANALYZING"만으로는 "정상적으로 진행 중"인지
+    # "5분 넘게 멈춘 좀비인데 재시도 횟수까지 소진돼 더 이상 손쓸 수 없는 상태"인지
+    # FE가 구분할 수 없었다. is_stale을 같이 내려줘서, is_stale=True인데
+    # can_retry=False면 "재시도 불가, 직접 작업 추가 안내"로 구분할 수 있게 한다.
+    is_stale = analysis_data["is_stale"]
 
     # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
@@ -488,6 +509,9 @@ def material_analysis_status(request, material_id):
         "failed_stage": failed_stage,
         "retry_count": retry_count,
         "retry_remaining": retry_remaining,
+        "can_retry": can_retry,
+        "retry_after_seconds": retry_after_seconds,
+        "is_stale": is_stale,
         "study_material_id": material.id,
         "exam_id": material.exam_id,
     })

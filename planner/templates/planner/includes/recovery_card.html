@@ -25,7 +25,8 @@
 
 <label class="rec-card {% if selected %}on{% endif %}">
   <input type="radio" name="recovery" value="{{ plan.id }}"
-         class="sr-only js-rec" {% if selected %}checked{% endif %}>
+        data-preview-url="{{ plan.preview_url }}"
+        class="sr-only js-rec" {% if selected %}checked{% endif %}>
 
   <div class="rec-head">
     <div class="kind num">{{ plan.recovery_type|upper }}</div>

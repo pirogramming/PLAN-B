@@ -47,6 +47,7 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       if (previewBtn) {
         previewBtn.dataset.planId = input.value;
+        previewBtn.href = input.dataset.previewUrl;
       }
     });
   });
