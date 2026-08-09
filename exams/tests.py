@@ -31,7 +31,6 @@ from exams.services.analysis_orchestrator import (
     StaleAnalysisRunError,
     _execute_analysis,
     _finish_failure,
-    _finish_success,
     _save_tasks_with_estimates,
     _start_processing,
     analyze_and_estimate,
@@ -1421,6 +1420,38 @@ class ProcessingTimeoutTestCase(TestCase):
         self.assertEqual(material.analysis_retry_count, MAX_RETRY_COUNT)
         self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
 
+    def test_retry_race_loser_gets_duplicate_request_not_retry_limit_exceeded(self):
+        """
+        리뷰 반영(#84): 마지막 재시도 자리를 두 요청이 동시에 놓고 경쟁하는 상황을
+        재현한다. retry_count=1(한 번 남음), status=FAILED인 material에서 한
+        요청이 먼저 _start_processing()에 성공해 retry_count=MAX/PROCESSING을
+        선점했다고 가정한 뒤, "진" 요청이 그 직후 재조회하면 어떤 예외를 받는지
+        확인한다.
+
+        이긴 요청이 이미 retry_count를 최대치로 올려놓은 상태이므로, PROCESSING
+        여부를 retry_count 소진 여부보다 먼저 확인하지 않으면 "재시도 횟수를
+        다 썼다"는 잘못된 진단(RetryLimitExceededError)이 나간다 - 실제 이유는
+        "지금 막 다른 요청이 처리를 시작했다"는 것인데도. PROCESSING을 먼저
+        확인하면 DuplicateAnalysisRequestError로 정확히 진단된다.
+        """
+        material = self._make_material()
+        material.analysis_status = MaterialStatus.FAILED
+        material.analysis_retry_count = MAX_RETRY_COUNT - 1  # 마지막 재시도 한 번 남음
+        material.save(update_fields=["analysis_status", "analysis_retry_count"])
+
+        # "이긴" 요청이 _start_processing()에 성공해 마지막 재시도 슬롯을
+        # 선점했다고 가정한다 (retry_count=MAX, status=PROCESSING, 방금 시작함).
+        StudyMaterial.objects.filter(pk=material.pk).update(
+            analysis_status=MaterialStatus.PROCESSING,
+            analysis_retry_count=MAX_RETRY_COUNT,
+            analysis_started_at=timezone.now(),  # 방금 시작 -> is_stale=False
+            analysis_run_id=uuid.uuid4(),
+        )
+        material.refresh_from_db()
+
+        with self.assertRaises(DuplicateAnalysisRequestError):
+            retry_analysis(material)
+
     # ---------- analysis_started_at이 NULL인 좀비도 구제 ----------
 
     def test_retry_can_rescue_zombie_with_null_started_at(self):
@@ -1565,34 +1596,11 @@ class ProcessingTimeoutTestCase(TestCase):
 
         self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
 
-    def test_finish_success_ignored_when_run_superseded(self):
-        """
-        뒤늦게 도착한 성공 처리는 최신 실행의 상태를 덮어쓰면 안 된다.
-        리뷰 반영: 이제 조용히 무시하는 대신 StaleAnalysisRunError를 던진다
-        (호출부인 _execute_analysis가 이걸 "성공"이 아니라 "다른 실행에 넘어감"으로
-        처리하게 하기 위함).
-        """
-        material = self._make_material()
-        old_run_id = _start_processing(material, is_retry=False)
-
-        new_run_id = uuid.uuid4()
-        StudyMaterial.objects.filter(pk=material.pk).update(
-            analysis_status=MaterialStatus.PROCESSING, analysis_run_id=new_run_id,
-        )
-
-        with self.assertRaises(StaleAnalysisRunError):
-            _finish_success(material, [], old_run_id)
-
-        material.refresh_from_db()
-        self.assertEqual(material.analysis_status, MaterialStatus.PROCESSING)
-        self.assertEqual(material.analysis_run_id, new_run_id)
-
     def test_finish_failure_raises_when_run_superseded(self):
         """
         뒤늦게 도착한 실패 처리는 최신 실행의 상태를 덮어쓰면 안 된다.
-        리뷰 반영(#84): _finish_success()와 대칭으로, 조용히 무시하는 대신
-        StaleAnalysisRunError를 던진다 (호출부가 "실패"가 아니라 "다른 실행에
-        넘어감"으로 정확히 처리하게 하기 위함).
+        리뷰 반영(#84): 조용히 무시하는 대신 StaleAnalysisRunError를 던진다
+        (호출부가 "실패"가 아니라 "다른 실행에 넘어감"으로 정확히 처리하게 하기 위함).
         """
         material = self._make_material()
         old_run_id = _start_processing(material, is_retry=False)
@@ -1644,38 +1652,40 @@ class ProcessingTimeoutTestCase(TestCase):
         self.assertEqual(material.analysis_status, MaterialStatus.COMPLETED)
         self.assertIsNone(material.analysis_error_message)
 
-    def test_ownership_lost_between_save_and_finish_does_not_report_success(self):
+    def test_studytask_save_and_completion_are_rolled_back_together(self):
         """
-        리뷰 반영: StudyTask 저장(_save_tasks_with_estimates)이 커밋된 직후,
-        _finish_success() 호출 "사이"에 다른 실행이 소유권을 가져가면, 이 실행은
-        tasks를 정상 반환하면 안 된다 (사용자에게 거짓 "분석 완료" 응답이 나가는
-        것을 막기 위함 - StudyTask 저장은 이미 끝났지만 최종 완료 처리는 아직
-        안 된 그 짧은 창에서 다른 실행이 좀비를 이어받는 경우를 재현한다).
+        리뷰 반영(#84): StudyTask 저장과 analysis_status=COMPLETED 최종 전이가
+        이제 같은 트랜잭션으로 묶여있다. StudyTask가 저장(bulk_update)된 "직후",
+        같은 트랜잭션이 끝나기 "전"에 다른 실행이 소유권을 가져가면, 최종 완료
+        전이가 실패하면서 StudyTask 저장까지 통째로 롤백되어야 한다.
+
+        (이전 구조에서는 저장이 별도 트랜잭션으로 먼저 커밋되고, 완료 전이만
+        별도로 실패할 수 있어서 "StudyTask는 남아있는데 상태는 다른 것으로
+        바뀐" 어중간한 상태가 생길 수 있었다 - 특히 뒤이어 그 다른 실행마저
+        실패하면, 최종 상태는 FAILED인데 이전 실행의 StudyTask가 고아로 남아
+        material_detail 등에서 그대로 노출될 위험이 있었다.)
         """
         material = self._make_material()
+        original_bulk_update = StudyTask.objects.bulk_update
 
-        original_finish_success = _finish_success
-
-        def hijacking_finish_success(study_material, tasks, run_id):
-            # StudyTask 저장은 이미 끝난 시점 - 그 직후 다른 실행이
-            # 이 자료의 소유권을 가져갔다고 가정한다.
-            StudyMaterial.objects.filter(pk=study_material.pk).update(
+        def hijacking_bulk_update(objs, fields, **kwargs):
+            result = original_bulk_update(objs, fields, **kwargs)
+            # StudyTask 저장(bulk_update)은 이미 끝났지만, 아직 같은 트랜잭션
+            # 안이다. 그 사이 다른 실행이 소유권을 가져갔다고 가정한다.
+            StudyMaterial.objects.filter(pk=material.pk).update(
                 analysis_run_id=uuid.uuid4()
             )
-            return original_finish_success(study_material, tasks, run_id)
+            return result
 
-        with patch(
-            "exams.services.analysis_orchestrator._finish_success",
-            side_effect=hijacking_finish_success,
-        ):
+        with patch.object(StudyTask.objects, "bulk_update", side_effect=hijacking_bulk_update):
             with self.assertRaises(StaleAnalysisRunError):
                 analyze_and_estimate(material)
 
-        # StudyTask 저장 자체는 이미 성공적으로 끝난 뒤였으므로 그대로 남아있어야
-        # 하지만, analysis_status가 COMPLETED로 잘못 갱신되면 안 된다.
+        # 트랜잭션 전체가 롤백됐어야 한다 - StudyTask도 저장되지 않은 채로 남아야 한다.
+        self.assertEqual(StudyTask.objects.filter(study_material=material).count(), 0)
         material.refresh_from_db()
         self.assertNotEqual(material.analysis_status, MaterialStatus.COMPLETED)
-        self.assertTrue(StudyTask.objects.filter(study_material=material).exists())
+
     @patch("exams.services.analysis_orchestrator._run_analysis_and_estimate")
     def test_execute_analysis_reports_stale_run_instead_of_original_failure(self, mock_run):
         """

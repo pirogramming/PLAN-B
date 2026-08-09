@@ -169,7 +169,8 @@ def _save_tasks_with_estimates(
     study_material: StudyMaterial, extracted_tasks, analyzed_text: str, run_id: uuid.UUID
 ) -> list[StudyTask]:
     """
-    AI가 추출한 결과를 StudyTask로 저장하고, 곧바로 예상시간까지 채운다.
+    AI가 추출한 결과를 StudyTask로 저장하고, 곧바로 예상시간까지 채운 뒤,
+    analysis_status=COMPLETED 최종 전이까지 전부 같은 트랜잭션 안에서 처리한다.
 
     저장 직전에 StudyMaterial을 다시 조회해서(select_for_update로 잠그면서) 4가지를
     재검증한다:
@@ -181,6 +182,24 @@ def _save_tasks_with_estimates(
     StaleAnalysisRequestError(입력이 바뀜)를 던지고 아무것도 쓰지 않는다.
 
     예상시간 계산에 쓰는 exam.speed_factor도 이 재조회로 얻은 최신 값을 사용한다.
+
+    리뷰 반영(#84): 원래는 이 함수가 StudyTask 저장만 하고 커밋한 뒤,
+    _finish_success()가 별도 트랜잭션으로 analysis_status=COMPLETED 전이를 했다.
+    그 사이(저장 커밋 ~ 완료 전이 사이)에 다른 실행이 소유권을 가져가면,
+    "StaleAnalysisRunError는 정상적으로 전파되지만, 이미 저장된 StudyTask는
+    롤백되지 않고 그대로 남는" 데이터 정합성 문제가 있었다 - 예를 들어 그
+    다른 실행이 이어서 AI 호출 단계에서 실패해 자기 결과를 저장하는 데까지
+    못 갔다면, 최종 analysis_status는 FAILED인데 이전 실행이 만든 StudyTask가
+    남아서 material_detail에서 그대로 노출될 수 있었다.
+
+    이제는 select_for_update()로 잠근 행을 트랜잭션이 끝날 때까지 계속 들고
+    있으면서, 저장과 최종 완료 전이를 같은 트랜잭션에 묶는다. 이 트랜잭션이
+    끝나기 전까지 다른 트랜잭션은 이 행을 갱신하는 UPDATE에서 대기하게 되므로,
+    최종 전이 시점에도 소유권이 그대로 보존된다. 혹시라도 최종 조건부 UPDATE가
+    실패하면(방어적으로 여전히 확인한다) StaleAnalysisRunError를 던져서 트랜잭션
+    전체를 롤백시킨다 - StudyTask 저장까지 같이 취소되어 고아 데이터가 남지 않는다.
+    AI 네트워크 호출(fetch_extracted_tasks)은 이미 이 함수 밖에서 끝난 뒤이므로,
+    이 트랜잭션 동안 네트워크 호출로 DB 커넥션을 오래 점유하는 문제는 없다.
     """
     current = (
         StudyMaterial.objects
@@ -216,6 +235,8 @@ def _save_tasks_with_estimates(
     tasks = save_extracted_tasks(current, extracted_tasks)
 
     if not tasks:
+        # 빈 결과는 이 함수 책임이 아니라 _execute_analysis()가 FAILED로 마무리한다
+        # (성공으로 볼 만한 게 없으니 COMPLETED 전이도 하지 않는다).
         return tasks
 
     exam = current.exam  # 재조회로 얻은 최신 exam (speed_factor 최신값 보장)
@@ -231,43 +252,30 @@ def _save_tasks_with_estimates(
     StudyTask.objects.bulk_update(
         tasks, ["estimated_min_minutes", "estimated_max_minutes"]
     )
-    return tasks
 
-
-def _finish_success(study_material: StudyMaterial, tasks: list[StudyTask], run_id: uuid.UUID) -> None:
-    """
-    run_id가 여전히 "현재 실행"일 때만 COMPLETED로 갱신한다.
-
-    리뷰 반영: StudyTask 저장(_save_tasks_with_estimates)이 커밋된 "이후"부터 이
-    함수가 호출되는 "사이"에도 소유권이 넘어갈 수 있는 짧은 창이 있다. 그 사이에
-    다른 실행이 좀비 상태를 이어받으면, 이 실행은 StudyTask 저장까지는 끝냈어도
-    최종적으로 "성공"으로 끝나면 안 된다 - 그대로 넘어가면 _execute_analysis()가
-    tasks를 정상 반환해서, 이미 소유권을 잃은 실행이 사용자에게 "분석 완료"라고
-    잘못 응답할 수 있다. 그래서 여기서도 StaleAnalysisRunError를 던져서
-    _execute_analysis()가 이걸 성공이 아니라 "다른 실행에 넘어감"으로 처리하게 한다.
-    """
+    # StudyTask 저장과 같은 트랜잭션 안에서 최종 완료 전이까지 처리한다 (위 docstring
+    # 참고). select_for_update()로 이 행을 계속 잠그고 있었으므로 이 시점에도
+    # analysis_run_id가 run_id와 같다는 게 사실상 보장되지만, 방어적으로 조건부
+    # UPDATE로 한 번 더 확인한다 - 실패하면 트랜잭션 전체(StudyTask 저장 포함)가
+    # 롤백된다.
     updated_count = StudyMaterial.objects.filter(
         pk=study_material.pk, analysis_run_id=run_id,
     ).update(analysis_status=MaterialStatus.COMPLETED, analysis_error_message=None)
 
     if not updated_count:
-        logger.warning(
-            "실행(run_id=%s)의 StudyTask 저장은 끝났지만, 최종 완료 처리 시점에 "
-            "이미 다른 실행으로 대체되어 성공으로 마무리하지 않습니다: "
-            "study_material_id=%s", run_id, study_material.id,
-        )
         raise StaleAnalysisRunError(
-            f"실행(run_id={run_id})이 StudyTask 저장 이후 최종 완료 처리 시점에 "
-            f"다른 실행으로 대체되었습니다. study_material_id={study_material.pk}"
+            f"실행(run_id={run_id})이 StudyTask 저장과 같은 트랜잭션 안에서 최종 완료 "
+            f"전이를 시도했지만 이미 다른 실행으로 대체되었습니다. "
+            f"study_material_id={study_material.pk}"
         )
 
     study_material.analysis_status = MaterialStatus.COMPLETED
     study_material.analysis_error_message = None
     logger.info(
         "AI 분석 + 예상시간 계산 완료: exam=%s, 작업 %d개",
-        study_material.exam.subject_name, len(tasks),
+        exam.subject_name, len(tasks),
     )
-
+    return tasks
 
 def _finish_failure(study_material: StudyMaterial, message: str, run_id: uuid.UUID) -> None:
     """
@@ -307,9 +315,11 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
     그 전이 시점에 _start_processing()이 발급한 값이어야 한다.
 
     예외 처리:
-        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함. StudyTask 저장 전이든,
-          저장 후 완료/실패 처리 직전이든 마찬가지로 발생할 수 있다. 어느 시점에
-          발생했든 analysis_status를 건드리지 않고(이미 그 다른 실행이 관리
+        - StaleAnalysisRunError: 이미 다른 실행에게 선점당함. StudyTask 저장과
+          analysis_status=COMPLETED 최종 전이가 이제 같은 트랜잭션으로 묶여있으므로
+          (리뷰 반영 #84), 이 예외가 발생하면 그 트랜잭션 전체가 롤백되어 StudyTask
+          저장도 함께 취소된다 - "저장은 됐는데 상태만 못 바뀐" 어중간한 상태가
+          남지 않는다. analysis_status를 건드리지 않고(이미 그 다른 실행이 관리
           중이므로) 그대로 다시 던진다 - 이 경우 원래 실패하려던 사유
           (AIAnalysisError, StaleAnalysisRequestError 등)보다 우선한다.
         - StaleAnalysisRequestError: 입력이 바뀜. 이 실행은 여전히 소유자이므로
@@ -373,17 +383,11 @@ def _execute_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[
             raise
         raise AIResponseValidationError(message)
 
-    try:
-        _finish_success(study_material, tasks, run_id)
-    except StaleAnalysisRunError:
-        # StudyTask 저장까지는 이 실행이 끝냈지만, 그 직후(완료 처리 시점) 다른
-        # 실행에게 선점당한 경우다. 이미 저장된 tasks를 그대로 반환해서 "성공"으로
-        # 보고하면 안 되므로, 다른 StaleAnalysisRunError 케이스와 동일하게 처리한다.
-        logger.info(
-            "실행(run_id=%s)이 StudyTask 저장 이후 완료 처리 시점에 다른 실행으로 "
-            "대체됨: study_material_id=%s", run_id, study_material.id,
-        )
-        raise
+    # _save_tasks_with_estimates()가 StudyTask 저장과 analysis_status=COMPLETED
+    # 최종 전이까지 같은 트랜잭션 안에서 이미 끝냈다 (리뷰 반영 #84 - 저장과 완료
+    # 전이 사이의 소유권 경쟁으로 StudyTask만 남고 상태는 다른 것으로 바뀌는
+    # 데이터 정합성 문제를 막기 위함). tasks가 여기까지 정상 반환됐다는 것 자체가
+    # 이미 COMPLETED 전이까지 성공했다는 뜻이므로, 별도로 완료 처리를 할 필요가 없다.
     return tasks
 
 
@@ -513,17 +517,37 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
             "결과를 수정하려면 작업 검토 화면에서 직접 수정해주세요."
         )
 
-    # FAILED든 좀비 PROCESSING이든, 여기 도달했는데 재시도 횟수가 이미 꽉 찼다면
-    # 이유는 그것뿐이다 (그 외 조건은 위에서 이미 걸러짐) - 좀비 여부보다 먼저 확인.
+    # 리뷰 반영(#84): PROCESSING 상태를 "진짜 진행 중"인지 "좀비인데 재시도
+    # 횟수까지 소진되어 더는 손쓸 수 없는 상태"인지 구분해서 진단한다.
+    #
+    # 마지막 재시도(예: retry_count=1, MAX=2) 자리를 두 요청이 동시에 노리는
+    # 경쟁 상태를 생각해보자 - 이긴 요청이 retry_count를 2로 올리고 방금 막
+    # PROCESSING을 차지했다(신선함, is_stale=False). 진 요청이 재조회하면
+    # retry_count=2(이미 최대치), analysis_status=PROCESSING을 보게 되는데,
+    # retry_count부터 확인하면 "재시도 횟수를 다 썼다"고 잘못 안내하게 된다 -
+    # 실제로는 "지금 막 다른 요청이 처리를 시작했다"는 게 진짜 이유인데도.
+    #
+    # 반대로, PROCESSING이 5분 넘게 멈춘 좀비이고 retry_count도 이미 MAX라면
+    # (예: test_retry_rejected_when_retry_count_maxed_even_if_zombie), 이건
+    # "누군가 지금 활발히 처리 중"이 아니라 "예전에 멈춘 채로 방치됐고 더 이상
+    # 아무도 구제할 수 없는" 상태이므로, DuplicateAnalysisRequestError보다
+    # RetryLimitExceededError(재시도 횟수 소진, 직접 추가하라)가 정확한 안내다.
+    #
+    # 그래서 is_stale까지 같이 확인해서: "좀비 + 재시도 소진"만 RetryLimitExceededError로
+    # 먼저 걸러내고, 그 외 PROCESSING(신선하거나, 좀비여도 재시도 여지가 남아있는
+    # 경우)은 DuplicateAnalysisRequestError로 처리한다.
+    if status == MaterialStatus.PROCESSING:
+        analysis_data = get_analysis_status(study_material)
+        if analysis_data["is_stale"] and study_material.analysis_retry_count >= MAX_RETRY_COUNT:
+            raise RetryLimitExceededError(
+                "재시도 횟수(최대 2회)를 모두 사용했습니다. 학습 작업을 직접 추가해주세요."
+            )
+        raise DuplicateAnalysisRequestError("이미 분석 중인 자료는 다시 분석할 수 없습니다.")
+
     if study_material.analysis_retry_count >= MAX_RETRY_COUNT:
         raise RetryLimitExceededError(
             "재시도 횟수(최대 2회)를 모두 사용했습니다. 학습 작업을 직접 추가해주세요."
         )
-
-    if status == MaterialStatus.PROCESSING:
-        # 재시도 횟수는 남아있는데 전이가 안 됐다면, 아직 타임아웃을 넘기지 않은
-        # 진짜 "진행 중"인 상태라는 뜻이다.
-        raise DuplicateAnalysisRequestError("이미 분석 중인 자료는 다시 분석할 수 없습니다.")
 
     raise DuplicateAnalysisRequestError(
         f"재시도할 수 없는 상태입니다 (현재 analysis_status: {status})."
