@@ -40,8 +40,8 @@
         </a>
 
         <div class="cal-legend">
-          <span><i style="background:var(--neutral9)"></i>가능시간 대비 배정 비율</span>
-          <span><i style="background:var(--judge2)"></i>가능시간 초과</span>
+          <span><i style="background:var(--neutral9)"></i>배정 시간</span>
+          <span><i style="background:var(--judge3)"></i>시험일</span>
         </div>
       </div>
 
@@ -65,10 +65,6 @@
               <span class="cal-num">{{ d.date|date:"j" }}</span>
 
               {% if d.in_period %}
-                {% if d.planned_minutes %}
-                  <span class="cal-min">{{ d.planned_minutes }}분</span>
-                {% endif %}
-
                 {% if d.exam_subject %}
                   <span class="cal-exam">{{ d.exam_subject }} 시험</span>
                 {% endif %}
@@ -81,7 +77,11 @@
 
                   <span class="cal-tasks">
                     {% for t in d.tasks %}
-                      <span class="cal-t"><i class="sh-{{ t.shade_index }}"></i>{{ t.title }}</span>
+                      <span class="cal-t">
+                        <i class="sh-{{ t.shade_index }}"></i>
+                        <span class="cal-t-txt">{{ t.title }}</span>
+                        <span class="cal-t-min">{{ t.planned_minutes }}분</span>
+                      </span>
                     {% endfor %}
                     {% if d.more_count %}
                       <span class="cal-more">외 {{ d.more_count }}개</span>

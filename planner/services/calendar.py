@@ -49,7 +49,7 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_
             "planned_minutes": int,
             "load_percent": int,      # 계획시간/가능시간*100 (포화도, 진행률 아님)
             "is_over": bool,          # load_percent > 100
-            "tasks": [{"title": str, "subject_name": str, "shade_index": int}, ...],
+            "tasks": [{"title": str, "subject_name": str, "planned_minutes": int, "shade_index": int}, ...],
             "more_count": int,        # tasks에 안 들어간 나머지 개수
         }
     """
@@ -127,6 +127,7 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_
                 {
                     "title": item.study_task.title,
                     "subject_name": item.study_task.exam.subject_name,
+                    "planned_minutes": item.planned_minutes,
                     "shade_index": shade_index_by_subject.get(
                         item.study_task.exam.subject_name, 0
                     ),
