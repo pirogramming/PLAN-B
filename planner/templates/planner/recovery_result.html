@@ -25,6 +25,10 @@
 
     <div class="content">
 
+      {% for message in messages %}
+        <div class="banner" style="margin-bottom:20px">{{ message }}</div>
+      {% endfor %}
+
       <div class="page-head">
         <div>
           <h1>{{ plan.type_label }}</h1>
@@ -113,7 +117,7 @@
       <div class="banner info" style="margin-top:24px">
         <svg class="ico"><use href="#i-recalc"/></svg>
         <div class="body">
-          <h4>적용해도 나중에 다시 바꿀 수 있습니다</h4>
+          <h4>공부가 다시 밀리면 새 복구안을 만들 수 있습니다</h4>
           <p>공부가 또 밀리면 그때의 상태로 새 복구안을 만들어 드립니다.
              빠진 작업은 삭제되지 않고 &lsquo;제외됨&rsquo;으로 남습니다.</p>
         </div>
@@ -126,7 +130,7 @@
       <div class="row ml-auto" style="gap:8px">
         <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
         {# TODO: 복구안 적용 POST 연결 #}
-        <button class="btn btn-accent btn-lg" type="button">
+        <button class="btn btn-accent btn-lg" type="button" data-plan-id="{{ plan.id }}">
           {{ plan.type_label }} 적용<svg class="ico"><use href="#i-check"/></svg>
         </button>
       </div>
