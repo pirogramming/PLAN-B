@@ -842,3 +842,21 @@
 .auto-loading-stale .btn {
   margin-bottom: 8px;
 }
+
+/* period_list.html - FE2 sidebar 뼈대 적용 버전 */
+.period-list-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.period-list-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--neutral10);
+}
+.period-list-date {
+  font-size: 11.5px;
+  color: var(--neutral7);
+  margin-top: 4px;
+}
