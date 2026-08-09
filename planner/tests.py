@@ -2734,8 +2734,8 @@ class RecoveryCompareViewTests(TestCase):
         )
 
     def _make_recovery_plan(self, exam_period, recovery_type,
-                             recovery_group_id, status=RecoveryPlanStatus.PENDING,
-                             with_reschedule_item=True):
+                            recovery_group_id, status=RecoveryPlanStatus.PENDING,
+                            with_reschedule_item=True):
         plan = RecoveryPlan.objects.create(
             exam_period=exam_period,
             source_daily_plan=self.daily_plan,
@@ -2765,6 +2765,16 @@ class RecoveryCompareViewTests(TestCase):
             exam_period, RecoveryType.CORE_FOCUS, group_id,
         )
         return group_id, maintain, core_focus
+
+    def test_preview_url_included_in_plan_context(self):
+        group_id, maintain, core_focus = self._make_both_plans()
+
+        response = self._get(group_id)
+        plans = response.context["plans"]
+
+        expected = reverse("planner:recovery_preview", kwargs={"plan_id": maintain.id})
+        self.assertEqual(plans[0]["preview_url"], expected)
+
 
     def _get(self, group_id):
         return self.client.get(
@@ -3029,6 +3039,10 @@ class RecoveryPreviewViewTests(TestCase):
             action_type=RecoveryActionType.EXCLUDE,
             remaining_minutes=45, reason="테스트",
         )
+
+    def test_exam_period_in_context(self):
+        response = self._get(self.recovery_plan.id)
+        self.assertEqual(response.context["exam_period"], self.exam_period)
 
     def _get(self, plan_id):
         return self.client.get(

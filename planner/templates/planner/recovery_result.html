@@ -125,8 +125,7 @@
     </div>
 
     <div class="bottom-bar">
-      {# TODO: 비교 화면 URL 로 교체 #}
-      <a class="btn btn-secondary" href="#">비교로 돌아가기</a>
+      <a class="btn btn-secondary" href="{{ compare_url }}">비교로 돌아가기</a>
       <div class="row ml-auto" style="gap:8px">
         <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
         {# TODO: 복구안 적용 POST 연결 #}

@@ -594,6 +594,10 @@ def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
         "id": recovery_plan.id,
         "recovery_type": recovery_plan.recovery_type,
         "type_label": type_label,
+        "preview_url": reverse(
+            "planner:recovery_preview",
+            kwargs={"plan_id": recovery_plan.id},
+        ),
         "summary": desc,
         "feasibility_status": status,
         "feasibility_status_label": status_label,
@@ -781,6 +785,7 @@ def recovery_preview(request, plan_id):
     type_label = "분량 유지형" if recovery_plan.recovery_type == RecoveryType.MAINTAIN_VOLUME else "핵심 집중형"
 
     context = {
+        "exam_period": exam_period,
         "plan": {
             "id": recovery_plan.id,
             "type_label": type_label,
