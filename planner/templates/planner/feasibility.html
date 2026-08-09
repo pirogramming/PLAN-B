@@ -1,21 +1,102 @@
 {% extends "base.html" %}
-{% block title %}계획 가능성 판정 - PLAN B{% endblock %}
+{% load static %}
+{% block title %}
+가능성 판정 - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
+
 {% block content %}
-  <h1>계획 가능성 판정</h1>
-  <p>{{ exam_period.title }}</p>
+<div class="container feasibility-wrap">
+  <div class="crumb-text">
+    PLAN B &nbsp;›&nbsp; 가능성 판정
+  </div>
 
-  <p>판정: {{ result.status }}</p>
-  <p>확정된 작업 수: {{ task_count }}</p>
-  <p>최소 필요시간: {{ total_min_minutes }}분</p>
-  <p>최대 필요시간: {{ total_max_minutes }}분</p>
-  <p>가용시간: {{ total_available_minutes }}분</p>
+  <div class="feasibility-header">
+    <div class="page-title" style="margin-bottom:0;">
+      계획이 가능한지 확인해볼게요
+    </div>
 
-  {% if can_generate %}
+    {% if result.status == 'possible' %}
     <form method="post" action="{% url 'planner:plan_generate' period_id=exam_period.id %}">
       {% csrf_token %}
-      <button type="submit">계획 생성하기</button>
+      <button type="submit" class="btn btn-brand">
+        계획 생성하기
+      </button>
     </form>
-  {% else %}
-    <p>{{ readiness_error|default:"가능시간 또는 학습작업을 조정해주세요." }}</p>
+    {% else %}
+    <button type="button" class="btn" disabled
+            title="가능 판정일 때만 계획을 생성할 수 있어요">
+      계획 생성하기
+    </button>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="feasibility-card-top">
+      <div class="feasibility-card-title">
+        시험기간 전체 판정
+        {% if result.status == 'possible' %}
+        <span class="badge badge-possible">가능</span>
+        {% elif result.status == 'risky' %}
+        <span class="badge badge-risky">위험</span>
+        {% else %}
+        <span class="badge badge-impossible">불가능</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="bar-track">
+      <div class="bar-fill {% if result.status == 'possible' %}bar-green{% elif result.status == 'risky' %}bar-amber{% else %}bar-red{% endif %}"
+           style="width:min(100%, {% widthratio total_available_minutes total_max_minutes 100 %}%);">
+      </div>
+    </div>
+    <div class="feasibility-bar-labels">
+      <span>0분</span>
+      <span>
+        필요 <span class="num">{{ total_min_minutes }}</span>–<span class="num">{{ total_max_minutes }}</span>분
+      </span>
+      <span><span class="num">{{ total_available_minutes }}</span>분</span>
+    </div>
+
+    <div class="feasibility-stat-grid">
+      <div class="feasibility-stat">
+        <div class="feasibility-stat-label">남은 가능시간</div>
+        <div class="feasibility-stat-num num">{{ total_available_minutes }}<span>분</span></div>
+      </div>
+      <div class="feasibility-stat">
+        <div class="feasibility-stat-label">최소 필요시간</div>
+        <div class="feasibility-stat-num num">{{ total_min_minutes }}<span>분</span></div>
+      </div>
+      <div class="feasibility-stat">
+        <div class="feasibility-stat-label">최대 필요시간</div>
+        <div class="feasibility-stat-num num">{{ total_max_minutes }}<span>분</span></div>
+      </div>
+      <div class="feasibility-stat">
+        <div class="feasibility-stat-label">확정된 작업</div>
+        <div class="feasibility-stat-num num">{{ task_count }}<span>개</span></div>
+      </div>
+    </div>
+  </div>
+
+  {% if result.status != 'possible' %}
+  <div class="form-error-box">
+    {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
+  </div>
+  <div class="feasibility-action-row">
+    <a href="{% url 'exams:available_time_update' exam_period.id %}" class="btn btn-ghost">
+      가능시간 수정
+    </a>
+    <a href="{% url 'exams:period_detail' exam_period.id %}" class="btn btn-ghost">
+      학습작업 수정
+    </a>
+  </div>
   {% endif %}
+
+  <div class="feasibility-subject-note">
+    과목별 판정은 곧 추가될 예정이에요.
+  </div>
+</div>
 {% endblock %}

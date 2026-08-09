@@ -700,3 +700,91 @@
   font-size: 11.5px;
   color: var(--neutral7);
 }
+
+/* planner/feasibility.html 전용 (원래 FE1 Figma 설계 - 데이터 확장 전까지 임시 담당) */
+.feasibility-wrap {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 40px 0 60px;
+}
+.feasibility-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 22px;
+  gap: 16px;
+}
+.feasibility-card-top {
+  margin-bottom: 14px;
+}
+.feasibility-card-title {
+  font-size: 15px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bar-track {
+  height: 10px;
+  border-radius: 6px;
+  background: var(--neutral3);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 6px;
+}
+.bar-fill.bar-green { background: var(--judge1); }
+.bar-fill.bar-amber { background: var(--judge2); }
+.bar-fill.bar-red { background: var(--judge3); }
+.feasibility-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--neutral7);
+  margin-bottom: 22px;
+}
+.feasibility-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--neutral4);
+  padding-top: 18px;
+}
+.feasibility-stat {
+  padding: 0 14px;
+  border-right: 1px solid var(--neutral4);
+}
+.feasibility-stat:first-child { padding-left: 0; }
+.feasibility-stat:last-child { border-right: none; }
+.feasibility-stat-label {
+  font-size: 11px;
+  color: var(--neutral7);
+  margin-bottom: 6px;
+}
+.feasibility-stat-num {
+  font-size: 22px;
+  font-weight: 800;
+}
+.feasibility-stat-num span {
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 1px;
+}
+.feasibility-action-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.feasibility-action-row .btn {
+  flex: 1;
+}
+.feasibility-subject-note {
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px dashed var(--neutral5);
+  border-radius: 14px;
+  font-size: 12.5px;
+  color: var(--neutral7);
+  text-align: center;
+}
