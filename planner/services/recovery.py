@@ -469,3 +469,15 @@ def apply_recovery_plan(recovery_plan) -> dict:
             'recovery_plan': target,
             'created_daily_plan_items': created_items,
         }
+
+def get_future_available_capacity(exam_period, from_date) -> list[AvailableTimeInput]:
+    """복구에 사용할 수 있는 날짜별 순수 잔여 가용시간."""
+    return _future_available_capacity(exam_period, from_date)
+
+
+def get_future_available_minutes(exam_period, from_date) -> int:
+    """복구에 사용할 수 있는 미래 잔여 가용시간의 총합."""
+    return sum(
+        item.available_minutes
+        for item in get_future_available_capacity(exam_period, from_date)
+    )
