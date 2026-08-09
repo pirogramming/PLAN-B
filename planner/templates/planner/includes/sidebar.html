@@ -1,11 +1,17 @@
+{% load static %}
+{# {% include "planner/includes/sidebar.html" with nav="dashboard" %} #}
+
 <aside class="side">
-  <button class="brand" id="toggleSide" type="button">PLAN <em>B</em></button>
+  {# 로고를 누르면 사이드바가 접힙니다 (planner.js). 접히면 CSS가 아이콘 부분만 남기고 자릅니다 #}
+  <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
+    <span class="brand-logo"><img src="{% static 'images/logo-lockup.png' %}" alt="PLAN B"></span>
+  </button>
 
   <nav>
-    <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="#">
+    <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="{% url 'planner:dashboard' %}">
       <svg class="ico"><use href="#i-dashboard"/></svg>대시보드
     </a>
-    <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
+    <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="{% url 'planner:today' %}">
       <svg class="ico"><use href="#i-today"/></svg>오늘의 공부
       {% if today_count %}<span class="count" title="오늘 계획된 작업 {{ today_count }}개">{{ today_count }}</span>{% endif %}
     </a>

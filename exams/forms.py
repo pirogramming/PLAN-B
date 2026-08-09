@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from core.choices import MaterialType
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
 
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+MAX_UPLOAD_SIZE = 20 * 1024 * 1024
 
 class ExamPeriodForm(forms.ModelForm):
     class Meta:
@@ -175,9 +175,9 @@ class StudyMaterialForm(forms.ModelForm):
             if ext != '.pdf':
                 raise ValidationError("PDF 파일(.pdf)만 업로드할 수 있습니다.")
 
-            # 2. 파일 크기 검증 (최대 10MB)
+            # 2. 파일 크기 검증 (최대 20MB)
             if file.size > MAX_UPLOAD_SIZE:
-                raise ValidationError("파일 크기는 최대 10MB를 초과할 수 없습니다.")
+                raise ValidationError("파일 크기는 최대 20MB를 초과할 수 없습니다.")
 
         return file
 

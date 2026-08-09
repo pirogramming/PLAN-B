@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% load static %}
+ 
+{% block title %}복구안 비교 · PLAN B{% endblock %}
+ 
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+ 
+{% block body %}
+<div class="app">
+ 
+  {% include "planner/includes/sidebar.html" with nav="dashboard" %}
+ 
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>계획 복구</h2>
+      <span class="badge badge-warn ml-auto">
+        <i class="dot dot-warn"></i>아직 적용되지 않음
+      </span>
+    </header>
+ 
+    <div class="content">
+
+      {% for message in messages %}
+        <div class="banner" style="margin-bottom:20px">{{ message }}</div>
+      {% endfor %}
+
+      {# ---- 왜 복구가 필요한지 ---- #}
+      <div class="banner" style="margin-bottom:24px;padding:22px 24px">
+        <svg class="ico ico-lg"><use href="#i-alert"/></svg>
+        <div class="body">
+          <h4 style="font-size:17px">{{ reason.headline }}</h4>
+          <p style="margin-top:8px">{{ reason.detail }}</p>
+        </div>
+      </div>
+ 
+      <div class="grid-3" style="margin-bottom:32px">
+        <div class="card card-pad">
+          <div class="kpi-label">오늘 남은 분량</div>
+          <div class="kpi-value">{{ reason.remaining_minutes }}<small>분</small></div>
+          <div class="kpi-sub">미완료 작업 {{ reason.remaining_count }}개의 남은 분량 (일부완료 포함)</div>
+        </div>
+        <div class="card card-pad">
+          <div class="kpi-label">학습 속도 보정 반영</div>
+          <div class="kpi-value warn">+{{ reason.speed_added_minutes }}<small>분</small></div>
+          <div class="kpi-sub">재추정된 공부량</div>
+        </div>
+        <div class="card card-pad">
+          <div class="kpi-label">시험까지 남은 가능시간</div>
+          <div class="kpi-value">{{ reason.available_minutes }}<small>분</small></div>
+          <div class="kpi-sub">{{ reason.available_days }}일 (시험 당일 제외)</div>
+        </div>
+      </div>
+ 
+      {# ---- 복구안 비교 ---- #}
+      <div class="section-head">
+        <div>
+          <h3 style="font-size:17px">복구안 비교</h3>
+          <p style="font-size:13px;color:var(--neutral8);margin-top:4px">
+            같은 눈금 위에 그렸습니다. 검은 선이 띠보다 오른쪽이면 시험일까지 끝낼 수 있습니다.
+          </p>
+        </div>
+      </div>
+ 
+      {% if plans %}
+        <div class="rec-grid">
+          {% for p in plans %}
+            {% include "planner/includes/recovery_card.html" with plan=p selected=forloop.last %}
+          {% endfor %}
+        </div>
+      {% else %}
+        {% url 'planner:dashboard' as dashboard_url %}
+        <div class="card">
+          {% include "planner/includes/empty_state.html" with icon="i-alert" title="현재 남은 가용시간으로 적용 가능한 복구안을 만들 수 없습니다." btn_label="대시보드로 돌아가기" btn_url=dashboard_url %}
+        </div>
+      {% endif %}
+    </div>
+
+    {% if plans %}
+      {% with selected_plan=plans|last %}
+      <div class="bottom-bar">
+        <div>
+          <div class="info">선택한 복구안 · <span id="recLabel">{{ selected_plan.type_label }}</span></div>
+          <div class="desc">적용하면 내일부터의 계획만 바뀝니다. 오늘까지의 기록은 그대로입니다.</div>
+        </div>
+        <div class="row ml-auto" style="gap:8px">
+          <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
+          <a class="btn btn-accent btn-lg" href="{{ selected_plan.preview_url }}" id="previewBtn" data-plan-id="{{ selected_plan.id }}">
+            미리보기<svg class="ico"><use href="#i-arrow-right"/></svg>
+          </a>
+        </div>
+      </div>
+      {% endwith %}
+    {% endif %}
+  </div>
+</div>
+ 
+{% include "includes/icons.html" %}
+{% endblock %}
+ 
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}
+ 

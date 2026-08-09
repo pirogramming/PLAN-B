@@ -4,6 +4,8 @@ from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
 from django.http import JsonResponse
+from django.db import transaction
+import logging
 
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
@@ -23,12 +25,15 @@ from .services.analysis_orchestrator import (
     analyze_and_estimate,
     retry_analysis,
     get_analysis_status,
+    MAX_RETRY_COUNT,
     DuplicateAnalysisRequestError,
     AnalysisNotSupportedError,
     RetryLimitExceededError,
     AnalysisPipelineError,
+    StaleAnalysisRunError,
 )
-from django.db import transaction
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -61,7 +66,7 @@ def period_create(request):
     """
     생성 전용. 수정은 period_update가 따로 담당.
     - active 시험기간 1개 제한 (MVP 정책)
-    - 생성 성공 시 '시험기간 상세'로 이동 (표의 연동화면 기준)
+    - 생성 성공 시 '시험기간 상세'로 이동
     - start_date~end_date 범위의 AvailableTime을 0분으로 미리 채워둠
     """
     if request.method == 'POST':
@@ -125,6 +130,7 @@ def period_update(request, period_id):
 
     return render(request, 'exams/period_form.html', {'form': form, 'period': period})
 
+
 # =====================================================================
 # 시험기간 삭제 (exams:period_delete)
 # =====================================================================
@@ -165,7 +171,7 @@ def subject_create(request, period_id):
             exam = form.save(commit=False)
             exam.exam_period = period
             exam.save()
-            return redirect('exams:period_detail', period_id=period.id)  # 표: 연동화면=시험기간 상세
+            return redirect('exams:period_detail', period_id=period.id)
     else:
         form = ExamForm(exam_period=period)
 
@@ -212,10 +218,6 @@ def subject_delete(request, period_id, exam_id):
 @login_required
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    """
-    period_create/update에서 이미 0분으로 AvailableTime을 생성해두므로
-    여기서는 값만 채우는 '수정' 개념 (extra=0 formset으로 충분)
-    """
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
 
@@ -226,7 +228,7 @@ def available_time_update(request, period_id):
             for instance in instances:
                 instance.exam_period = period
                 instance.save()
-            return redirect('exams:period_detail', period_id=period.id)  # 표: 연동화면=시험기간 상세
+            return redirect('exams:period_detail', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
 
@@ -255,6 +257,7 @@ def material_create(request, exam_id):
 
     return render(request, 'exams/material_form.html', {'form': form, 'exam': exam})
 
+
 # =====================================================================
 # 자료 상세 (exams:material_detail)
 # =====================================================================
@@ -272,16 +275,9 @@ def material_detail(request, material_id):
 @login_required
 @require_http_methods(["POST"])
 def material_extract(request, material_id):
-    """
-    D-MAT-03: PDF 텍스트 추출
-    - status: PENDING/FAILED → PROCESSING → COMPLETED(+extracted_text) / FAILED(+error_message)
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
-    # 재추출 성공 후 "텍스트가 실제로 바뀌었는지" 판단하는 기준값. 아래에서
-    # material.status/analysis_status 등을 refresh_from_db()로 갱신해도
-    # extracted_text 필드는 그 refresh 대상에 포함하지 않으므로 이 시점 값 그대로 유지된다.
     previous_extracted_text = material.extracted_text
 
     if material.material_type != MaterialType.PDF:
@@ -292,13 +288,6 @@ def material_extract(request, material_id):
         messages.error(request, "첨부된 PDF 파일이 없습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    # 아래 세 조건 중 하나라도 걸리면 재추출을 막는다.
-    #   - status(추출 상태)가 이미 PROCESSING (다른 요청이 추출 중)
-    #   - analysis_status가 PROCESSING (AI 분석 진행 중 - 어느 텍스트 기준인지 꼬임)
-    #   - analysis_status가 COMPLETED (이미 이 텍스트 기준으로 분석 결과가 있음)
-    # 조회 후 파이썬에서 검사하는 방식은 동시 요청 사이의 경쟁 상태가 남으므로,
-    # 조건부 UPDATE 하나로 "확인 + PROCESSING 전이"를 원자적으로 처리한다
-    # (analysis_orchestrator._save_tasks_with_estimates()의 재검증과 짝을 이루는 방어).
     updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
         status=MaterialStatus.PROCESSING
     ).exclude(
@@ -340,16 +329,12 @@ def material_extract(request, material_id):
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
     material.error_message = None
-    # 재추출 성공은 텍스트가 바뀌었을 수도, 완전히 같을 수도 있다 (예: 사용자가
-    # 같은 PDF를 실수로 다시 업로드). 텍스트가 실제로 바뀐 경우에만 "새로운 분석
-    # 대상"으로 보고 AI 분석 상태(특히 FAILED 사유, 재시도 횟수)를 초기화한다.
-    # 리뷰 반영: 텍스트가 동일한데도 무조건 초기화하면, 재시도 2회를 이미 다 쓴
-    # 자료도 같은 PDF를 다시 추출하는 것만으로 retry_count가 0으로 리셋되어
-    # 재시도 횟수 제한을 우회할 수 있었다.
+
     if extracted != previous_extracted_text:
         material.analysis_status = MaterialStatus.PENDING
         material.analysis_error_message = None
         material.analysis_retry_count = 0
+
     material.save(update_fields=[
         'status', 'extracted_text', 'error_message',
         'analysis_status', 'analysis_error_message', 'analysis_retry_count',
@@ -371,20 +356,13 @@ def material_delete(request, material_id):
     messages.success(request, "학습자료가 삭제되었습니다.")
     return redirect('exams:period_detail', period_id=period_id)
 
+
 # =====================================================================
 # AI 분석 실행 (exams:material_analyze) - E-AI-01
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
 def material_analyze(request, material_id):
-    """
-    E-AI-01: AI 분석 요청.
-    analysis_status: PENDING -> PROCESSING -> COMPLETED/FAILED
-
-    텍스트 추출(status)이 아직 COMPLETED가 아니면 (PDF 추출 전, 실패 등)
-    분석 자체를 시작하지 않는다 - 추출 상태와 분석 상태는 별개 필드지만,
-    추출이 안 끝난 자료를 분석할 수는 없기 때문.
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
@@ -395,15 +373,26 @@ def material_analyze(request, material_id):
 
     try:
         analyze_and_estimate(material)
+        # 피드백 3번 반영: 동기식이므로 "시작되었습니다" 메시지 제거하고 완료 메시지만 노출
+        messages.success(request, "AI 분석이 완료되었습니다.")
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
+    except StaleAnalysisRunError:
+        # 리뷰 반영(#84): 이 실행이 시작은 했지만, 완료 처리 직전에 다른(더 최신)
+        # 실행에게 선점당한 경우다. 진짜 시스템 오류가 아니라 정상적인 동시성
+        # 상황이므로, DuplicateAnalysisRequestError와 같은 계열의 안내로 처리한다.
+        logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
     except (AIAnalysisError, AnalysisPipelineError):
-        # 실패 사유는 이미 material.analysis_error_message에 저장돼 있음
         messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
+    except Exception:
+        logger.exception(f"AI 분석 실행 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        messages.error(request, "AI 분석 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
 
-    messages.success(request, "AI 분석이 완료되었습니다.")
     return redirect('exams:task_review', exam_id=material.exam_id)
 
 
@@ -413,10 +402,6 @@ def material_analyze(request, material_id):
 @login_required
 @require_http_methods(["POST"])
 def material_retry_analyze(request, material_id):
-    """
-    E-AI-03: AI 분석 재시도. FAILED 상태 + 재시도 횟수(2회) 남아있을 때만 허용.
-    조건에 안 맞으면 analysis_orchestrator가 던지는 예외를 그대로 사용자 메시지로 변환한다.
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
@@ -426,6 +411,12 @@ def material_retry_analyze(request, material_id):
     except DuplicateAnalysisRequestError:
         messages.info(request, "이미 분석 중인 자료입니다.")
         return redirect('exams:material_detail', material_id=material.id)
+    except StaleAnalysisRunError:
+        # material_analyze()와 동일한 이유 - 완료 처리 직전에 다른 실행에게
+        # 선점당한 정상적인 동시성 상황이다.
+        logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
     except AnalysisNotSupportedError as e:
         messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
@@ -434,6 +425,10 @@ def material_retry_analyze(request, material_id):
         return redirect('exams:material_detail', material_id=material.id)
     except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
+    except Exception:
+        logger.exception(f"AI 분석 재시도 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        messages.error(request, "AI 분석 재시도 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
     messages.success(request, "AI 분석이 완료되었습니다.")
@@ -448,73 +443,77 @@ def material_retry_analyze(request, material_id):
 def material_analysis_status(request, material_id):
     """
     E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    "분석 중..." 화면에서 주기적으로 호출해 상태 변화를 확인하는 용도.
-
-    프론트가 material_analyze()를 순차 자동 호출하는 방식으로 가면서, 성공/실패
-    판단을 이 엔드포인트 하나로만 하기로 확정했다. 텍스트 추출 상태
-    (material.status/error_message, BE2 담당 필드)와 AI 분석 상태
-    (material.analysis_status/analysis_error_message, 이 파일 담당)를 하나의
-    스키마로 합쳐서 내려준다 (BE2와 필드명·구조 합의 완료).
-
-    최종 응답 스키마:
-        {
-            "stage": "PENDING | EXTRACTING | ANALYZING | COMPLETED | FAILED",
-            "extraction_status": "pending | processing | completed | failed",
-            "extraction_error_message": str | None,
-            "analysis_status": "pending | processing | completed | failed",
-            "analysis_error_message": str | None,
-            "failed_stage": "EXTRACTION | ANALYSIS" | None,
-            "retry_count": int,
-            "retry_remaining": int,
-        }
-    extraction_status/analysis_status는 StudyMaterial 모델 필드 값을 그대로 내려서
-    소문자다 (MaterialStatus TextChoices 자체가 소문자). stage/failed_stage는 이
-    엔드포인트가 새로 만드는 값이라 대문자로 통일했다.
-
-    stage 우선순위가 "추출 상태 먼저, 분석 상태 나중"인 이유: material_extract()의
-    원자적 방어(analysis_status가 PROCESSING/COMPLETED면 재추출 자체가 막힘) 덕분에,
-    material.status가 PROCESSING/FAILED로 남아있다는 건 "지금 추출(재추출 포함)
-    작업이 진행/실패한 것"이 확정적으로 최신 상황이라는 뜻이다. 그래서 이 경우엔
-    analysis_status에 남아있는 이전 분석 기록(예: 재추출 전의 예전 실패 사유)보다
-    추출 상태를 우선해서 보여준다 - 순서를 반대로 하면(분석 실패를 먼저 체크하면),
-    재추출이 한창 진행 중인데도 stage가 잘못 FAILED로 나오는 문제가 생긴다.
-
-    failed_stage: stage가 "FAILED"일 때, 추출 단계에서 실패한 건지("EXTRACTION")
-    분석 단계에서 실패한 건지("ANALYSIS") 구분해서 알려준다. 둘 다 아니면 None.
     """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
-    analysis_data = get_analysis_status(material)  # 기존 서비스 함수, 시그니처 안 바뀜
 
-    if material.status == MaterialStatus.FAILED:
+    # get_analysis_status(material) 호출 복원
+    analysis_data = get_analysis_status(material)
+
+    extraction_status = material.status
+    extraction_error = material.error_message
+    
+    analysis_status = analysis_data["status"]
+    analysis_error = analysis_data["error_message"]
+    retry_count = analysis_data["retry_count"]
+    retry_remaining = analysis_data["retry_remaining"]
+    # 재시도 버튼을 켜고 끄면 되도록 서버가 판단한 결과를 그대로 내려준다.
+    can_retry = analysis_data["can_retry"]
+    retry_after_seconds = analysis_data["retry_after_seconds"]
+    # 리뷰 반영(#84): stage="ANALYZING"만으로는 "정상적으로 진행 중"인지
+    # "5분 넘게 멈춘 좀비인데 재시도 횟수까지 소진돼 더 이상 손쓸 수 없는 상태"인지
+    # FE가 구분할 수 없었다. is_stale을 같이 내려줘서, is_stale=True인데
+    # can_retry=False면 "재시도 불가, 직접 작업 추가 안내"로 구분할 수 있게 한다.
+    is_stale = analysis_data["is_stale"]
+
+    # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
+    failed_stage = None
+
+    # ① 재추출 진행 중이면 이전 분석 실패보다 최우선으로 "EXTRACTING"
+    if extraction_status == MaterialStatus.PROCESSING:
+        stage = "EXTRACTING"
+
+    # ② 추출 자체가 실패한 경우
+    elif extraction_status == MaterialStatus.FAILED:
         stage = "FAILED"
         failed_stage = "EXTRACTION"
-    elif material.status == MaterialStatus.PROCESSING:
-        stage = "EXTRACTING"
-        failed_stage = None
-    elif analysis_data["status"] == MaterialStatus.PROCESSING:
+
+    # ③ 분석 진행 중인 경우
+    elif analysis_status == MaterialStatus.PROCESSING:
         stage = "ANALYZING"
-        failed_stage = None
-    elif analysis_data["status"] == MaterialStatus.FAILED:
+
+    # ④ 분석이 실패한 경우
+    elif analysis_status == MaterialStatus.FAILED:
         stage = "FAILED"
         failed_stage = "ANALYSIS"
-    elif analysis_data["status"] == MaterialStatus.COMPLETED:
+
+    # ⑤ 둘 다 완료된 경우
+    elif (
+        extraction_status == MaterialStatus.COMPLETED
+        and analysis_status == MaterialStatus.COMPLETED
+    ):
         stage = "COMPLETED"
-        failed_stage = None
+
+    # ⑥ 아무것도 안 한 PENDING 상태
     else:
         stage = "PENDING"
-        failed_stage = None
 
+    # 2. 약속된 JSON 응답 스펙 반환
     return JsonResponse({
         "stage": stage,
-        "extraction_status": material.status,
-        "extraction_error_message": material.error_message,
-        "analysis_status": analysis_data["status"],
-        "analysis_error_message": analysis_data["error_message"],
+        "extraction_status": extraction_status,
+        "extraction_error_message": extraction_error,
+        "analysis_status": analysis_status,
+        "analysis_error_message": analysis_error,
         "failed_stage": failed_stage,
-        "retry_count": analysis_data["retry_count"],
-        "retry_remaining": analysis_data["retry_remaining"],
+        "retry_count": retry_count,
+        "retry_remaining": retry_remaining,
+        "can_retry": can_retry,
+        "retry_after_seconds": retry_after_seconds,
+        "is_stale": is_stale,
+        "study_material_id": material.id,
+        "exam_id": material.exam_id,
     })
 
 
@@ -528,7 +527,9 @@ def task_review(request, exam_id):
     queryset = StudyTask.objects.filter(exam=exam)
 
     if request.method == 'POST':
+        action = request.POST.get('action')
         formset = StudyTaskFormSet(request.POST, queryset=queryset)
+
         if formset.is_valid():
             instances = formset.save(commit=False)
             for instance in instances:
@@ -544,13 +545,23 @@ def task_review(request, exam_id):
                 instance.estimated_max_minutes = estimated_max
 
                 instance.save()
+
             for obj in formset.deleted_objects:
                 obj.delete()
+
+            if action in ('confirm', 'confirm_and_next'):
+                exam.study_tasks.filter(is_confirmed=False).update(is_confirmed=True)
+                return redirect('planner:feasibility', period_id=exam.exam_period_id)
+
             return redirect('exams:task_review', exam_id=exam.id)
     else:
         formset = StudyTaskFormSet(queryset=queryset)
 
-    return render(request, 'exams/task_review.html', {'formset': formset, 'exam': exam})
+    return render(request, 'exams/task_review.html', {
+        'formset': formset,
+        'exam': exam,
+    })
+
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 

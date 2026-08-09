@@ -1,0 +1,92 @@
+{% comment %}
+  복구안 카드.
+  {% include "planner/includes/recovery_card.html" with plan=p selected=True %}
+
+  plan 에 필요한 값
+    id                       RecoveryPlan PK (라디오 value, 적용 대상 특정용)
+    recovery_type            maintain_volume / core_focus
+    type_label               분량 유지형 / 핵심 집중형
+    summary                  한 줄 설명. RecoveryPlan.summary는 생성 시 저장되지 않으므로
+                              모델 필드를 그대로 쓰지 말고 View에서 구성해서 넘길 것
+    feasibility_status       ok / warn / bad   (적용 후 판정)
+    feasibility_status_label 지금 가능 / 추가 시간 필요 / ...
+    min_pct band_pct mark_pct need_label_pct   Fit Bar 좌표
+    min_minutes max_minutes available_minutes axis_max
+    excluded_count excluded_minutes
+    total_minutes daily_average_minutes daily_diff
+    extra_minutes_needed          0이면 '없음'
+    excluded_tasks[]              subject_name / title / depth / importance / minutes
+
+  주의: RecoveryPlan 모델에도 status 필드가 있지만 값이 다릅니다
+  (pending/applied/discarded). 여기 feasibility_status는 그것과 별개로
+  "적용 후 가능성 판정" 값이라 이름을 분리했습니다. 모델 인스턴스를
+  그대로 넘기지 말고 위 이름들로 매핑해서 넘겨주세요.
+{% endcomment %}
+
+<label class="rec-card {% if selected %}on{% endif %}">
+  <input type="radio" name="recovery" value="{{ plan.id }}"
+        data-preview-url="{{ plan.preview_url }}"
+        class="sr-only js-rec" {% if selected %}checked{% endif %}>
+
+  <div class="rec-head">
+    <div class="kind num">{{ plan.recovery_type|upper }}</div>
+    <div class="row" style="justify-content:space-between">
+      <h3>{{ plan.type_label }}</h3>
+      <span class="badge badge-{{ plan.feasibility_status }}">
+        <i class="dot dot-{{ plan.feasibility_status }}"></i>{{ plan.feasibility_status_label }}
+      </span>
+    </div>
+    <p>{{ plan.summary }}</p>
+  </div>
+
+  <div class="rec-body">
+    {% include "planner/includes/fit_bar.html" with status=plan.feasibility_status min_pct=plan.min_pct band_pct=plan.band_pct mark_pct=plan.mark_pct need_label_pct=plan.need_label_pct min_minutes=plan.min_minutes max_minutes=plan.max_minutes available_minutes=plan.available_minutes axis_max=plan.axis_max %}
+
+    <dl class="rec-stat">
+      <div>
+        <dt>제외되는 작업</dt>
+        <dd class="num {% if plan.excluded_count %}bad{% endif %}">
+          {% if plan.excluded_count %}{{ plan.excluded_count }}개 · {{ plan.excluded_minutes }}분{% else %}없음{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>남은 총 공부량</dt>
+        <dd class="num">{{ plan.total_minutes }}분</dd>
+      </div>
+      <div>
+        <dt>하루 평균 공부량</dt>
+        <dd class="num">{{ plan.daily_average_minutes }}분
+          {% if plan.daily_diff %}<small>({{ plan.daily_diff }})</small>{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>추가로 필요한 시간</dt>
+        <dd class="num {% if plan.extra_minutes_needed %}warn{% else %}ok{% endif %}">
+          {% if plan.extra_minutes_needed %}+{{ plan.extra_minutes_needed }}분{% else %}없음{% endif %}
+        </dd>
+      </div>
+    </dl>
+  </div>
+
+  {# 제외되는 작업은 접지 않습니다. 이 화면의 '가격표'라 항상 보여야 합니다. #}
+  <div class="rec-foot">
+    {% if plan.excluded_tasks %}
+      <div class="rec-foot-label">빠지는 작업</div>
+      <ul class="rec-excluded">
+        {% for t in plan.excluded_tasks %}
+          <li>
+            {% if t.depth == 'optional' %}<span class="tag tag-optional">OPTIONAL</span>
+            {% else %}<span class="tag">{{ t.depth|upper }}</span>{% endif %}
+            <span class="t">{{ t.title }}</span>
+            <span class="m num">{{ t.minutes }}분</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="rec-keep">
+        <svg class="ico"><use href="#i-done"/></svg>
+        모든 학습 작업을 그대로 유지합니다
+      </div>
+    {% endif %}
+  </div>
+</label>
