@@ -75,6 +75,30 @@ def _calculate_feasibility_for_period(exam_period):
     result = calculate_feasibility(required_min, required_max, available)
     return result, tasks
 
+def _build_subject_results(exam_period, tasks):
+    """
+    과목별 카드 표시용 데이터. 가용시간은 시험기간 전체가 공유하는 구조라
+    과목별 possible/risky/impossible 판정은 여기서 만들지 않는다.
+    """
+    subject_results = []
+
+    for exam in exam_period.exams.all().order_by('exam_date'):
+        subject_tasks = [task for task in tasks if task.exam_id == exam.id]
+
+        subject_results.append({
+            'exam_id': exam.id,
+            'subject_name': exam.subject_name,
+            'exam_date': exam.exam_date,
+            'task_count': len(subject_tasks),
+            'required_min_minutes': sum(
+                task.estimated_min_minutes for task in subject_tasks
+            ),
+            'required_recommended_minutes': sum(
+                task.estimated_max_minutes for task in subject_tasks
+            ),
+        })
+
+    return subject_results
 
 def _validate_task_readiness(exam_period):
     """
@@ -111,9 +135,12 @@ def feasibility(request, period_id):
     is_ready, readiness_error = _validate_task_readiness(exam_period)
     result, tasks = _calculate_feasibility_for_period(exam_period)
 
+    subject_results = _build_subject_results(exam_period, tasks)
+
     context = {
         'exam_period': exam_period,
         'result': result,
+        'subject_results': subject_results,
         'total_min_minutes': result['required_min_minutes'],
         'total_max_minutes': result['required_recommended_minutes'],
         'total_available_minutes': result['available_minutes'],
