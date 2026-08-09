@@ -37,6 +37,12 @@
     {{ form.non_field_errors|striptags }}
   </div>
   {% endif %}
+  {% if form.title.errors or form.material_type.errors %}
+  <div class="form-error-box">
+    {{ form.title.errors|striptags }}
+    {{ form.material_type.errors|striptags }}
+  </div>
+  {% endif %}
 
   <div class="card material-form-card">
     <div class="tabbar" data-method-tabs>
@@ -106,6 +112,11 @@
 (function () {
   var tabs = document.querySelectorAll('[data-method-tabs] .tab');
   var typeInput = document.getElementById('{{ form.material_type.id_for_label }}');
+
+  /* 탭을 한 번도 안 눌러도 기본값(pdf)이 확실히 들어가게 처리 */
+  if (typeInput && !typeInput.value) {
+    typeInput.value = 'pdf';
+  }
 
   tabs.forEach(function (tab) {
     tab.addEventListener('click', function () {
