@@ -19,11 +19,17 @@
 <body>
 
   {% block body %}
-    <div class="container">
+    {% if messages %}
+    <div class="site-messages">
       {% for message in messages %}
-        <p>{{ message }}</p>
+      <div class="site-message site-message-{{ message.tags }}">
+        {{ message }}
+      </div>
       {% endfor %}
+    </div>
+    {% endif %}
 
+    <div class="container">
       {% block content %}{% endblock %}
     </div>
   {% endblock %}
