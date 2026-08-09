@@ -4,7 +4,9 @@ from django.utils import timezone as django_timezone
 from unittest.mock import patch
 from planner.services.recovery import RecoveryPlanInvalidDataError
 from django.urls import reverse
-
+import uuid
+from planner.models import RecoveryPlanItem
+from core.choices import RecoveryPlanStatus, RecoveryActionType
 from planner.services.progress_recorder import (
     finalize_daily_plan,
     record_progress,
@@ -2672,3 +2674,446 @@ class ProgressRecordViewTests(TestCase):
         self._post(self.item.id, {"status": "done", "actual_minutes": 60})
         self.exam.refresh_from_db()
         self.assertNotEqual(self.exam.speed_factor, 1.0)
+
+class RecoveryCompareViewTests(TestCase):
+    """
+    #81 recovery_compare View 테스트.
+
+    RecoveryPlan/RecoveryPlanItem을 직접 만들어서 View 단위로만 검증한다
+    (generate_recovery_options()를 거치는 통합 검증은 FinalizeDailyPlanTests가 이미 담당).
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="recovery_compare_tester",
+            email="recovery_compare@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="recovery_compare_other",
+            email="recovery_compare_other@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="recovery_compare@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구안 비교 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=7),
+            speed_factor=1.0,
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            title="복구 대상 작업",
+            importance="low",
+            depth="optional",
+            task_type="practice",
+            difficulty="normal",
+            order=1,
+            estimated_min_minutes=30,
+            estimated_max_minutes=60,
+            is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=self.today,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+
+    def _make_recovery_plan(self, exam_period, recovery_type,
+                             recovery_group_id, status=RecoveryPlanStatus.PENDING,
+                             with_reschedule_item=True):
+        plan = RecoveryPlan.objects.create(
+            exam_period=exam_period,
+            source_daily_plan=self.daily_plan,
+            recovery_group_id=recovery_group_id,
+            recovery_type=recovery_type,
+            status=status,
+        )
+        if with_reschedule_item:
+            RecoveryPlanItem.objects.create(
+                recovery_plan=plan,
+                study_task=self.task,
+                original_date=self.today,
+                changed_date=self.today + timedelta(days=1),
+                action_type=RecoveryActionType.RESCHEDULE,
+                remaining_minutes=60,
+                reason="테스트용 재배치",
+            )
+        return plan
+
+    def _make_both_plans(self, exam_period=None, group_id=None):
+        group_id = group_id or uuid.uuid4()
+        exam_period = exam_period or self.exam_period
+        maintain = self._make_recovery_plan(
+            exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+        )
+        core_focus = self._make_recovery_plan(
+            exam_period, RecoveryType.CORE_FOCUS, group_id,
+        )
+        return group_id, maintain, core_focus
+
+    def _get(self, group_id):
+        return self.client.get(
+            reverse("planner:recovery_compare", kwargs={"group_id": group_id})
+        )
+
+    # ── 1. 정상 케이스: 두 복구안 모두 조회 ──────────────────
+    def test_returns_both_plans_when_both_exist(self):
+        group_id, maintain, core_focus = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        plans = response.context["plans"]
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME)
+        self.assertEqual(plans[1]["recovery_type"], RecoveryType.CORE_FOCUS)
+
+    # ── 2. 한쪽 복구안만 존재해도 200 렌더 ─────────────────────
+    def test_returns_maintain_only_when_core_focus_missing(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME
+        )
+
+    def test_returns_core_focus_only_when_maintain_missing(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(self.exam_period, RecoveryType.CORE_FOCUS, group_id)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.CORE_FOCUS
+        )
+
+    # ── 3. 그룹 자체가 존재하지 않으면 404 ─────────────────
+    def test_404_when_group_does_not_exist(self):
+        response = self._get(uuid.uuid4())
+        self.assertEqual(response.status_code, 404)
+
+    # ── 4. 다른 사용자의 복구안은 조회 불가 ─────────────────
+    def test_404_when_owned_by_other_user(self):
+        from exams.models import ExamPeriod
+
+        other_period = ExamPeriod.objects.create(
+            user=self.other_user,
+            title="다른 사용자 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        group_id, _, _ = self._make_both_plans(exam_period=other_period)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 404)
+
+    # ── 5. PENDING이 아닌 복구안(이미 처리됨)은 비교 대상에서 제외 ──
+    def test_404_when_plans_already_applied(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(
+            self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+            status=RecoveryPlanStatus.APPLIED,
+        )
+        self._make_recovery_plan(
+            self.exam_period, RecoveryType.CORE_FOCUS, group_id,
+            status=RecoveryPlanStatus.DISCARDED,
+        )
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 404)
+
+    # ── 6. Fit Bar가 두 카드 공통 axis_max를 쓰는지 확인 ─────
+    def test_fit_bar_shares_axis_max_across_plans(self):
+        group_id, maintain, core_focus = self._make_both_plans()
+
+        response = self._get(group_id)
+        plans = response.context["plans"]
+
+        self.assertEqual(plans[0]["axis_max"], plans[1]["axis_max"])
+        self.assertGreater(plans[0]["axis_max"], 0)
+
+    # ── 7. 제외된 작업이 excluded_tasks에 정확히 반영되는지 ──
+    def test_excluded_task_appears_in_core_focus_only(self):
+        group_id = uuid.uuid4()
+        maintain = self._make_recovery_plan(
+            self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+        )
+        core_focus = RecoveryPlan.objects.create(
+            exam_period=self.exam_period,
+            source_daily_plan=self.daily_plan,
+            recovery_group_id=group_id,
+            recovery_type=RecoveryType.CORE_FOCUS,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        RecoveryPlanItem.objects.create(
+            recovery_plan=core_focus,
+            study_task=self.task,
+            original_date=self.today,
+            changed_date=None,
+            action_type=RecoveryActionType.EXCLUDE,
+            remaining_minutes=60,
+            reason="핵심 집중형: 우선순위 낮은 작업 단계적 제외",
+        )
+
+        response = self._get(group_id)
+        plans_by_type = {p["recovery_type"]: p for p in response.context["plans"]}
+
+        self.assertEqual(plans_by_type[RecoveryType.MAINTAIN_VOLUME]["excluded_count"], 0)
+        self.assertEqual(plans_by_type[RecoveryType.CORE_FOCUS]["excluded_count"], 1)
+        self.assertEqual(
+            plans_by_type[RecoveryType.CORE_FOCUS]["excluded_tasks"][0]["title"],
+            self.task.title,
+        )
+
+    # ── 8. exam_period가 context에 있는지 (사이드바 렌더링용) ──
+    def test_exam_period_in_context(self):
+        group_id, _, _ = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.context["exam_period"], self.exam_period)
+
+    # ── 9. 로그인 안 하면 로그인 페이지로 리다이렉트 ─────────
+    def test_requires_login(self):
+        self.client.logout()
+        group_id, _, _ = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 302)
+
+class CalendarViewTests(TestCase):
+    """
+    캘린더 화면(planner:calendar) 테스트.
+    신예원 님과 확정한 스펙(월 이동은 페이지 새로고침, day_details 사전 계산)을
+    기준으로 View + build_calendar_context()를 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+
+        self.user = User.objects.create_user(
+            username="calendar_tester", email="calendar_tester@example.com",
+            password="pass1234",
+        )
+        self.other = User.objects.create_user(
+            username="calendar_other", email="calendar_other@example.com",
+            password="pass1234",
+        )
+        self.today = django_timezone.localdate()
+        self.client.login(username="calendar_tester@example.com", password="pass1234")
+        self.url = reverse("planner:calendar")
+
+    def _make_active_exam_period(self, user=None):
+        from exams.models import ExamPeriod
+
+        return ExamPeriod.objects.create(
+            user=user or self.user, title="캘린더 테스트 시험기간",
+            start_date=self.today - timedelta(days=3),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def test_shows_onboarding_when_no_exam_period(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["exam_period"])
+
+    def test_defaults_to_current_month_when_no_query_params(self):
+        self._make_active_exam_period()
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["year"], self.today.year)
+        self.assertEqual(response.context["month"], self.today.month)
+
+    def test_invalid_month_falls_back_to_current_month(self):
+        self._make_active_exam_period()
+        response = self.client.get(self.url, {"year": 2026, "month": 13})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["month"], self.today.month)
+
+    def test_week_grid_has_six_weeks_of_seven_days(self):
+        self._make_active_exam_period()
+        response = self.client.get(
+            self.url, {"year": self.today.year, "month": self.today.month}
+        )
+
+        weeks = response.context["weeks"]
+        self.assertEqual(len(weeks), 6)
+        for week in weeks:
+            self.assertEqual(len(week), 7)
+
+    def test_date_outside_period_marked_not_in_period(self):
+        period = self._make_active_exam_period()
+        response = self.client.get(
+            self.url, {"year": self.today.year, "month": self.today.month}
+        )
+
+        outside_date = period.start_date - timedelta(days=1)
+        cell = self._find_cell(response.context["weeks"], outside_date)
+        if cell is not None:  # 달력에 그 날짜가 안 나온 달이면 스킵
+            self.assertFalse(cell["in_period"])
+
+    def test_exam_day_shows_subject_and_no_load_bar(self):
+        from exams.models import Exam
+
+        period = self._make_active_exam_period()
+        exam_date = self.today + timedelta(days=2)
+        Exam.objects.create(
+            exam_period=period, subject_name="데이터통신", exam_date=exam_date,
+        )
+        response = self.client.get(
+            self.url, {"year": exam_date.year, "month": exam_date.month}
+        )
+
+        cell = self._find_cell(response.context["weeks"], exam_date)
+        self.assertTrue(cell["is_exam_day"])
+        self.assertEqual(cell["exam_subject"], "데이터통신")
+        self.assertEqual(cell["available_minutes"], 0)
+
+    def test_load_percent_over_100_marks_is_over(self):
+        from exams.models import Exam
+        from planner.models import DailyPlan, DailyPlanItem
+
+        period = self._make_active_exam_period()
+        exam = Exam.objects.create(
+            exam_period=period, subject_name="운영체제",
+            exam_date=self.today + timedelta(days=5),
+        )
+        task = exam.study_tasks.create(
+            unit_name="1장", title="1장 정리", task_type="concept",
+            importance="high", depth="core", difficulty="normal",
+            estimated_min_minutes=30, estimated_max_minutes=50, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        AvailableTime.objects.create(
+            exam_period=period, date=target_date, available_minutes=100,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=100, planned_minutes=150,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=150, order=1,
+        )
+
+        response = self.client.get(
+            self.url, {"year": target_date.year, "month": target_date.month}
+        )
+
+        cell = self._find_cell(response.context["weeks"], target_date)
+        self.assertEqual(cell["load_percent"], 150)
+        self.assertTrue(cell["is_over"])
+
+    def test_day_details_matches_task_row_fields(self):
+        from exams.models import Exam
+        from planner.models import DailyPlan, DailyPlanItem
+
+        period = self._make_active_exam_period()
+        exam = Exam.objects.create(
+            exam_period=period, subject_name="신호및시스템",
+            exam_date=self.today + timedelta(days=5),
+        )
+        task = exam.study_tasks.create(
+            unit_name="2장", title="2장 예제 풀이", task_type="practice",
+            importance="medium", depth="basic", difficulty="easy",
+            estimated_min_minutes=20, estimated_max_minutes=40, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=120, planned_minutes=40,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=40, order=1,
+        )
+
+        response = self.client.get(
+            self.url, {"year": target_date.year, "month": target_date.month}
+        )
+
+        day_detail = response.context["day_details"][target_date.isoformat()]
+        task_data = day_detail["tasks"][0]
+        self.assertEqual(
+            set(task_data.keys()),
+            {"title", "subject_name", "depth", "planned_minutes",
+             "status", "actual_minutes", "completion_percent"},
+        )
+        self.assertEqual(task_data["title"], "2장 예제 풀이")
+        self.assertEqual(task_data["subject_name"], "신호및시스템")
+
+    def test_shade_index_ordered_by_exam_date(self):
+        from exams.models import Exam, AvailableTime as AT
+        from planner.models import DailyPlan, DailyPlanItem
+        from planner.services.calendar import build_calendar_context
+
+        period = self._make_active_exam_period()
+        Exam.objects.create(
+            exam_period=period, subject_name="늦은 시험",
+            exam_date=self.today + timedelta(days=9),
+        )
+        earlier_exam = Exam.objects.create(
+            exam_period=period, subject_name="빠른 시험",
+            exam_date=self.today + timedelta(days=2),
+        )
+        task = earlier_exam.study_tasks.create(
+            unit_name="1장", title="빠른 시험 작업", task_type="concept",
+            importance="high", depth="core", difficulty="normal",
+            estimated_min_minutes=30, estimated_max_minutes=50, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=100, planned_minutes=30,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=30, order=1,
+        )
+
+        data = build_calendar_context(period, target_date.year, target_date.month)
+        cell = self._find_cell(data["weeks"], target_date)
+        # 더 이른 시험(earlier_exam)의 작업이니 shade_index=0 이어야 한다
+        self.assertEqual(cell["tasks"][0]["shade_index"], 0)
+
+    def test_other_user_exam_period_not_used(self):
+        self._make_active_exam_period(user=self.other)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["exam_period"])
+
+    @staticmethod
+    def _find_cell(weeks, target_date):
+        for week in weeks:
+            for cell in week:
+                if cell["date"] == target_date:
+                    return cell
+        return None

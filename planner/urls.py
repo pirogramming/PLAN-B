@@ -11,4 +11,5 @@ urlpatterns = [
     path('daily-plans/finalize/', views.daily_plan_finalize, name='daily_plan_finalize'),
     path('', views.dashboard, name='dashboard'),
     path('progress/<int:item_id>/', views.progress_record, name='progress_record'),
+    path('calendar/', views.calendar, name='calendar'),
 ]
