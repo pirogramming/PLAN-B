@@ -1,0 +1,11 @@
+<div style="display:flex; align-items:center; justify-content:space-between; padding:18px 0 26px;">
+  <a href="{% url 'exams:period_list' %}" style="font-weight:800; font-size:15px; color:var(--neutral11); text-decoration:none; letter-spacing:.03em;">
+    PLAN B
+  </a>
+  <form method="post" action="{% url 'accounts:logout' %}" style="margin:0;">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-ghost" style="height:34px; padding:0 14px; font-size:12px;">
+      {{ request.user.nickname|default:request.user.username }} · 로그아웃
+    </button>
+  </form>
+</div>
