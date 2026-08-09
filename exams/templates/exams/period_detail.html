@@ -1,95 +1,94 @@
-{% extends "base.html" %}
-{% load static %}
+{% extends "exams/_exam_base.html" %}
 {% block title %}
 {{ period.title }} - PLAN B
 {% endblock %}
+{% block page_heading %}{{ period.title }}{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
-
-<div class="container period-detail-wrap">
-    <div class="crumb-text">
-        <a href="{% url 'exams:period_list' %}">PLAN B</a>
-        &nbsp;›&nbsp; {{ period.title }}
+{% block exam_content %}
+<div style="max-width:840px; margin:0 auto;">
+  <div class="page-head">
+    <div>
+      <h1>{{ period.title }}</h1>
+      <p class="sub">
+        {{ period.start_date|date:"n월 j일" }} ~
+        {{ period.end_date|date:"n월 j일" }}
+      </p>
     </div>
+    <a href="{% url 'exams:period_update' period.id %}" class="btn btn-secondary" style="margin-left:auto;">
+      기간 수정
+    </a>
+  </div>
 
-    <div class="period-header">
-        <div>
-            <div class="page-title">{{ period.title }}</div>
-            <div class="page-sub period-date-range">
-                {{ period.start_date|date:"n월 j일" }} ~
-                {{ period.end_date|date:"n월 j일" }}
-            </div>
+  <div class="card card-body period-avail-card">
+    <div>
+      <div class="period-avail-title">날짜별 공부 가능시간</div>
+      <div class="period-avail-caption">
+        총 <span class="num">{{ available_times|length }}</span>일 등록됨
+      </div>
+    </div>
+    <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-primary">
+      가능시간 입력하기
+    </a>
+  </div>
+
+  <div class="period-subject-header">
+    <div class="period-subject-count">
+      과목 ({{ exams|length }})
+    </div>
+    <a href="{% url 'exams:subject_create' period.id %}" class="btn btn-primary period-add-subject-btn">
+      + 과목 추가
+    </a>
+  </div>
+
+  {% if not exams %}
+  <div class="card card-body period-empty-card">
+    아직 등록된 과목이 없어요. 먼저 과목을 추가해주세요.
+  </div>
+  {% endif %}
+
+  {% for exam in exams %}
+  <div class="card card-body period-subject-card">
+    <div class="period-subject-top">
+      <div>
+        <div class="period-subject-name">{{ exam.subject_name }}</div>
+        <div class="period-subject-meta">
+          시험일 {{ exam.exam_date|date:"n월 j일" }} ·
+          우선순위 {{ exam.get_priority_display }}
         </div>
-        <a href="{% url 'exams:period_update' period.id %}" class="btn btn-ghost">
-            기간 수정
+      </div>
+      <div class="period-subject-actions">
+        <a href="{% url 'exams:subject_update' period.id exam.id %}"
+           class="btn btn-secondary period-small-btn">
+          수정
         </a>
+        <form method="post"
+              action="{% url 'exams:subject_delete' period.id exam.id %}"
+              onsubmit="return confirm('{{ exam.subject_name }} 과목을 삭제할까요?');"
+              class="period-inline-form">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-secondary period-small-btn period-delete-btn">
+            삭제
+          </button>
+        </form>
+      </div>
     </div>
 
-    <div class="card period-avail-card">
-        <div>
-            <div class="period-avail-title">날짜별 공부 가능시간</div>
-            <div class="period-avail-caption">
-                총 <span class="num">{{ available_times|length }}</span>일 등록됨
-            </div>
-        </div>
-        <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-brand">
-            가능시간 입력하기
-        </a>
+    <div class="period-subject-links">
+      <a href="{% url 'exams:material_create' exam.id %}" class="btn btn-secondary period-link-btn">
+        시험범위 등록
+      </a>
+      <a href="{% url 'exams:task_review' exam.id %}" class="btn btn-secondary period-link-btn">
+        학습 작업 확인
+      </a>
     </div>
-
-    <div class="period-subject-header">
-        <div class="period-subject-count">
-            과목 ({{ exams|length }})
-        </div>
-        <a href="{% url 'exams:subject_create' period.id %}" class="btn btn-brand period-add-subject-btn">
-            + 과목 추가
-        </a>
-    </div>
-
-    {% if not exams %}
-    <div class="card period-empty-card">
-        아직 등록된 과목이 없어요. 먼저 과목을 추가해주세요.
-    </div>
-    {% endif %}
-
-    {% for exam in exams %}
-    <div class="card period-subject-card">
-        <div class="period-subject-top">
-            <div>
-                <div class="period-subject-name">{{ exam.subject_name }}</div>
-                <div class="period-subject-meta">
-                    시험일 {{ exam.exam_date|date:"n월 j일" }} ·
-                    우선순위 {{ exam.get_priority_display }}
-                </div>
-            </div>
-            <div class="period-subject-actions">
-                <a href="{% url 'exams:subject_update' period.id exam.id %}" class="btn btn-ghost period-small-btn">
-                    수정
-                </a>
-                <form method="post" action="{% url 'exams:subject_delete' period.id exam.id %}"
-                    onsubmit="return confirm('{{ exam.subject_name }} 과목을 삭제할까요?');" class="period-inline-form">
-                    {% csrf_token %}
-                    <button type="submit" class="btn btn-ghost period-small-btn period-delete-btn">
-                        삭제
-                    </button>
-                </form>
-            </div>
-        </div>
-
-        <div class="period-subject-links">
-            <a href="{% url 'exams:material_create' exam.id %}" class="btn btn-ghost period-link-btn">
-                시험범위 등록
-            </a>
-            <a href="{% url 'exams:task_review' exam.id %}" class="btn btn-ghost period-link-btn">
-                학습 작업 확인
-            </a>
-        </div>
-    </div>
-    {% endfor %}
+  </div>
+  {% endfor %}
 </div>
 {% endblock %}
+
+{# available_times 요약은 아직 개수만 보여줌 — 더 자세한 요약(예: 채워진 날짜 비율)이
+   필요하면 이주헌/장희원한테 view에서 요약값을 context로 내려달라고 요청하면 됨. #}
