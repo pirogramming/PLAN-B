@@ -34,40 +34,6 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
 
-/* ---------- 캘린더 : 날짜 선택 ---------- */
-  const calDetail = document.getElementById('calDetail');
-  if (calDetail) {
-    const dateEl  = document.getElementById('calDetailDate');
-    const sumEl   = document.getElementById('calDetailSum');
-    const emptyEl = document.getElementById('calDetailEmpty');
-    const panes   = calDetail.querySelectorAll('.cal-pane');
- 
-    document.querySelectorAll('.js-day').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        const key = btn.dataset.date;
- 
-        document.querySelectorAll('.js-day').forEach(d => d.classList.remove('on'));
-        btn.classList.add('on');
- 
-        let found = null;
-        panes.forEach(function (pane) {
-          const match = pane.dataset.date === key;
-          pane.hidden = !match;
-          if (match) found = pane;
-        });
- 
-        const [, m, dd] = key.split('-').map(Number);
-        dateEl.textContent = m + '월 ' + dd + '일';
-        sumEl.textContent = '계획 ' + (btn.dataset.planned || 0) + '분 · 가능 ' + (btn.dataset.available || 0) + '분';
-        emptyEl.hidden = !!found;
-        if (!found) emptyEl.textContent = calDetail.dataset.emptyMsg;
- 
-        calDetail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      });
-    });
-  }
- 
-  
   /* ---------- 복구안 선택 ---------- */
   const recLabel = document.getElementById('recLabel');
   const previewBtn = document.getElementById('previewBtn');
