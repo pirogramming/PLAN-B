@@ -7,11 +7,12 @@ tzdata==2026.3
 # 환경변수 (.env) 관리 (SECRET_KEY, DB 설정 등)
 python-decouple==3.8
 
-# PDF 텍스트 추출 및 파싱 
-pdfplumber==0.11.10
-pdfminer.six==20260107
-pypdfium2==5.12.1
-pillow==12.3.0
+# PDF 텍스트 추출 (pypdfium2 + pytesseract OCR 폴백 파이프라인)
+pypdfium2>=4.30.0
+pytesseract>=0.3.13
+pillow>=12.3.0
+
+# 테스트 픽스처 생성용 (암호화 PDF 등 테스트 데이터 제작에만 사용, 프로덕션 코드에서는 미사용)
 pypdf==6.14.2
 
 # PDF 파싱 처리용 암호화 및 C 바인딩 암시적 의존성
@@ -20,7 +21,8 @@ cffi==2.1.0
 pycparser==3.0
 charset-normalizer==3.4.9
 
+# AI 분석 연동
 google-genai==2.16.0
 
-#소셜 로그인
+# 소셜 로그인
 django-allauth[socialaccount]==65.18.0
