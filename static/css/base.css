@@ -1,0 +1,35 @@
+/* 전역 안내 메시지 (Django messages) - 화면 맨 위 배너 형태 */
+.site-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 24px 0;
+}
+.site-message {
+  max-width: var(--container);
+  margin: 0 auto;
+  padding: 12px 18px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.site-message-success {
+  background: var(--judge1-bg);
+  color: var(--judge1);
+  border: 1px solid var(--judge1-line);
+}
+.site-message-error {
+  background: var(--judge3-bg);
+  color: var(--judge3);
+  border: 1px solid var(--judge3-line);
+}
+.site-message-warning {
+  background: var(--judge2-bg);
+  color: var(--judge2);
+  border: 1px solid var(--judge2-line);
+}
+.site-message-info {
+  background: var(--neutral2);
+  color: var(--neutral9);
+  border: 1px solid var(--neutral4);
+}

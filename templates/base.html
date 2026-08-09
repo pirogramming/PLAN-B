@@ -12,23 +12,24 @@
         href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 
   <link rel="stylesheet" href="{% static 'css/tokens.css' %}">
+  <link rel="stylesheet" href="{% static 'css/base.css' %}">
 
   {# 각자 화면 CSS는 여기에 넣읍시다 !! #}
   {% block extra_css %}{% endblock %}
 </head>
 <body>
 
-  {% block body %}
-    {% if messages %}
-    <div class="site-messages">
-      {% for message in messages %}
-      <div class="site-message site-message-{{ message.tags }}">
-        {{ message }}
-      </div>
-      {% endfor %}
+  {% if messages %}
+  <div class="site-messages">
+    {% for message in messages %}
+    <div class="site-message site-message-{{ message.tags }}">
+      {{ message }}
     </div>
-    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 
+  {% block body %}
     <div class="container">
       {% block content %}{% endblock %}
     </div>

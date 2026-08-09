@@ -13,4 +13,5 @@ urlpatterns = [
     path('progress/<int:item_id>/', views.progress_record, name='progress_record'),
     path("recovery/<uuid:group_id>/", views.recovery_compare, name="recovery_compare"),
     path("recovery/<int:plan_id>/preview/", views.recovery_preview, name="recovery_preview"),
+    path("recovery/<int:plan_id>/apply/", views.recovery_apply, name="recovery_apply"),
 ]
