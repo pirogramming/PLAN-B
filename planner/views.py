@@ -27,7 +27,6 @@ from planner.services.progress_recorder import (
     finalize_daily_plan,
     DailyPlanAlreadyFinalizedError,
 )
-from planner.services.calendar import build_calendar_context
 
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
@@ -397,35 +396,6 @@ def today(request):
         },
     })
     return render(request, 'planner/today.html', context)
-
-@login_required
-@require_http_methods(["GET"])
-def calendar(request):
-    exam_period = (
-        ExamPeriod.objects
-        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
-        .order_by('-created_at')
-        .first()
-    )
-
-    today_date = timezone.localdate()
-    year = int(request.GET.get('year', today_date.year))
-    month = int(request.GET.get('month', today_date.month))
-
-    prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
-    next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
-
-    context = {
-        'exam_period': exam_period,
-        'year': year,
-        'month': month,
-        'prev_year': prev_year,
-        'prev_month': prev_month,
-        'next_year': next_year,
-        'next_month': next_month,
-        **build_calendar_context(exam_period, year, month),
-    }
-    return render(request, 'planner/calendar.html', context)
 
 @login_required
 @require_http_methods(["POST"])
