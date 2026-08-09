@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}
+회원가입 - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="card auth-card">
+    <div class="page-title-sm">거의 다 됐어요</div>
+    <div class="page-sub">몇 가지만 더 확인할게요</div>
+
+    {% if form.non_field_errors %}
+    <div class="form-error-box">
+      {{ form.non_field_errors|striptags }}
+    </div>
+    {% endif %}
+
+    <form method="post">
+      {% csrf_token %}
+
+      {% for field in form %}
+      <div class="form-group">
+        <label class="form-label" for="{{ field.id_for_label }}">
+          {{ field.label }}
+        </label>
+        {{ field }}
+        {% if field.errors %}
+        <div class="field-error">
+          {{ field.errors|striptags }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+
+      <button type="submit" class="btn btn-brand btn-block" style="margin-top:8px;">
+        가입 완료
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}
