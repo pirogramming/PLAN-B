@@ -3429,8 +3429,8 @@ class RecoveryApplyViewTests(TestCase):
 
         self.assertRedirects(response, reverse("planner:dashboard"))
         self.core_focus.refresh_from_db()
-        # DISCARDED로 이미 넘어갔으니 여전히 APPLIED가 아니어야 함
-        self.assertNotEqual(self.core_focus.status, RecoveryPlanStatus.APPLIED)
+        # 첫 적용(maintain_volume) 시점에 이미 DISCARDED로 바뀐 상태가 유지돼야 함
+        self.assertEqual(self.core_focus.status, RecoveryPlanStatus.DISCARDED)
 
     # ── 8. 이미 처리된 복구안 적용 시 오류 메시지 ─────
     def test_already_processed_shows_error_message(self):

@@ -847,15 +847,13 @@ def recovery_preview(request, plan_id):
 @login_required
 @require_http_methods(["POST"])
 def recovery_apply(request, plan_id):
-    recovery_plan = (
+    recovery_plan = get_object_or_404(
         RecoveryPlan.objects
-        .filter(pk=plan_id, exam_period__user=request.user)
         .select_related("exam_period", "source_daily_plan")
-        .prefetch_related("items__study_task__exam")
-        .first()
+        .prefetch_related("items__study_task__exam"),
+        pk=plan_id,
+        exam_period__user=request.user,
     )
-    if recovery_plan is None:
-        raise Http404("복구안을 찾을 수 없습니다.")
 
     try:
         apply_recovery_plan(recovery_plan)
