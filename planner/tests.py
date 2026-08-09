@@ -1853,6 +1853,119 @@ class PlanGenerateFlowTests(TestCase):
             response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
         )
 
+class FeasibilitySubjectResultsTests(TestCase):
+    """
+    #90 feasibility() subject_results context 테스트.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="subject_results_tester",
+            email="subject_results@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="subject_results_other",
+            email="subject_results_other@example.com",
+            password="pass1234",
+        )
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="과목별 데이터 테스트 시험기간",
+            start_date=self.today,
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.client.login(username="subject_results@example.com", password="pass1234")
+
+    def _get(self):
+        return self.client.get(
+            reverse("planner:feasibility", kwargs={"period_id": self.exam_period.id})
+        )
+
+    def _subject_results_by_name(self, response):
+        return {s["subject_name"]: s for s in response.context["subject_results"]}
+
+    # ── 1. 확정된 작업만 집계되는지 (미확정 제외) ──
+    def test_only_confirmed_tasks_are_counted(self):
+        from exams.models import Exam, StudyTask
+
+        exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="데이터통신",
+            exam_date=self.today + timedelta(days=5),
+        )
+        StudyTask.objects.create(
+            exam=exam, title="확정 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        StudyTask.objects.create(
+            exam=exam, title="미확정 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=30, estimated_max_minutes=50, is_confirmed=False,
+        )
+
+        response = self._get()
+        results = self._subject_results_by_name(response)
+
+        self.assertEqual(results["데이터통신"]["task_count"], 1)
+        self.assertEqual(results["데이터통신"]["required_min_minutes"], 20)
+        self.assertEqual(results["데이터통신"]["required_recommended_minutes"], 40)
+
+    # ── 2. 작업이 아예 없는 과목도 0/0/0으로 나오는지 ──
+    def test_subject_with_no_tasks_shows_zero(self):
+        from exams.models import Exam
+
+        Exam.objects.create(
+            exam_period=self.exam_period, subject_name="운영체제",
+            exam_date=self.today + timedelta(days=8),
+        )
+
+        response = self._get()
+        results = self._subject_results_by_name(response)
+
+        self.assertEqual(results["운영체제"]["task_count"], 0)
+        self.assertEqual(results["운영체제"]["required_min_minutes"], 0)
+        self.assertEqual(results["운영체제"]["required_recommended_minutes"], 0)
+
+    # ── 3. exam_date 순으로 정렬되는지 ──
+    def test_sorted_by_exam_date(self):
+        from exams.models import Exam
+
+        Exam.objects.create(
+            exam_period=self.exam_period, subject_name="나중 시험",
+            exam_date=self.today + timedelta(days=9),
+        )
+        Exam.objects.create(
+            exam_period=self.exam_period, subject_name="먼저 시험",
+            exam_date=self.today + timedelta(days=2),
+        )
+
+        response = self._get()
+        names = [s["subject_name"] for s in response.context["subject_results"]]
+
+        self.assertEqual(names, ["먼저 시험", "나중 시험"])
+
+    # ── 4. 다른 사용자는 접근 자체가 404 (subject_results 노출 안 됨) ──
+    def test_other_user_cannot_access(self):
+        from exams.models import Exam
+
+        Exam.objects.create(
+            exam_period=self.exam_period, subject_name="비공개 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.client.logout()
+        self.client.login(username="subject_results_other@example.com", password="pass1234")
+
+        response = self._get()
+
+        self.assertEqual(response.status_code, 404)        
+
 class DashboardViewTests(TestCase):
     def setUp(self):
         from django.contrib.auth import get_user_model
