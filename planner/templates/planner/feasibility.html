@@ -19,7 +19,7 @@
       계획이 가능한지 확인해볼게요
     </div>
 
-    {% if result.status == 'possible' %}
+    {% if can_generate %}
     <form method="post" action="{% url 'planner:plan_generate' period_id=exam_period.id %}">
       {% csrf_token %}
       <button type="submit" class="btn btn-brand">
@@ -28,7 +28,7 @@
     </form>
     {% else %}
     <button type="button" class="btn" disabled
-            title="가능 판정일 때만 계획을 생성할 수 있어요">
+            title="가능 판정이면서 모든 과목의 작업이 확정됐을 때만 생성할 수 있어요">
       계획 생성하기
     </button>
     {% endif %}
@@ -81,7 +81,7 @@
     </div>
   </div>
 
-  {% if result.status != 'possible' %}
+  {% if not can_generate %}
   <div class="form-error-box">
     {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
   </div>

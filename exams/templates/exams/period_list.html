@@ -1,40 +1,40 @@
 {% extends "base.html" %}
 {% load static %}
 {% block title %}시험기간 목록 - PLAN B{% endblock %}
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
+{% block extra_css %}<link rel="stylesheet" href="{% static 'css/components.css' %}">{% endblock %}
 
 {% block content %}
 {% include "exams/_topbar.html" %}
 
 <div class="container" style="max-width:720px; margin:0 auto; padding-bottom:60px;">
-    <div class="page-title">내 시험기간</div>
-    <div class="page-sub">진행 중인 시험기간을 이어가거나 새로 시작해보세요</div>
+  <div class="page-title">내 시험기간</div>
+  <div class="page-sub">진행 중인 시험기간을 이어가거나 새로 시작해보세요</div>
 
-    {% if not has_periods %}
+  {% if not has_periods %}
     <div class="card" style="text-align:center; padding:48px 24px;">
-        <div style="font-size:14px; color:var(--neutral9); margin-bottom:18px;">아직 등록된 시험기간이 없어요</div>
-        <a href="{% url 'exams:period_create' %}" class="btn btn-brand">첫 시험기간 만들기</a>
+      <div style="font-size:14px; color:var(--neutral9); margin-bottom:18px;">아직 등록된 시험기간이 없어요</div>
+      <a href="{% url 'exams:period_create' %}" class="btn btn-brand">첫 시험기간 만들기</a>
     </div>
-    {% else %}
+  {% else %}
+    {% if not ongoing_periods %}
     <div style="display:flex; justify-content:flex-end; margin-bottom:14px;">
-        <a href="{% url 'exams:period_create' %}" class="btn btn-brand">+ 새 시험기간</a>
+      <a href="{% url 'exams:period_create' %}" class="btn btn-brand">+ 새 시험기간</a>
     </div>
+    {% endif %}
 
     {% if ongoing_periods %}
     <div style="font-size:13px; font-weight:700; color:var(--neutral9); margin-bottom:10px;">진행 중</div>
     {% for period in ongoing_periods %}
     <a href="{% url 'exams:period_detail' period.id %}" style="text-decoration:none;">
-        <div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
-            <div>
-                <div style="font-size:14px; font-weight:700; color:var(--neutral11);">{{ period.title }}</div>
-                <div style="font-size:12px; color:var(--neutral7); margin-top:4px;">{{ period.start_date|date:"n/j" }} ~
-                    {{ period.end_date|date:"n/j" }}</div>
-            </div>
-            <span class="badge {% if period.status == 'active' %}badge-possible{% else %}badge-risky{% endif %}">
-                {{ period.get_status_display }}
-            </span>
+      <div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <div style="font-size:14px; font-weight:700; color:var(--neutral11);">{{ period.title }}</div>
+          <div style="font-size:12px; color:var(--neutral7); margin-top:4px;">{{ period.start_date|date:"n/j" }} ~ {{ period.end_date|date:"n/j" }}</div>
         </div>
+        <span class="badge {% if period.status == 'active' %}badge-possible{% else %}badge-risky{% endif %}">
+          {{ period.get_status_display }}
+        </span>
+      </div>
     </a>
     {% endfor %}
     {% endif %}
@@ -43,19 +43,16 @@
     <div style="font-size:13px; font-weight:700; color:var(--neutral9); margin:20px 0 10px;">지난 시험기간</div>
     {% for period in completed_periods %}
     <a href="{% url 'exams:period_detail' period.id %}" style="text-decoration:none;">
-        <div class="card"
-            style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; opacity:.7;">
-            <div>
-                <div style="font-size:14px; font-weight:700; color:var(--neutral11);">{{ period.title }}</div>
-                <div style="font-size:12px; color:var(--neutral7); margin-top:4px;">{{ period.start_date|date:"n/j" }} ~
-                    {{ period.end_date|date:"n/j" }}</div>
-            </div>
-            <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">{{ period.get_status_display
-                }}</span>
+      <div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; opacity:.7;">
+        <div>
+          <div style="font-size:14px; font-weight:700; color:var(--neutral11);">{{ period.title }}</div>
+          <div style="font-size:12px; color:var(--neutral7); margin-top:4px;">{{ period.start_date|date:"n/j" }} ~ {{ period.end_date|date:"n/j" }}</div>
         </div>
+        <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">{{ period.get_status_display }}</span>
+      </div>
     </a>
     {% endfor %}
     {% endif %}
-    {% endif %}
+  {% endif %}
 </div>
 {% endblock %}
