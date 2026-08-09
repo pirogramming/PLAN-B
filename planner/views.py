@@ -381,9 +381,6 @@ def calendar(request):
         .first()
     )
 
-    if exam_period is None:
-        return render(request, 'planner/calendar.html', {'exam_period': None})
-
     today_date = timezone.localdate()
     year = int(request.GET.get('year', today_date.year))
     month = int(request.GET.get('month', today_date.month))

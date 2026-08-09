@@ -28,7 +28,7 @@ from planner.models import DailyPlan, DailyPlanItem
 PREVIEW_TASK_LIMIT = 3
 
 
-def build_calendar_context(exam_period, year: int, month: int) -> dict:
+def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_period may be None
     """
     캘린더 화면에 필요한 컨텍스트(주간 격자 + 날짜별 상세)를 계산한다.
 
@@ -57,37 +57,45 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:
     all_dates = [d for week in weeks_dates for d in week]
     min_date, max_date = min(all_dates), max(all_dates)
 
-    exams = list(
-        Exam.objects.filter(exam_period=exam_period).order_by("exam_date")
-    )
+    # exam_period가 없으면(아직 시험기간을 등록하지 않은 사용자) 격자만 비어있는
+    # 상태로 내려준다 - 아래 조회들은 전부 건너뛴다.
+    if exam_period is None:
+        exams = []
+        available_by_date = {}
+        daily_plans_by_date = {}
+        items_by_date: dict[datetime.date, list] = defaultdict(list)
+    else:
+        exams = list(
+            Exam.objects.filter(exam_period=exam_period).order_by("exam_date")
+        )
+        available_by_date = {
+            at.date: at.available_minutes
+            for at in AvailableTime.objects.filter(
+                exam_period=exam_period, date__range=(min_date, max_date),
+            )
+        }
+        daily_plans_by_date = {
+            dp.date: dp
+            for dp in DailyPlan.objects.filter(
+                exam_period=exam_period, date__range=(min_date, max_date),
+            )
+        }
+
+        items_by_date = defaultdict(list)
+        items = (
+            DailyPlanItem.objects
+            .filter(daily_plan__in=daily_plans_by_date.values())
+            .select_related("daily_plan", "study_task__exam", "progress_log")
+            .order_by("order")  # 배치 순서 그대로 미리보기에 반영
+        )
+        for item in items:
+            items_by_date[item.daily_plan.date].append(item)
+
     # 과목별 shade_index: 시험일 빠른 순으로 0, 1, 2...
     shade_index_by_subject = {
         exam.subject_name: i for i, exam in enumerate(exams)
     }
     exam_by_date = {exam.exam_date: exam.subject_name for exam in exams}
-
-    available_by_date = {
-        at.date: at.available_minutes
-        for at in AvailableTime.objects.filter(
-            exam_period=exam_period, date__range=(min_date, max_date),
-        )
-    }
-    daily_plans_by_date = {
-        dp.date: dp
-        for dp in DailyPlan.objects.filter(
-            exam_period=exam_period, date__range=(min_date, max_date),
-        )
-    }
-
-    items_by_date: dict[datetime.date, list] = defaultdict(list)
-    items = (
-        DailyPlanItem.objects
-        .filter(daily_plan__in=daily_plans_by_date.values())
-        .select_related("daily_plan", "study_task__exam", "progress_log")
-        .order_by("order")  # 배치 순서 그대로 미리보기에 반영
-    )
-    for item in items:
-        items_by_date[item.daily_plan.date].append(item)
 
     today = timezone.localdate()
 
@@ -126,9 +134,14 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:
                 for item in day_items[:PREVIEW_TASK_LIMIT]
             ]
 
+            in_period = (
+                exam_period is not None
+                and exam_period.start_date <= d <= exam_period.end_date
+            )
+
             week_cells.append({
                 "date": d,
-                "in_period": exam_period.start_date <= d <= exam_period.end_date,
+                "in_period": in_period,
                 "is_today": d == today,
                 "is_exam_day": d in exam_by_date,
                 "exam_subject": exam_by_date.get(d),
