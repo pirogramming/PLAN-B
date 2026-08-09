@@ -789,6 +789,28 @@ startxref
         extracted_text = extract_text_from_pdf(dummy_file)
         self.assertIn("Hello Plan B PDF Text Extraction", extracted_text)
 
+    def test_extract_text_encrypted_not_supported(self):
+        """pypdf 기반으로 실제 비밀번호가 걸린 암호화 PDF를 생성하여
+        pypdfium2가 암호화된 PDF 예외를 처리하는지 검증"""
+        import pypdf
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        # 빈 비밀번호는 pypdfium2가 자동으로 빈 암호로 열어버릴 수 있어
+        # "암호화 분기"가 아니라 "빈 페이지라 텍스트 없음" 분기로 우연히 통과할 위험이 있음.
+        # 실제 사용자 비밀번호를 걸어서 진짜 암호화 예외 분기를 검증한다.
+        writer.encrypt(user_password="secret_password", owner_password="secret_password")
+
+        pdf_buffer = io.BytesIO()
+        writer.write(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        dummy_file = SimpleUploadedFile("encrypted.pdf", pdf_buffer.read(), content_type="application/pdf")
+
+        with self.assertRaises(PdfExtractionError) as context:
+            extract_text_from_pdf(dummy_file)
+
+        self.assertIn("암호화된 PDF 파일은 지원하지 않습니다", str(context.exception))
+
     def test_extract_text_encrypted_with_empty_password(self):
         import pypdf
         writer = pypdf.PdfWriter()

@@ -205,10 +205,12 @@ def extract_text_from_pdf(
       암호화 여부 판별은 예외 메시지 문자열(password/encrypt) 매칭에 의존하므로,
       requirements.txt에서 pypdfium2 버전을 정확히 고정(pin)해서 사용해야 한다.
       버전을 올릴 때는 tests.py의 test_extract_text_encrypted_not_supported가
-      여전히 통과하는지 반드시 확인할 것 (메시지 포맷이 바뀌면 이 분기가 조용히 깨질 수 있음).
+      여전히 통과하는지 반드시 확인할 것.
     - 페이지별로 텍스트 레이어를 우선 확인한다. 텍스트가 있어도 이상문자 비율이 높으면
-      (예: 폰트 서브셋이 깨져 알파벳/숫자가 엉뚱한 문자로 매핑된 경우) 텍스트 레이어를
-      신뢰하지 않고 OCR로 폴백한다 — 단순 글자 수 기준만으로는 이런 "조용한 오염"을 못 잡음.
+      OCR로 폴백한다. 단, 이 경우 텍스트 레이어 결과를 완전히 버리지 않고 fallback으로
+      들고 있다가, OCR이 불가능하거나(라이브러리 미설치) OCR 결과가 실제로 비어있는
+      경우에는 (깨졌더라도) 원본 텍스트 레이어 결과를 그대로 사용한다 — 아무 것도
+      안 남기는 것보다는, 이상 문자가 섞여 있더라도 원본 텍스트가 있는 편이 낫다.
     - OCR: confidence + 이상문자 비율(anomaly_ratio) 둘 다 나쁠 때만 전처리 재시도
     - 슬라이드 상단 영역은 별도 OCR로 제목을 우선 확보해 본문 앞에 덧붙임
     - 페이지 경계를 "--- 페이지 N ---" 마커로 표시해 출처 추적 가능
@@ -237,6 +239,9 @@ def extract_text_from_pdf(
         n_pages = len(pdf)
         page_texts: list[str] = [""] * n_pages
         ocr_needed: list[int] = []
+        # anomaly 때문에 OCR로 넘어간 페이지의 원본 텍스트 레이어 결과.
+        # OCR이 실패/비활성이거나 빈 결과를 낼 경우 이걸로 되돌린다.
+        fallback_texts: dict[int, str] = {}
 
         for index in range(n_pages):
             try:
@@ -249,8 +254,6 @@ def extract_text_from_pdf(
                 logger.warning(f"PDF {index + 1}페이지 텍스트 추출 실패: {e}")
                 text = ""
 
-            # 글자 수가 충분해도 이상문자 비율이 높으면 텍스트 레이어를 신뢰하지 않는다.
-            # (폰트 매핑이 깨진 PDF는 길이는 정상인데 내용이 전부 깨진 문자인 경우가 있음)
             text_anomaly = _anomaly_ratio(text) if text else 1.0
             is_text_too_short = len(text) < min_chars_per_page
             is_text_corrupted = bool(text) and text_anomaly > ocr_anomaly_threshold
@@ -259,8 +262,9 @@ def extract_text_from_pdf(
                 if is_text_corrupted and not is_text_too_short:
                     logger.info(
                         f"page {index + 1}: 텍스트 레이어는 있으나 이상문자 비율 높음 "
-                        f"(anomaly={text_anomaly:.2f}) → OCR 폴백"
+                        f"(anomaly={text_anomaly:.2f}) → OCR 폴백 (원본은 fallback으로 보존)"
                     )
+                    fallback_texts[index] = text
                 ocr_needed.append(index)
             else:
                 page_texts[index] = text
@@ -273,6 +277,9 @@ def extract_text_from_pdf(
                     f"{len(ocr_needed)}개 페이지에 텍스트 레이어가 부족하거나 손상되었지만 "
                     "OCR 라이브러리가 설치되어 있지 않아 건너뜁니다."
                 )
+                # OCR을 아예 못 돌리는 경우, anomaly로 넘어온 페이지는 원본이라도 살린다.
+                for idx, fallback in fallback_texts.items():
+                    page_texts[idx] = fallback
             else:
                 logger.info(f"{len(ocr_needed)}개 페이지 OCR 처리 시작: {[i + 1 for i in ocr_needed]}")
                 with ThreadPoolExecutor(max_workers=ocr_max_workers) as executor:
@@ -286,7 +293,19 @@ def extract_text_from_pdf(
                     ]
                     for future in as_completed(futures):
                         idx, text, conf, anomaly = future.result()
-                        page_texts[idx] = text
+
+                        if text.strip():
+                            # OCR이 뭔가 유효한 결과를 냈으면 그걸 채택
+                            page_texts[idx] = text
+                        elif idx in fallback_texts:
+                            # OCR이 완전히 빈 결과를 냈다면, 깨졌더라도 원본 텍스트 레이어로 복원
+                            logger.info(
+                                f"page {idx + 1}: OCR 결과가 비어있어 원본 텍스트 레이어로 복원 "
+                                f"(anomaly 높지만 완전 공백보다는 나음)"
+                            )
+                            page_texts[idx] = fallback_texts[idx]
+                        # 둘 다 없으면 page_texts[idx]는 빈 문자열 그대로 유지
+
                         page_conf_log[idx] = (conf, anomaly)
 
                 if page_conf_log:
