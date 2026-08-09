@@ -824,3 +824,21 @@
   color: var(--neutral9);
   border: 1px solid var(--neutral4);
 }
+
+/* 좀비(is_stale) 분석 상태 UI */
+.auto-loading-stale {
+  display: none;
+  margin-top: 10px;
+}
+.auto-loading-stale.show {
+  display: block;
+}
+.auto-loading-stale-text {
+  font-size: 13px;
+  color: var(--neutral9);
+  margin-bottom: 14px;
+  text-align: center;
+}
+.auto-loading-stale .btn {
+  margin-bottom: 8px;
+}
