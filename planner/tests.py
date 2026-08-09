@@ -2908,8 +2908,6 @@ class RecoveryCompareViewTests(TestCase):
 
 class CalendarViewTests(TestCase):
     """
-    캘린더 화면(planner:calendar) 테스트.
-    신예원 님과 확정한 스펙(월 이동은 페이지 새로고침, day_details 사전 계산)을
     기준으로 View + build_calendar_context()를 검증한다.
     """
 
@@ -3111,6 +3109,7 @@ class CalendarViewTests(TestCase):
         self.assertIsNone(response.context["exam_period"])
 
     @staticmethod
+
     def _find_cell(weeks, target_date):
         for week in weeks:
             for cell in week:

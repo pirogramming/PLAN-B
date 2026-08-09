@@ -12,4 +12,5 @@ urlpatterns = [
     path('', views.dashboard, name='dashboard'),
     path('progress/<int:item_id>/', views.progress_record, name='progress_record'),
     path('calendar/', views.calendar, name='calendar'),
+    path("recovery/<uuid:group_id>/", views.recovery_compare, name="recovery_compare"),
 ]
