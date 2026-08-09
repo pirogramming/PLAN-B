@@ -36,6 +36,10 @@ from planner.services.recovery import (
     RecoveryPlanStaleError,
     RecoveryPlanInvalidDataError,
 )
+import logging
+
+logger = logging.getLogger(__name__)
+
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
 
@@ -869,6 +873,18 @@ def recovery_apply(request, plan_id):
         )
     except RecoveryPlanInvalidDataError:
         messages.error(request, "복구안 데이터에 문제가 있어 적용할 수 없습니다.")
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "복구안 적용 중 예상치 못한 오류 (plan_id=%s)", plan_id
+        )
+        messages.error(
+            request, "복구안 적용 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
         return redirect(
             "planner:recovery_compare",
             group_id=recovery_plan.recovery_group_id,

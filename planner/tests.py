@@ -3522,3 +3522,21 @@ class RecoveryApplyViewTests(TestCase):
         self.client.logout()
         response = self._apply(self.maintain_volume.id)
         self.assertEqual(response.status_code, 302)
+
+    # ── 15. 예상 못 한 예외도 500 대신 안내 메시지로 처리 ──
+    @patch(
+        "planner.views.apply_recovery_plan",
+        side_effect=ValueError("예상 못 한 DB 오류"),
+    )
+    def test_unexpected_exception_redirects_instead_of_500(self, _mock):
+        response = self._apply(self.maintain_volume.id)
+
+        self.assertRedirects(
+            response,
+            reverse("planner:recovery_compare",
+                    kwargs={"group_id": self.maintain_volume.recovery_group_id}),
+        )
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("오류가 발생했습니다" in str(m) for m in messages_list)
+        )
