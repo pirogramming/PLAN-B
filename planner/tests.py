@@ -4,7 +4,9 @@ from django.utils import timezone as django_timezone
 from unittest.mock import patch
 from planner.services.recovery import RecoveryPlanInvalidDataError
 from django.urls import reverse
-
+import uuid
+from planner.models import RecoveryPlanItem
+from core.choices import RecoveryPlanStatus, RecoveryActionType
 from planner.services.progress_recorder import (
     finalize_daily_plan,
     record_progress,
@@ -2672,3 +2674,234 @@ class ProgressRecordViewTests(TestCase):
         self._post(self.item.id, {"status": "done", "actual_minutes": 60})
         self.exam.refresh_from_db()
         self.assertNotEqual(self.exam.speed_factor, 1.0)
+
+class RecoveryCompareViewTests(TestCase):
+    """
+    #81 recovery_compare View 테스트.
+
+    RecoveryPlan/RecoveryPlanItem을 직접 만들어서 View 단위로만 검증한다
+    (generate_recovery_options()를 거치는 통합 검증은 FinalizeDailyPlanTests가 이미 담당).
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="recovery_compare_tester",
+            email="recovery_compare@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="recovery_compare_other",
+            email="recovery_compare_other@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="recovery_compare@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구안 비교 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=7),
+            speed_factor=1.0,
+        )
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            title="복구 대상 작업",
+            importance="low",
+            depth="optional",
+            task_type="practice",
+            difficulty="normal",
+            order=1,
+            estimated_min_minutes=30,
+            estimated_max_minutes=60,
+            is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=self.today,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+
+    def _make_recovery_plan(self, exam_period, recovery_type,
+                             recovery_group_id, status=RecoveryPlanStatus.PENDING,
+                             with_reschedule_item=True):
+        plan = RecoveryPlan.objects.create(
+            exam_period=exam_period,
+            source_daily_plan=self.daily_plan,
+            recovery_group_id=recovery_group_id,
+            recovery_type=recovery_type,
+            status=status,
+        )
+        if with_reschedule_item:
+            RecoveryPlanItem.objects.create(
+                recovery_plan=plan,
+                study_task=self.task,
+                original_date=self.today,
+                changed_date=self.today + timedelta(days=1),
+                action_type=RecoveryActionType.RESCHEDULE,
+                remaining_minutes=60,
+                reason="테스트용 재배치",
+            )
+        return plan
+
+    def _make_both_plans(self, exam_period=None, group_id=None):
+        group_id = group_id or uuid.uuid4()
+        exam_period = exam_period or self.exam_period
+        maintain = self._make_recovery_plan(
+            exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+        )
+        core_focus = self._make_recovery_plan(
+            exam_period, RecoveryType.CORE_FOCUS, group_id,
+        )
+        return group_id, maintain, core_focus
+
+    def _get(self, group_id):
+        return self.client.get(
+            reverse("planner:recovery_compare", kwargs={"group_id": group_id})
+        )
+
+    # ── 1. 정상 케이스: 두 복구안 모두 조회 ──────────────────
+    def test_returns_both_plans_when_both_exist(self):
+        group_id, maintain, core_focus = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        plans = response.context["plans"]
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME)
+        self.assertEqual(plans[1]["recovery_type"], RecoveryType.CORE_FOCUS)
+
+    # ── 2. 한쪽 복구안만 존재해도 200 렌더 ─────────────────────
+    def test_returns_maintain_only_when_core_focus_missing(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.MAINTAIN_VOLUME
+        )
+
+    def test_returns_core_focus_only_when_maintain_missing(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(self.exam_period, RecoveryType.CORE_FOCUS, group_id)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["plans"]), 1)
+        self.assertEqual(
+            response.context["plans"][0]["recovery_type"], RecoveryType.CORE_FOCUS
+        )
+
+    # ── 3. 그룹 자체가 존재하지 않으면 404 ─────────────────
+    def test_404_when_group_does_not_exist(self):
+        response = self._get(uuid.uuid4())
+        self.assertEqual(response.status_code, 404)
+
+    # ── 4. 다른 사용자의 복구안은 조회 불가 ─────────────────
+    def test_404_when_owned_by_other_user(self):
+        from exams.models import ExamPeriod
+
+        other_period = ExamPeriod.objects.create(
+            user=self.other_user,
+            title="다른 사용자 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        group_id, _, _ = self._make_both_plans(exam_period=other_period)
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 404)
+
+    # ── 5. PENDING이 아닌 복구안(이미 처리됨)은 비교 대상에서 제외 ──
+    def test_404_when_plans_already_applied(self):
+        group_id = uuid.uuid4()
+        self._make_recovery_plan(
+            self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+            status=RecoveryPlanStatus.APPLIED,
+        )
+        self._make_recovery_plan(
+            self.exam_period, RecoveryType.CORE_FOCUS, group_id,
+            status=RecoveryPlanStatus.DISCARDED,
+        )
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 404)
+
+    # ── 6. Fit Bar가 두 카드 공통 axis_max를 쓰는지 확인 ─────
+    def test_fit_bar_shares_axis_max_across_plans(self):
+        group_id, maintain, core_focus = self._make_both_plans()
+
+        response = self._get(group_id)
+        plans = response.context["plans"]
+
+        self.assertEqual(plans[0]["axis_max"], plans[1]["axis_max"])
+        self.assertGreater(plans[0]["axis_max"], 0)
+
+    # ── 7. 제외된 작업이 excluded_tasks에 정확히 반영되는지 ──
+    def test_excluded_task_appears_in_core_focus_only(self):
+        group_id = uuid.uuid4()
+        maintain = self._make_recovery_plan(
+            self.exam_period, RecoveryType.MAINTAIN_VOLUME, group_id,
+        )
+        core_focus = RecoveryPlan.objects.create(
+            exam_period=self.exam_period,
+            source_daily_plan=self.daily_plan,
+            recovery_group_id=group_id,
+            recovery_type=RecoveryType.CORE_FOCUS,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        RecoveryPlanItem.objects.create(
+            recovery_plan=core_focus,
+            study_task=self.task,
+            original_date=self.today,
+            changed_date=None,
+            action_type=RecoveryActionType.EXCLUDE,
+            remaining_minutes=60,
+            reason="핵심 집중형: 우선순위 낮은 작업 단계적 제외",
+        )
+
+        response = self._get(group_id)
+        plans_by_type = {p["recovery_type"]: p for p in response.context["plans"]}
+
+        self.assertEqual(plans_by_type[RecoveryType.MAINTAIN_VOLUME]["excluded_count"], 0)
+        self.assertEqual(plans_by_type[RecoveryType.CORE_FOCUS]["excluded_count"], 1)
+        self.assertEqual(
+            plans_by_type[RecoveryType.CORE_FOCUS]["excluded_tasks"][0]["title"],
+            self.task.title,
+        )
+
+    # ── 8. exam_period가 context에 있는지 (사이드바 렌더링용) ──
+    def test_exam_period_in_context(self):
+        group_id, _, _ = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.context["exam_period"], self.exam_period)
+
+    # ── 9. 로그인 안 하면 로그인 페이지로 리다이렉트 ─────────
+    def test_requires_login(self):
+        self.client.logout()
+        group_id, _, _ = self._make_both_plans()
+
+        response = self._get(group_id)
+
+        self.assertEqual(response.status_code, 302)
