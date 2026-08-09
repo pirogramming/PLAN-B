@@ -5,6 +5,10 @@ from planner.services.progress_recorder import record_progress, FinalizedDailyPl
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.http import JsonResponse
+from django.http import Http404
+from core.choices import RecoveryActionType, RecoveryType
+from planner.services.recovery import get_future_available_capacity
+from planner.services.time_estimator import estimate_task_minutes
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
@@ -515,4 +519,165 @@ def daily_plan_finalize(request):
             result["auto_marked_not_done_count"]
         ),
     })
-    
+
+def _fit_bar_context(min_minutes, max_minutes, available_minutes, axis_max):
+    min_pct = round(min_minutes / axis_max * 100, 1)
+    max_pct = round(max_minutes / axis_max * 100, 1)
+    return {
+        "min_pct": min_pct,
+        "band_pct": round(max_pct - min_pct, 1),
+        "mark_pct": round(min(available_minutes / axis_max * 100, 100), 1),
+        "need_label_pct": round((min_pct + max_pct) / 2, 1),
+        "min_minutes": min_minutes,
+        "max_minutes": max_minutes,
+        "available_minutes": available_minutes,
+        "axis_max": round(axis_max),
+    }
+
+
+def _item_min_max_minutes(item):
+    task = item.study_task
+    est_min, est_max = estimate_task_minutes(
+        task.task_type, task.difficulty, task.exam.speed_factor
+    )
+    if est_max == 0:
+        return 0, item.remaining_minutes
+    ratio = est_min / est_max
+    return round(item.remaining_minutes * ratio), item.remaining_minutes
+
+
+def _plan_totals(recovery_plan):
+    items = list(recovery_plan.items.all())
+    reschedule_items = [i for i in items if i.action_type == RecoveryActionType.RESCHEDULE]
+    excluded_items = [i for i in items if i.action_type == RecoveryActionType.EXCLUDE]
+
+    min_total = max_total = 0
+    for item in reschedule_items:
+        mn, mx = _item_min_max_minutes(item)
+        min_total += mn
+        max_total += mx
+
+    return {
+        "reschedule_items": reschedule_items,
+        "excluded_items": excluded_items,
+        "min_total": min_total,
+        "max_total": max_total,
+    }
+
+
+def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
+    min_total, max_total = totals["min_total"], totals["max_total"]
+    excluded_items = totals["excluded_items"]
+    reschedule_items = totals["reschedule_items"]
+
+    if available_minutes >= max_total:
+        status, status_label, shortage = "ok", "지금 가능", 0
+    elif available_minutes >= min_total:
+        status, status_label, shortage = "warn", "추가 시간 필요", max_total - available_minutes
+    else:
+        status, status_label, shortage = "bad", "적용 불가", min_total - available_minutes
+
+    distinct_days = {i.changed_date for i in reschedule_items if i.changed_date}
+    daily_average_minutes = round(max_total / len(distinct_days)) if distinct_days else None
+
+    type_label = "분량 유지형" if recovery_plan.recovery_type == RecoveryType.MAINTAIN_VOLUME else "핵심 집중형"
+    desc = (
+        "작업을 빼지 않고 남은 날짜에 다시 배치합니다."
+        if recovery_plan.recovery_type == RecoveryType.MAINTAIN_VOLUME
+        else "우선순위가 낮은 작업부터 제외하고 남은 날짜에 배치합니다."
+    )
+
+    return {
+        "id": recovery_plan.id,
+        "recovery_type": recovery_plan.recovery_type,
+        "type_label": type_label,
+        "summary": desc,
+        "feasibility_status": status,
+        "feasibility_status_label": status_label,
+        "excluded_count": len(excluded_items),
+        "excluded_minutes": sum(i.remaining_minutes for i in excluded_items),
+        "total_minutes": max_total,
+        "daily_average_minutes": daily_average_minutes,
+        "daily_diff": None,
+        "extra_minutes_needed": shortage,
+        "excluded_tasks": [
+            {
+                "subject_name": i.study_task.exam.subject_name,
+                "title": i.study_task.title,
+                "depth": i.study_task.depth,
+                "importance": i.study_task.importance,
+                "minutes": i.remaining_minutes,
+            }
+            for i in excluded_items
+        ],
+        **_fit_bar_context(min_total, max_total, available_minutes, axis_max),
+    }
+
+def _speed_added_minutes(items):
+    added = 0
+    for item in items:
+        task = item.study_task
+        _base_min, base_max = estimate_task_minutes(task.task_type, task.difficulty, 1.0)
+        _real_min, real_max = estimate_task_minutes(task.task_type, task.difficulty, task.exam.speed_factor)
+        added += max(real_max - base_max, 0)
+    return added
+
+@login_required
+@require_http_methods(["GET"])
+def recovery_compare(request, group_id):
+    plans = list(
+        RecoveryPlan.objects
+        .filter(
+            recovery_group_id=group_id,
+            exam_period__user=request.user,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        .select_related("exam_period", "source_daily_plan")
+        .prefetch_related("items__study_task__exam")
+    )
+
+    if not plans:
+        raise Http404("복구안을 찾을 수 없습니다.")
+
+    order = {RecoveryType.MAINTAIN_VOLUME: 0, RecoveryType.CORE_FOCUS: 1}
+    plans.sort(key=lambda p: order.get(p.recovery_type, 99))
+
+    exam_period = plans[0].exam_period
+    source_daily_plan = plans[0].source_daily_plan
+    future_capacity = get_future_available_capacity(exam_period, source_daily_plan.date)
+    available_minutes = sum(item.available_minutes for item in future_capacity)
+
+    totals_by_plan = {p.id: _plan_totals(p) for p in plans}
+    axis_max = max(
+        available_minutes,
+        *(t["max_total"] for t in totals_by_plan.values()),
+        1,
+    ) * 1.15
+
+    plan_contexts = [
+        _build_plan_context(p, totals_by_plan[p.id], available_minutes, axis_max)
+        for p in plans
+    ]
+
+    representative_id = next(
+        (p.id for p in plans if p.recovery_type == RecoveryType.MAINTAIN_VOLUME),
+        plans[0].id,
+    )
+    rep_totals = totals_by_plan[representative_id]
+    rep_all_items = rep_totals["reschedule_items"] + rep_totals["excluded_items"]
+
+    reason = {
+        "headline": "오늘 계획한 학습을 다 마치지 못했습니다",
+        "detail": f"{len(rep_all_items)}개 작업, {sum(i.remaining_minutes for i in rep_all_items)}분이 남아 계획을 다시 세워야 합니다.",
+        "remaining_minutes": sum(i.remaining_minutes for i in rep_all_items),
+        "remaining_count": len(rep_all_items),
+        "speed_added_minutes": _speed_added_minutes(rep_all_items),
+        "available_minutes": available_minutes,
+        "available_days": len({item.date for item in future_capacity}),
+    }
+
+    return render(request, "planner/recovery_compare.html", {
+        "exam_period": exam_period,
+        "plans": plan_contexts,
+        "reason": reason,
+    })
