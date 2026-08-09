@@ -220,6 +220,12 @@ function checkStatusAndAct() {
 }
 
 function showStaleState(canRetry) {
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+    stuckTimer = null;
+  }
+  document.getElementById('auto-loading-stuck').classList.remove('show');
+
   document.getElementById('auto-loading-overlay').classList.add('open');
   document.getElementById('auto-loading-spinner').style.display = 'none';
   document.getElementById('auto-loading-text').textContent = '분석이 멈췄어요';
