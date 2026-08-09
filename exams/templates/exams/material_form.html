@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% load static exam_extras %}
+{% block title %}
+시험범위 등록 - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
+
+{% block content %}
+{% include "exams/_topbar.html" %}
+{% get_period_exams exam.exam_period_id as period_exams %}
+
+<div class="container material-form-wrap">
+  <div class="crumb-text">
+    PLAN B &nbsp;›&nbsp; 시험범위 등록
+  </div>
+  <div class="page-title">
+    시험범위 등록하기
+  </div>
+  <div class="page-sub">
+    과목별 시험범위를 알려주세요
+  </div>
+
+  <div class="tabbar">
+    {% for e in period_exams %}
+    <a class="tab {% if e.id == exam.id %}active{% endif %}"
+       href="{% url 'exams:material_create' e.id %}">
+      {{ e.subject_name }}
+    </a>
+    {% endfor %}
+  </div>
+
+  {% if form.non_field_errors %}
+  <div class="form-error-box">
+    {{ form.non_field_errors|striptags }}
+  </div>
+  {% endif %}
+  {% if form.title.errors or form.material_type.errors %}
+  <div class="form-error-box">
+    {{ form.title.errors|striptags }}
+    {{ form.material_type.errors|striptags }}
+  </div>
+  {% endif %}
+
+  <div class="card material-form-card">
+    <div class="tabbar" data-method-tabs>
+      <button type="button" class="tab active" data-target="pdf-panel">
+        PDF 업로드
+      </button>
+      <button type="button" class="tab" data-target="text-panel">
+        텍스트 입력
+      </button>
+    </div>
+
+    <form method="post" enctype="multipart/form-data" novalidate id="material-form">
+      {% csrf_token %}
+
+      <div class="form-group" style="display:none;">
+        {{ form.title }}
+      </div>
+      <div class="form-group" style="display:none;">
+        {{ form.material_type }}
+      </div>
+
+      {% if form.file.errors %}
+      <div class="form-error-box material-upload-error">
+        {{ form.file.errors|striptags }}
+      </div>
+      {% endif %}
+
+      <div id="pdf-panel" class="material-upload-panel">
+        <label for="{{ form.file.id_for_label }}"
+               class="material-upload-box{% if form.file.errors %} error{% endif %}">
+          <div class="material-upload-icon">＋</div>
+          <div class="material-upload-text">
+            파일을 끌어다 놓거나 클릭해서 업로드
+          </div>
+        </label>
+        {{ form.file }}
+        <div class="material-upload-hint">
+          텍스트 추출이 가능한 PDF만 지원돼요 (최대 20MB)
+        </div>
+      </div>
+
+      <div id="text-panel" class="material-upload-panel" style="display:none;">
+        {{ form.extracted_text }}
+        {% if form.extracted_text.errors %}
+        <div class="field-error">
+          {{ form.extracted_text.errors|striptags }}
+        </div>
+        {% endif %}
+      </div>
+
+      <button type="submit" class="btn btn-brand btn-block material-submit-btn" id="analyze-submit-btn">
+        분석 시작
+      </button>
+    </form>
+  </div>
+</div>
+
+<div id="loading-overlay" class="auto-loading-overlay">
+  <div class="card auto-loading-box">
+    <div class="auto-loading-spinner"></div>
+    <div class="auto-loading-text">파일을 업로드하고 있어요</div>
+    <div class="auto-loading-sub">잠시만 기다려주세요</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('[data-method-tabs] .tab');
+  var typeInput = document.getElementById('{{ form.material_type.id_for_label }}');
+
+  /* 탭을 한 번도 안 눌러도 기본값(pdf)이 확실히 들어가게 처리 */
+  if (typeInput && !typeInput.value) {
+    typeInput.value = 'pdf';
+  }
+
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      var isPdf = tab.dataset.target === 'pdf-panel';
+      document.getElementById('pdf-panel').style.display = isPdf ? '' : 'none';
+      document.getElementById('text-panel').style.display = isPdf ? 'none' : '';
+      if (typeInput) {
+        typeInput.value = isPdf ? 'pdf' : 'text';
+      }
+    });
+  });
+
+  var fileInput = document.getElementById('{{ form.file.id_for_label }}');
+  var uploadText = document.querySelector('.material-upload-text');
+  if (fileInput) {
+    fileInput.addEventListener('change', function () {
+      if (fileInput.files[0] && uploadText) {
+        uploadText.textContent = fileInput.files[0].name;
+      }
+    });
+  }
+
+  var titleInput = document.getElementById('{{ form.title.id_for_label }}');
+  if (titleInput && !titleInput.value) {
+    titleInput.value = '{{ exam.subject_name }} 시험범위';
+  }
+})();
+
+document.getElementById('material-form').addEventListener('submit', function () {
+  document.getElementById('loading-overlay').classList.add('open');
+});
+</script>
+{% endblock %}

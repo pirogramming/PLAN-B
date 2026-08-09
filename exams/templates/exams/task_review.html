@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% load static exam_extras %}
+{% block title %}
+학습 작업 - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
+
+{% block content %}
+{% include "exams/_topbar.html" %}
+{% get_period_exams exam.exam_period_id as period_exams %}
+
+<div class="container task-review-wrap">
+  <div class="crumb-text">
+    PLAN B &nbsp;›&nbsp; 학습 작업
+  </div>
+
+  <div class="task-review-header">
+    <div>
+      <div class="page-title" style="margin-bottom:2px;">
+        학습 작업
+      </div>
+      <div class="page-sub" style="margin-bottom:0;">
+        {{ exam.subject_name }} · 총 {{ formset.forms|length }}개
+      </div>
+    </div>
+    <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-ghost">
+      + 작업 추가하기
+    </a>
+  </div>
+
+  <div class="task-review-body">
+    <div class="task-nav-col">
+      <div class="card task-nav-card">
+        <div class="task-nav-title">과목</div>
+        {% for e in period_exams %}
+        <a href="{% url 'exams:task_review' e.id %}"
+           class="nav-row-link{% if e.id == exam.id %} active{% endif %}">
+          <span>{{ e.subject_name }}</span>
+          <span class="num" style="color:var(--neutral7);">
+            {{ e.study_tasks.count }}개
+          </span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="task-list-col">
+      {% if formset.non_form_errors %}
+      <div class="form-error-box">
+        {{ formset.non_form_errors|striptags }}
+      </div>
+      {% endif %}
+
+      <form method="post" novalidate id="task-formset">
+        {% csrf_token %}
+        {{ formset.management_form }}
+
+        {% if not formset.forms %}
+        <div class="card task-empty-card">
+          아직 학습 작업이 없어요. 시험범위 등록 화면에서
+          AI 분석을 먼저 실행하거나, 직접 추가해주세요.
+        </div>
+        {% endif %}
+
+        {% for form in formset %}
+        <div class="card task-item-card">
+          {{ form.id }}
+
+          <div class="task-item-top">
+            <div class="task-unit-label">
+              {{ form.instance.unit_name|default:"단원 미지정" }}
+            </div>
+            {% if form.instance.is_confirmed %}
+            <span class="badge badge-possible">확정됨</span>
+            {% endif %}
+          </div>
+
+          {# 단원명: 읽기 전용 — 값은 그대로 formset에 전송되지만 수정은 못 하게 처리 #}
+          <input
+            type="text"
+            name="{{ form.unit_name.html_name }}"
+            id="{{ form.unit_name.id_for_label }}"
+            value="{{ form.instance.unit_name|default:'' }}"
+            class="form-control task-readonly-input"
+            readonly
+          >
+
+          <div class="task-field-group">
+            <label class="form-label">작업명</label>
+            {{ form.title }}
+            {% if form.title.errors %}
+            <div class="field-error">
+              {{ form.title.errors|striptags }}
+            </div>
+            {% endif %}
+          </div>
+
+          <div class="task-select-row">
+            <div class="task-select-item">
+              <label class="form-label">작업 유형</label>
+              {{ form.task_type }}
+            </div>
+            <div class="task-select-item">
+              <label class="form-label">중요도</label>
+              {{ form.importance }}
+            </div>
+            <div class="task-select-item">
+              <label class="form-label">깊이</label>
+              {{ form.depth }}
+            </div>
+            <div class="task-select-item">
+              <label class="form-label">난이도</label>
+              {{ form.difficulty }}
+            </div>
+          </div>
+
+          <div class="task-item-footer">
+            <div class="task-footer-left">
+              <span class="task-time-pill num">
+                예상 {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
+              </span>
+            </div>
+            <button
+              type="button"
+              class="btn btn-ghost btn-delete-task"
+              data-task-label="{{ form.instance.title }}"
+            >
+              삭제
+            </button>
+          </div>
+
+          {% if form.DELETE %}
+          <div class="task-delete-hidden">
+            {{ form.DELETE }}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+
+        {% if formset.forms %}
+        <div class="task-action-row">
+          <button
+            type="submit"
+            name="action"
+            value="save"
+            class="btn btn-brand"
+            id="save-action-btn"
+          >
+            변경사항 저장
+          </button>
+          <button
+            type="submit"
+            name="action"
+            value="confirm"
+            class="btn task-confirm-btn"
+          >
+            모두 확정하고 다음으로
+          </button>
+        </div>
+        {% endif %}
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="delete-confirm-modal">
+  <div class="modal delete-confirm-box">
+    <div class="delete-confirm-title">
+      이 작업을 삭제할까요?
+    </div>
+    <div class="delete-confirm-body" id="delete-confirm-target">
+    </div>
+    <div class="delete-confirm-actions">
+      <button type="button" class="btn btn-ghost" id="delete-cancel-btn">
+        취소
+      </button>
+      <button type="button" class="btn task-confirm-btn" id="delete-confirm-btn">
+        삭제
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var modal = document.getElementById('delete-confirm-modal');
+  var targetLabel = document.getElementById('delete-confirm-target');
+  var cancelBtn = document.getElementById('delete-cancel-btn');
+  var confirmBtn = document.getElementById('delete-confirm-btn');
+  var saveBtn = document.getElementById('save-action-btn');
+  var pendingCard = null;
+
+  document.querySelectorAll('.btn-delete-task').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      pendingCard = btn.closest('.task-item-card');
+      targetLabel.textContent = btn.dataset.taskLabel || '이 작업';
+      modal.classList.add('open');
+    });
+  });
+
+  cancelBtn.addEventListener('click', function () {
+    pendingCard = null;
+    modal.classList.remove('open');
+  });
+
+  confirmBtn.addEventListener('click', function () {
+    if (!pendingCard) return;
+    var checkbox = pendingCard.querySelector('.task-delete-hidden input');
+    if (checkbox) {
+      checkbox.checked = true;
+    }
+    modal.classList.remove('open');
+    saveBtn.click();
+  });
+})();
+</script>
+{% endblock %}
