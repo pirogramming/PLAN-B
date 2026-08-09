@@ -2905,3 +2905,214 @@ class RecoveryCompareViewTests(TestCase):
         response = self._get(group_id)
 
         self.assertEqual(response.status_code, 302)
+
+class CalendarViewTests(TestCase):
+    """
+    기준으로 View + build_calendar_context()를 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+
+        self.user = User.objects.create_user(
+            username="calendar_tester", email="calendar_tester@example.com",
+            password="pass1234",
+        )
+        self.other = User.objects.create_user(
+            username="calendar_other", email="calendar_other@example.com",
+            password="pass1234",
+        )
+        self.today = django_timezone.localdate()
+        self.client.login(username="calendar_tester@example.com", password="pass1234")
+        self.url = reverse("planner:calendar")
+
+    def _make_active_exam_period(self, user=None):
+        from exams.models import ExamPeriod
+
+        return ExamPeriod.objects.create(
+            user=user or self.user, title="캘린더 테스트 시험기간",
+            start_date=self.today - timedelta(days=3),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def test_shows_onboarding_when_no_exam_period(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["exam_period"])
+
+    def test_defaults_to_current_month_when_no_query_params(self):
+        self._make_active_exam_period()
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["year"], self.today.year)
+        self.assertEqual(response.context["month"], self.today.month)
+
+    def test_invalid_month_falls_back_to_current_month(self):
+        self._make_active_exam_period()
+        response = self.client.get(self.url, {"year": 2026, "month": 13})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["month"], self.today.month)
+
+    def test_week_grid_has_six_weeks_of_seven_days(self):
+        self._make_active_exam_period()
+        response = self.client.get(
+            self.url, {"year": self.today.year, "month": self.today.month}
+        )
+
+        weeks = response.context["weeks"]
+        self.assertEqual(len(weeks), 6)
+        for week in weeks:
+            self.assertEqual(len(week), 7)
+
+    def test_date_outside_period_marked_not_in_period(self):
+        period = self._make_active_exam_period()
+        response = self.client.get(
+            self.url, {"year": self.today.year, "month": self.today.month}
+        )
+
+        outside_date = period.start_date - timedelta(days=1)
+        cell = self._find_cell(response.context["weeks"], outside_date)
+        if cell is not None:  # 달력에 그 날짜가 안 나온 달이면 스킵
+            self.assertFalse(cell["in_period"])
+
+    def test_exam_day_shows_subject_and_no_load_bar(self):
+        from exams.models import Exam
+
+        period = self._make_active_exam_period()
+        exam_date = self.today + timedelta(days=2)
+        Exam.objects.create(
+            exam_period=period, subject_name="데이터통신", exam_date=exam_date,
+        )
+        response = self.client.get(
+            self.url, {"year": exam_date.year, "month": exam_date.month}
+        )
+
+        cell = self._find_cell(response.context["weeks"], exam_date)
+        self.assertTrue(cell["is_exam_day"])
+        self.assertEqual(cell["exam_subject"], "데이터통신")
+        self.assertEqual(cell["available_minutes"], 0)
+
+    def test_load_percent_over_100_marks_is_over(self):
+        from exams.models import Exam
+        from planner.models import DailyPlan, DailyPlanItem
+
+        period = self._make_active_exam_period()
+        exam = Exam.objects.create(
+            exam_period=period, subject_name="운영체제",
+            exam_date=self.today + timedelta(days=5),
+        )
+        task = exam.study_tasks.create(
+            unit_name="1장", title="1장 정리", task_type="concept",
+            importance="high", depth="core", difficulty="normal",
+            estimated_min_minutes=30, estimated_max_minutes=50, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        AvailableTime.objects.create(
+            exam_period=period, date=target_date, available_minutes=100,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=100, planned_minutes=150,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=150, order=1,
+        )
+
+        response = self.client.get(
+            self.url, {"year": target_date.year, "month": target_date.month}
+        )
+
+        cell = self._find_cell(response.context["weeks"], target_date)
+        self.assertEqual(cell["load_percent"], 150)
+        self.assertTrue(cell["is_over"])
+
+    def test_day_details_matches_task_row_fields(self):
+        from exams.models import Exam
+        from planner.models import DailyPlan, DailyPlanItem
+
+        period = self._make_active_exam_period()
+        exam = Exam.objects.create(
+            exam_period=period, subject_name="신호및시스템",
+            exam_date=self.today + timedelta(days=5),
+        )
+        task = exam.study_tasks.create(
+            unit_name="2장", title="2장 예제 풀이", task_type="practice",
+            importance="medium", depth="basic", difficulty="easy",
+            estimated_min_minutes=20, estimated_max_minutes=40, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=120, planned_minutes=40,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=40, order=1,
+        )
+
+        response = self.client.get(
+            self.url, {"year": target_date.year, "month": target_date.month}
+        )
+
+        day_detail = response.context["day_details"][target_date.isoformat()]
+        task_data = day_detail["tasks"][0]
+        self.assertEqual(
+            set(task_data.keys()),
+            {"title", "subject_name", "depth", "planned_minutes",
+             "status", "actual_minutes", "completion_percent"},
+        )
+        self.assertEqual(task_data["title"], "2장 예제 풀이")
+        self.assertEqual(task_data["subject_name"], "신호및시스템")
+
+    def test_shade_index_ordered_by_exam_date(self):
+        from exams.models import Exam, AvailableTime as AT
+        from planner.models import DailyPlan, DailyPlanItem
+        from planner.services.calendar import build_calendar_context
+
+        period = self._make_active_exam_period()
+        Exam.objects.create(
+            exam_period=period, subject_name="늦은 시험",
+            exam_date=self.today + timedelta(days=9),
+        )
+        earlier_exam = Exam.objects.create(
+            exam_period=period, subject_name="빠른 시험",
+            exam_date=self.today + timedelta(days=2),
+        )
+        task = earlier_exam.study_tasks.create(
+            unit_name="1장", title="빠른 시험 작업", task_type="concept",
+            importance="high", depth="core", difficulty="normal",
+            estimated_min_minutes=30, estimated_max_minutes=50, order=1,
+        )
+        target_date = self.today + timedelta(days=1)
+        daily_plan = DailyPlan.objects.create(
+            exam_period=period, date=target_date,
+            available_minutes=100, planned_minutes=30,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=30, order=1,
+        )
+
+        data = build_calendar_context(period, target_date.year, target_date.month)
+        cell = self._find_cell(data["weeks"], target_date)
+        # 더 이른 시험(earlier_exam)의 작업이니 shade_index=0 이어야 한다
+        self.assertEqual(cell["tasks"][0]["shade_index"], 0)
+
+    def test_other_user_exam_period_not_used(self):
+        self._make_active_exam_period(user=self.other)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["exam_period"])
+
+    @staticmethod
+
+    def _find_cell(weeks, target_date):
+        for week in weeks:
+            for cell in week:
+                if cell["date"] == target_date:
+                    return cell
+        return None
