@@ -3,10 +3,13 @@ from django.http import JsonResponse
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
+from datetime import timedelta
+from collections import defaultdict
+from django.db.models import Sum
 from django.contrib import messages
 from django.http import JsonResponse
 from django.http import Http404
-from core.choices import RecoveryActionType, RecoveryType
+from core.choices import RecoveryActionType, RecoveryType, TaskDepth
 from planner.services.recovery import get_future_available_capacity
 from planner.services.time_estimator import estimate_task_minutes
 from django.shortcuts import get_object_or_404, redirect, render
@@ -618,6 +621,10 @@ def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
         "id": recovery_plan.id,
         "recovery_type": recovery_plan.recovery_type,
         "type_label": type_label,
+        "preview_url": reverse(
+            "planner:recovery_preview",
+            kwargs={"plan_id": recovery_plan.id},
+        ),
         "summary": desc,
         "feasibility_status": status,
         "feasibility_status_label": status_label,
@@ -708,3 +715,121 @@ def recovery_compare(request, group_id):
         "plans": plan_contexts,
         "reason": reason,
     })
+
+def _is_preview_exam_day(date, exam_dates, after_minutes):
+    """
+    해당 날짜가 어느 과목의 시험일이면서, 그 날 실제로 배치된 공부량이
+    없을 때만 '시험'으로 표시한다. 다른 과목 공부가 있으면 bar를 그대로
+    보여준다 (FE2 확인 완료 - 스케줄러가 다른 과목 시험일에는 배치를
+    막지 않으므로).
+    """
+    return date in exam_dates and after_minutes == 0
+
+
+@login_required
+@require_http_methods(["GET"])
+def recovery_preview(request, plan_id):
+    recovery_plan = (
+        RecoveryPlan.objects
+        .filter(pk=plan_id, exam_period__user=request.user, status=RecoveryPlanStatus.PENDING)
+        .select_related("exam_period", "source_daily_plan")
+        .first()
+    )
+    if recovery_plan is None:
+        raise Http404("복구안을 찾을 수 없습니다.")
+
+    exam_period = recovery_plan.exam_period
+    items = list(recovery_plan.items.select_related("study_task__exam"))
+    reschedule_items = [i for i in items if i.action_type == RecoveryActionType.RESCHEDULE]
+    excluded_items = [i for i in items if i.action_type == RecoveryActionType.EXCLUDE]
+
+    start_date = max(
+        recovery_plan.source_daily_plan.date + timedelta(days=1),
+        timezone.localdate() + timedelta(days=1),
+    )
+
+    # before: 적용 직전 stale 검증(occupied)과 동일하게 DailyPlanItem.planned_minutes 합계로 계산
+    existing_by_date = dict(
+        DailyPlanItem.objects
+        .filter(daily_plan__exam_period=exam_period, daily_plan__date__gte=start_date)
+        .values("daily_plan__date")
+        .annotate(total=Sum("planned_minutes"))
+        .values_list("daily_plan__date", "total")
+    )
+
+    added_by_date = defaultdict(int)
+    for item in reschedule_items:
+        added_by_date[item.changed_date] += item.remaining_minutes
+
+    available_by_date = dict(
+        AvailableTime.objects.filter(
+            exam_period=exam_period, date__gte=start_date
+        ).values_list("date", "available_minutes")
+    )
+
+    exam_dates = set(exam_period.exams.values_list("exam_date", flat=True))
+    exam_dates_in_range = {d for d in exam_dates if d >= start_date}
+
+    all_dates = sorted(set(existing_by_date) | set(added_by_date) | exam_dates_in_range)
+
+    days = []
+    for d in all_dates:
+        before_minutes = existing_by_date.get(d, 0)
+        added_minutes = added_by_date.get(d, 0)
+        after_minutes = before_minutes + added_minutes
+        available_minutes = available_by_date.get(d, 0)
+
+        scale = max(before_minutes, after_minutes, available_minutes, 1)
+        days.append({
+            "date": d,
+            "is_exam_day": _is_preview_exam_day(d, exam_dates, after_minutes),
+            "before_minutes": before_minutes,
+            "before_pct": round(min(before_minutes / scale * 100, 100), 1),
+            "before_over": before_minutes > available_minutes,
+            "added_minutes": added_minutes,
+            "after_minutes": after_minutes,
+            "after_pct": round(min(after_minutes / scale * 100, 100), 1),
+            "limit_pct": round(min(available_minutes / scale * 100, 100), 1),
+        })
+
+    keep_count = len(reschedule_items)
+    keep_core_count = sum(
+        1 for i in reschedule_items if i.study_task.depth == TaskDepth.CORE
+    )
+    move_count = sum(
+        1 for i in reschedule_items if i.original_date != i.changed_date
+    )
+
+    exclude_count = len(excluded_items)
+    exclude_minutes = sum(i.remaining_minutes for i in excluded_items)
+    if exclude_count == 0:
+        exclude_summary = ""
+    elif exclude_count == 1:
+        exclude_summary = excluded_items[0].study_task.title
+    else:
+        exclude_summary = f"{excluded_items[0].study_task.title} 외 {exclude_count - 1}건"
+
+    type_label = "분량 유지형" if recovery_plan.recovery_type == RecoveryType.MAINTAIN_VOLUME else "핵심 집중형"
+
+    context = {
+        "exam_period": exam_period,
+        "plan": {
+            "id": recovery_plan.id,
+            "type_label": type_label,
+        },
+        "preview": {
+            "start_date": start_date,
+            "days": days,
+            "keep_count": keep_count,
+            "keep_core_count": keep_core_count,
+            "move_count": move_count,
+            "exclude_count": exclude_count,
+            "exclude_minutes": exclude_minutes,
+            "exclude_summary": exclude_summary,
+        },
+        "compare_url": reverse(
+            "planner:recovery_compare",
+            kwargs={"group_id": recovery_plan.recovery_group_id},
+        ),
+    }
+    return render(request, "planner/recovery_result.html", context)
