@@ -1,26 +1,23 @@
-{% extends "base.html" %}
-{% load static exam_extras %}
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
 {% block title %}
 시험범위 등록 - PLAN B
 {% endblock %}
+{% block page_heading %}시험범위 등록하기{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
+{% block exam_content %}
 {% get_period_exams exam.exam_period_id as period_exams %}
 
-<div class="container material-form-wrap">
-  <div class="crumb-text">
-    PLAN B &nbsp;›&nbsp; 시험범위 등록
-  </div>
-  <div class="page-title">
-    시험범위 등록하기
-  </div>
-  <div class="page-sub">
-    과목별 시험범위를 알려주세요
+<div class="material-form-wrap" style="max-width:820px; margin:0 auto;">
+  <div class="page-head">
+    <div>
+      <h1>시험범위 등록하기</h1>
+      <p class="sub">과목별 시험범위를 알려주세요</p>
+    </div>
   </div>
 
   <div class="tabbar">
@@ -44,7 +41,7 @@
   </div>
   {% endif %}
 
-  <div class="card material-form-card">
+  <div class="card card-body material-form-card" style="padding:32px 36px;">
     <div class="tabbar" data-method-tabs>
       <button type="button" class="tab active" data-target="pdf-panel">
         PDF 업로드
@@ -93,7 +90,8 @@
         {% endif %}
       </div>
 
-      <button type="submit" class="btn btn-brand btn-block material-submit-btn" id="analyze-submit-btn">
+      <button type="submit" class="btn btn-primary btn-lg material-submit-btn"
+              style="width:100%;" id="analyze-submit-btn">
         분석 시작
       </button>
     </form>
@@ -107,7 +105,9 @@
     <div class="auto-loading-sub">잠시만 기다려주세요</div>
   </div>
 </div>
+{% endblock %}
 
+{% block exam_extra_js %}
 <script>
 (function () {
   var tabs = document.querySelectorAll('[data-method-tabs] .tab');

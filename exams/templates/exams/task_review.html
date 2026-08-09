@@ -1,39 +1,33 @@
-{% extends "base.html" %}
-{% load static exam_extras %}
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
 {% block title %}
 학습 작업 - PLAN B
 {% endblock %}
+{% block page_heading %}학습 작업{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
+{% block exam_content %}
 {% get_period_exams exam.exam_period_id as period_exams %}
 
-<div class="container task-review-wrap">
-  <div class="crumb-text">
-    PLAN B &nbsp;›&nbsp; 학습 작업
-  </div>
-
-  <div class="task-review-header">
+<div class="task-review-wrap" style="max-width:1080px; margin:0 auto;">
+  <div class="page-head" style="justify-content:space-between;">
     <div>
-      <div class="page-title" style="margin-bottom:2px;">
-        학습 작업
-      </div>
-      <div class="page-sub" style="margin-bottom:0;">
+      <h1 style="font-size:24px;">학습 작업</h1>
+      <p class="sub">
         {{ exam.subject_name }} · 총 {{ formset.forms|length }}개
-      </div>
+      </p>
     </div>
-    <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-ghost">
+    <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-secondary">
       + 작업 추가하기
     </a>
   </div>
 
   <div class="task-review-body">
     <div class="task-nav-col">
-      <div class="card task-nav-card">
+      <div class="card card-body task-nav-card">
         <div class="task-nav-title">과목</div>
         {% for e in period_exams %}
         <a href="{% url 'exams:task_review' e.id %}"
@@ -59,14 +53,14 @@
         {{ formset.management_form }}
 
         {% if not formset.forms %}
-        <div class="card task-empty-card">
+        <div class="card card-body task-empty-card">
           아직 학습 작업이 없어요. 시험범위 등록 화면에서
           AI 분석을 먼저 실행하거나, 직접 추가해주세요.
         </div>
         {% endif %}
 
         {% for form in formset %}
-        <div class="card task-item-card">
+        <div class="card card-body task-item-card">
           {{ form.id }}
 
           <div class="task-item-top">
@@ -74,7 +68,7 @@
               {{ form.instance.unit_name|default:"단원 미지정" }}
             </div>
             {% if form.instance.is_confirmed %}
-            <span class="badge badge-possible">확정됨</span>
+            <span class="badge badge-ok">확정됨</span>
             {% endif %}
           </div>
 
@@ -125,7 +119,7 @@
             </div>
             <button
               type="button"
-              class="btn btn-ghost btn-delete-task"
+              class="btn btn-secondary btn-sm btn-delete-task"
               data-task-label="{{ form.instance.title }}"
             >
               삭제
@@ -145,19 +139,19 @@
           <button
             type="submit"
             name="action"
-            value="save"
-            class="btn btn-brand"
-            id="save-action-btn"
+            value="confirm"
+            class="btn btn-primary btn-lg task-primary-btn"
           >
-            변경사항 저장
+            저장하고 다음으로
           </button>
           <button
             type="submit"
             name="action"
-            value="confirm"
-            class="btn task-confirm-btn"
+            value="save"
+            class="btn btn-secondary btn-sm task-secondary-btn"
+            id="save-action-btn"
           >
-            모두 확정하고 다음으로
+            임시 저장
           </button>
         </div>
         {% endif %}
@@ -171,32 +165,32 @@
     <div class="delete-confirm-title">
       이 작업을 삭제할까요?
     </div>
-    <div class="delete-confirm-body" id="delete-confirm-target">
+    <div class="delete-confirm-body">
+      변경사항을 저장하면 삭제됩니다.
     </div>
     <div class="delete-confirm-actions">
-      <button type="button" class="btn btn-ghost" id="delete-cancel-btn">
+      <button type="button" class="btn btn-secondary" id="delete-cancel-btn">
         취소
       </button>
-      <button type="button" class="btn task-confirm-btn" id="delete-confirm-btn">
-        삭제
+      <button type="button" class="btn btn-primary" id="delete-confirm-btn">
+        확인
       </button>
     </div>
   </div>
 </div>
+{% endblock %}
 
+{% block exam_extra_js %}
 <script>
 (function () {
   var modal = document.getElementById('delete-confirm-modal');
-  var targetLabel = document.getElementById('delete-confirm-target');
   var cancelBtn = document.getElementById('delete-cancel-btn');
   var confirmBtn = document.getElementById('delete-confirm-btn');
-  var saveBtn = document.getElementById('save-action-btn');
   var pendingCard = null;
 
   document.querySelectorAll('.btn-delete-task').forEach(function (btn) {
     btn.addEventListener('click', function () {
       pendingCard = btn.closest('.task-item-card');
-      targetLabel.textContent = btn.dataset.taskLabel || '이 작업';
       modal.classList.add('open');
     });
   });
@@ -212,8 +206,8 @@
     if (checkbox) {
       checkbox.checked = true;
     }
+    pendingCard.style.display = 'none';
     modal.classList.remove('open');
-    saveBtn.click();
   });
 })();
 </script>
