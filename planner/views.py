@@ -7,7 +7,7 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.http import Http404
 from core.choices import RecoveryActionType, RecoveryType
-from planner.services.recovery import _future_available_capacity, get_future_available_minutes
+from planner.services.recovery import get_future_available_capacity, get_future_available_minutes
 from planner.services.time_estimator import estimate_task_minutes
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
@@ -644,7 +644,8 @@ def recovery_compare(request, group_id):
 
     exam_period = plans[0].exam_period
     source_daily_plan = plans[0].source_daily_plan
-    available_minutes = get_future_available_minutes(exam_period, source_daily_plan.date)
+    future_capacity = get_future_available_capacity(exam_period, source_daily_plan.date)
+    available_minutes = sum(item.available_minutes for item in future_capacity)
 
     totals_by_plan = {p.id: _plan_totals(p) for p in plans}
     axis_max = max(
@@ -672,9 +673,7 @@ def recovery_compare(request, group_id):
         "remaining_count": len(rep_all_items),
         "speed_added_minutes": _speed_added_minutes(rep_all_items),
         "available_minutes": available_minutes,
-        "available_days": len({
-            at.date for at in _future_available_capacity(exam_period, source_daily_plan.date)
-        }),
+        "available_days": len({item.date for item in future_capacity}),
     }
 
     return render(request, "planner/recovery_compare.html", {
