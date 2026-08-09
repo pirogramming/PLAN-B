@@ -3278,3 +3278,247 @@ class RecoveryPreviewViewTests(TestCase):
         self.assertTrue(days[self.quiet_date]["is_exam_day"])
         self.assertEqual(days[self.quiet_date]["before_minutes"], 0)
         self.assertEqual(days[self.quiet_date]["after_minutes"], 0)
+
+class RecoveryApplyViewTests(TestCase):
+    """
+    #81 recovery_apply View 테스트.
+
+    apply_recovery_plan() 자체 로직은 ApplyRecoveryPlanTests가 이미 검증하므로,
+    여기서는 View 레벨(권한, HTTP 메서드, 예외 → 메시지/리다이렉트 매핑)만 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="recovery_apply_tester",
+            email="recovery_apply@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="recovery_apply_other",
+            email="recovery_apply_other@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="recovery_apply@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구 적용 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        self.protected_task = StudyTask.objects.create(
+            exam=self.exam, title="보호 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.low_task = StudyTask.objects.create(
+            exam=self.exam, title="제외 후보 작업", importance="low", depth="optional",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=80, planned_minutes=80,
+        )
+        protected_item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.protected_task,
+            planned_minutes=40, order=1,
+        )
+        low_item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.low_task,
+            planned_minutes=40, order=2,
+        )
+        record_progress(daily_plan_item=protected_item, status="not_done", actual_minutes=0)
+        record_progress(daily_plan_item=low_item, status="not_done", actual_minutes=0)
+
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=80,
+        )
+
+        result = finalize_daily_plan(self.daily_plan)
+        self.maintain_volume = result["recovery_plans"]["maintain_volume"]
+        self.core_focus = result["recovery_plans"]["core_focus"]
+        self.assertIsNotNone(self.maintain_volume)
+        self.assertIsNotNone(self.core_focus)
+
+    def _apply(self, plan_id):
+        return self.client.post(
+            reverse("planner:recovery_apply", kwargs={"plan_id": plan_id})
+        )
+
+    # ── 1. 분량 유지형 정상 적용 ──────────────────────
+    def test_apply_maintain_volume_success(self):
+        response = self._apply(self.maintain_volume.id)
+
+        self.assertRedirects(response, reverse("planner:dashboard"))
+        self.maintain_volume.refresh_from_db()
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.APPLIED)
+
+    # ── 2. 핵심 집중형 정상 적용 ──────────────────────
+    def test_apply_core_focus_success(self):
+        response = self._apply(self.core_focus.id)
+
+        self.assertRedirects(response, reverse("planner:dashboard"))
+        self.core_focus.refresh_from_db()
+        self.assertEqual(self.core_focus.status, RecoveryPlanStatus.APPLIED)
+
+    # ── 3. RESCHEDULE 항목이 미래 DailyPlanItem으로 생성되는지 ──
+    def test_reschedule_items_create_future_daily_plan_items(self):
+        reschedule_item = self.maintain_volume.items.get(
+            study_task=self.protected_task, action_type="reschedule"
+        )
+
+        self._apply(self.maintain_volume.id)
+
+        self.assertTrue(
+            DailyPlanItem.objects.filter(
+                study_task=self.protected_task,
+                daily_plan__date=reschedule_item.changed_date,
+            ).exists()
+        )
+
+    # ── 4. EXCLUDE 항목은 일정에 생성되지 않는지 ──────
+    def test_excluded_items_not_created_in_schedule(self):
+        self._apply(self.core_focus.id)
+
+        excluded_task_ids = set(
+            self.core_focus.items.filter(action_type="exclude")
+            .values_list("study_task_id", flat=True)
+        )
+        self.assertTrue(excluded_task_ids)
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task_id__in=excluded_task_ids,
+                daily_plan__date__gt=self.today,
+            ).exists()
+        )
+
+    # ── 5. 선택한 복구안 APPLIED로 변경 ───────────────
+    def test_selected_plan_marked_applied(self):
+        self._apply(self.maintain_volume.id)
+
+        self.maintain_volume.refresh_from_db()
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.APPLIED)
+        self.assertIsNotNone(self.maintain_volume.applied_at)
+
+    # ── 6. 같은 그룹의 다른 복구안 DISCARDED로 변경 ───
+    def test_sibling_plan_marked_discarded(self):
+        self._apply(self.maintain_volume.id)
+
+        self.core_focus.refresh_from_db()
+        self.assertEqual(self.core_focus.status, RecoveryPlanStatus.DISCARDED)
+
+    # ── 7. 동일 그룹 복구안 두 번 적용 거부 ───────────
+    def test_applying_twice_in_same_group_rejected(self):
+        self._apply(self.maintain_volume.id)
+
+        response = self._apply(self.core_focus.id)
+
+        self.assertRedirects(response, reverse("planner:dashboard"))
+        self.core_focus.refresh_from_db()
+        # DISCARDED로 이미 넘어갔으니 여전히 APPLIED가 아니어야 함
+        self.assertNotEqual(self.core_focus.status, RecoveryPlanStatus.APPLIED)
+
+    # ── 8. 이미 처리된 복구안 적용 시 오류 메시지 ─────
+    def test_already_processed_shows_error_message(self):
+        self._apply(self.maintain_volume.id)
+
+        response = self._apply(self.maintain_volume.id)
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("이미 처리된 복구안" in str(m) for m in messages_list)
+        )
+
+    # ── 9. stale 복구안 적용 시 전체 롤백 ─────────────
+    def test_stale_plan_rolls_back_completely(self):
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+        ).delete()
+
+        response = self._apply(self.maintain_volume.id)
+
+        self.assertRedirects(
+            response,
+            reverse("planner:recovery_compare",
+                    kwargs={"group_id": self.maintain_volume.recovery_group_id}),
+        )
+        self.maintain_volume.refresh_from_db()
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.PENDING)
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task__in=[self.protected_task, self.low_task],
+                daily_plan__date__gt=self.today,
+            ).exists()
+        )
+
+    # ── 10. 유효하지 않은 remaining_minutes 적용 시 전체 롤백 ──
+    def test_invalid_remaining_minutes_rolls_back(self):
+        recovery_item = self.maintain_volume.items.filter(action_type="reschedule").first()
+        recovery_item.remaining_minutes = 0
+        recovery_item.save(update_fields=["remaining_minutes"])
+
+        response = self._apply(self.maintain_volume.id)
+
+        self.assertRedirects(
+            response,
+            reverse("planner:recovery_compare",
+                    kwargs={"group_id": self.maintain_volume.recovery_group_id}),
+        )
+        self.maintain_volume.refresh_from_db()
+        self.assertEqual(self.maintain_volume.status, RecoveryPlanStatus.PENDING)
+
+    # ── 11. 다른 사용자 복구안 적용 시 404 ────────────
+    def test_404_when_owned_by_other_user(self):
+        self.client.logout()
+        self.client.login(username="recovery_apply_other@example.com", password="pass1234")
+
+        response = self._apply(self.maintain_volume.id)
+
+        self.assertEqual(response.status_code, 404)
+
+    # ── 12. GET 요청은 405 ────────────────────────────
+    def test_get_method_not_allowed(self):
+        response = self.client.get(
+            reverse("planner:recovery_apply", kwargs={"plan_id": self.maintain_volume.id})
+        )
+        self.assertEqual(response.status_code, 405)
+
+    # ── 13. 원본 과거 계획과 진행 기록 유지 ───────────
+    def test_original_past_plan_and_progress_preserved(self):
+        original_item_count = DailyPlanItem.objects.filter(
+            daily_plan=self.daily_plan
+        ).count()
+        original_log_count = ProgressLog.objects.filter(
+            daily_plan_item__daily_plan=self.daily_plan
+        ).count()
+
+        self._apply(self.maintain_volume.id)
+
+        self.assertEqual(
+            DailyPlanItem.objects.filter(daily_plan=self.daily_plan).count(),
+            original_item_count,
+        )
+        self.assertEqual(
+            ProgressLog.objects.filter(daily_plan_item__daily_plan=self.daily_plan).count(),
+            original_log_count,
+        )
+
+    # ── 14. 로그인 필요 ────────────────────────────────
+    def test_requires_login(self):
+        self.client.logout()
+        response = self._apply(self.maintain_volume.id)
+        self.assertEqual(response.status_code, 302)

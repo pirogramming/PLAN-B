@@ -30,7 +30,12 @@ from planner.services.progress_recorder import (
     finalize_daily_plan,
     DailyPlanAlreadyFinalizedError,
 )
-
+from planner.services.recovery import (
+    apply_recovery_plan,
+    RecoveryPlanAlreadyProcessedError,
+    RecoveryPlanStaleError,
+    RecoveryPlanInvalidDataError,
+)
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
 
@@ -833,3 +838,41 @@ def recovery_preview(request, plan_id):
         ),
     }
     return render(request, "planner/recovery_result.html", context)
+
+
+@login_required
+@require_http_methods(["POST"])
+def recovery_apply(request, plan_id):
+    recovery_plan = (
+        RecoveryPlan.objects
+        .filter(pk=plan_id, exam_period__user=request.user)
+        .select_related("exam_period", "source_daily_plan")
+        .prefetch_related("items__study_task__exam")
+        .first()
+    )
+    if recovery_plan is None:
+        raise Http404("복구안을 찾을 수 없습니다.")
+
+    try:
+        apply_recovery_plan(recovery_plan)
+    except RecoveryPlanAlreadyProcessedError:
+        messages.error(request, "이미 처리된 복구안입니다.")
+        return redirect("planner:dashboard")
+    except RecoveryPlanStaleError:
+        messages.error(
+            request,
+            "일정이나 가능시간이 변경되어 이 복구안을 적용할 수 없습니다. 복구안을 다시 확인해주세요.",
+        )
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+    except RecoveryPlanInvalidDataError:
+        messages.error(request, "복구안 데이터에 문제가 있어 적용할 수 없습니다.")
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    messages.success(request, "선택한 복구안이 일정에 적용되었습니다.")
+    return redirect("planner:dashboard")
