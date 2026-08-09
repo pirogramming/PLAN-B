@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}
+{{ material.title }} - PLAN B
+{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% endblock %}
+
+{% block content %}
+{% include "exams/_topbar.html" %}
+
+<div class="container material-detail-wrap">
+  <div class="crumb-text">
+    {{ material.exam.subject_name }} &nbsp;›&nbsp; {{ material.title }}
+  </div>
+  <div class="page-title-sm">
+    {{ material.title }}
+  </div>
+  <div class="page-sub">
+    {{ material.get_material_type_display }}
+  </div>
+
+  {% if material.material_type == 'pdf' %}
+  <div class="card" style="margin-bottom:14px;">
+    <div class="section-label">텍스트 추출</div>
+
+    {% if material.status == 'completed' %}
+    <span class="badge badge-possible">추출 완료</span>
+    <div class="extracted-text-box">
+      {{ material.extracted_text|truncatechars:600 }}
+    </div>
+
+    {% elif material.status == 'failed' %}
+    <span class="badge badge-impossible">추출 실패</span>
+    <div class="field-error" style="margin-top:8px;">
+      {{ material.error_message }}
+    </div>
+    <form method="post" action="{% url 'exams:material_extract' material.id %}" style="margin-top:12px;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-brand btn-block">
+        다시 추출하기
+      </button>
+    </form>
+
+    {% elif material.status == 'processing' %}
+    <span class="badge badge-risky">추출 중...</span>
+
+    {% else %}
+    <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">
+      대기 중
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if material.status == 'completed' %}
+  <div class="card">
+    <div class="section-label">AI 학습 작업 분석</div>
+
+    {% if material.analysis_status == 'completed' %}
+    <span class="badge badge-possible">분석 완료</span>
+    <a href="{% url 'exams:task_review' material.exam.id %}" class="btn btn-brand btn-block" style="margin-top:12px;">
+      학습 작업 확인하러 가기
+    </a>
+
+    {% elif material.analysis_status == 'processing' %}
+    <span class="badge badge-risky">분석 중...</span>
+
+    {% elif material.analysis_status == 'failed' %}
+    <span class="badge badge-impossible">분석 실패</span>
+    <div class="field-error" style="margin-top:8px;">
+      {{ material.analysis_error_message }}
+    </div>
+    <div style="font-size:11px; color:var(--neutral7); margin-top:4px;">
+      재시도 <span class="num">{{ material.analysis_retry_count }}</span>/2회 진행됨
+    </div>
+
+    {% if material.analysis_retry_count < 2 %}
+    <form method="post" action="{% url 'exams:material_retry_analyze' material.id %}" style="margin-top:12px;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-brand btn-block">
+        다시 시도
+      </button>
+    </form>
+    {% else %}
+    <div class="form-error-box" style="margin-top:12px;">
+      AI 분석에 반복해서 실패했어요. 시험범위를 직접 학습 작업으로 입력해주세요.
+    </div>
+    <a href="{% url 'exams:task_create' material.exam.id %}" class="btn btn-brand btn-block" style="margin-top:8px;">
+      직접 작업 추가하러 가기
+    </a>
+    {% endif %}
+
+    {% else %}
+    <span class="badge" style="background:var(--neutral3); color:var(--neutral8);">
+      대기 중
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <form method="post" action="{% url 'exams:material_delete' material.id %}"
+        onsubmit="return confirm('이 학습자료를 삭제할까요?');" style="margin-top:14px;">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-ghost btn-block delete-material-btn">
+      학습자료 삭제
+    </button>
+  </form>
+</div>
+
+<div id="auto-loading-overlay" class="auto-loading-overlay">
+  <div class="card auto-loading-box">
+    <div class="auto-loading-spinner" id="auto-loading-spinner"></div>
+    <div class="auto-loading-text" id="auto-loading-text">
+      처리 중이에요
+    </div>
+    <div class="auto-loading-sub" id="auto-loading-sub">
+      잠시만 기다려주세요
+    </div>
+    <div id="auto-loading-stale" class="auto-loading-stale">
+      <div class="auto-loading-stale-text" id="auto-loading-stale-text">
+        분석이 오래 멈춰있어요.
+      </div>
+      <button type="button" class="btn btn-brand btn-block"
+              id="stale-retry-btn">
+        다시 시도
+      </button>
+      <a href="{% url 'exams:task_create' material.exam.id %}"
+         class="btn btn-ghost btn-block" id="stale-add-link">
+        직접 작업 추가하러 가기
+      </a>
+    </div>
+
+    <div id="auto-loading-stuck" class="auto-loading-stuck">
+      <div class="auto-loading-stuck-text" id="auto-loading-stuck-text">
+        생각보다 오래 걸리고 있어요.
+      </div>
+      <div id="debug-box" class="debug-box"></div>
+      <div class="auto-loading-stuck-actions">
+        <button type="button" class="btn btn-ghost" onclick="location.reload()">
+          새로고침
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<form id="auto-extract-form" method="post"
+      action="{% url 'exams:material_extract' material.id %}"
+      class="hidden-auto-form">
+  {% csrf_token %}
+</form>
+
+<form id="auto-analyze-form" method="post"
+      action="{% url 'exams:material_analyze' material.id %}"
+      class="hidden-auto-form">
+  {% csrf_token %}
+</form>
+
+<form id="auto-retry-form" method="post"
+      action="{% url 'exams:material_retry_analyze' material.id %}"
+      class="hidden-auto-form">
+  {% csrf_token %}
+</form>
+
+<script>
+var STATUS_URL = "{% url 'exams:material_analysis_status' material.id %}";
+var TASK_REVIEW_URL = "{% url 'exams:task_review' material.exam.id %}";
+var fired = false;
+var stuckTimer = null;
+var pollCount = 0;
+
+function showAutoLoading(text) {
+  document.getElementById('auto-loading-text').textContent = text;
+  document.getElementById('auto-loading-overlay').classList.add('open');
+
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+  }
+  stuckTimer = setTimeout(function () {
+    document.getElementById('auto-loading-stuck').classList.add('show');
+  }, 8000);
+}
+
+function showDebug(label, payload) {
+  var box = document.getElementById('debug-box');
+  var text = '[' + label + ']\n';
+  try {
+    text += JSON.stringify(payload, null, 2);
+  } catch (e) {
+    text += String(payload);
+  }
+  box.textContent = text;
+}
+
+function scheduleNextCheck() {
+  setTimeout(checkStatusAndAct, 1500);
+}
+
+function checkStatusAndAct() {
+  pollCount += 1;
+  fetch(STATUS_URL)
+    .then(function (res) {
+      if (!res.ok) {
+        throw new Error('상태 조회 API가 ' + res.status + ' 응답을 반환했어요');
+      }
+      return res.json();
+    })
+    .then(function (data) {
+      showDebug('요청 ' + pollCount + '회 - 응답 성공', data);
+      handleStatus(data);
+    })
+    .catch(function (err) {
+      showAutoLoading('상태를 확인하는 중 문제가 발생했어요');
+      document.getElementById('auto-loading-stuck').classList.add('show');
+      showDebug('요청 ' + pollCount + '회 - 에러', String(err));
+    });
+}
+
+function showStaleState(canRetry) {
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+    stuckTimer = null;
+  }
+  document.getElementById('auto-loading-stuck').classList.remove('show');
+
+  document.getElementById('auto-loading-overlay').classList.add('open');
+  document.getElementById('auto-loading-spinner').style.display = 'none';
+  document.getElementById('auto-loading-text').textContent = '분석이 멈췄어요';
+  document.getElementById('auto-loading-sub').textContent = '';
+
+  var staleBox = document.getElementById('auto-loading-stale');
+  var staleText = document.getElementById('auto-loading-stale-text');
+  var retryBtn = document.getElementById('stale-retry-btn');
+  var addLink = document.getElementById('stale-add-link');
+
+  staleBox.classList.add('show');
+
+  if (canRetry) {
+    staleText.textContent = '분석이 5분 넘게 멈춰있어요. 다시 시도해볼까요?';
+    retryBtn.style.display = '';
+    addLink.style.display = 'none';
+  } else {
+    staleText.textContent = '분석에 반복해서 실패했어요. 직접 작업을 추가해주세요.';
+    retryBtn.style.display = 'none';
+    addLink.style.display = '';
+  }
+}
+
+function handleStatus(data) {
+  if (data.stage === 'COMPLETED') {
+    window.location.href = TASK_REVIEW_URL;
+    return;
+  }
+  if (data.stage === 'FAILED') {
+    location.reload();
+    return;
+  }
+  if (data.stage === 'EXTRACTING') {
+    showAutoLoading('PDF 텍스트를 추출하고 있어요');
+    scheduleNextCheck();
+    return;
+  }
+  if (data.stage === 'ANALYZING') {
+    if (data.is_stale) {
+      showStaleState(!!data.can_retry);
+      return;
+    }
+    showAutoLoading('AI 학습 작업을 분석하고 있어요');
+    scheduleNextCheck();
+    return;
+  }
+
+  if (fired) {
+    showAutoLoading('처리 결과를 기다리는 중이에요');
+    scheduleNextCheck();
+    return;
+  }
+
+  if (data.extraction_status === 'pending') {
+    fired = true;
+    showAutoLoading('PDF 텍스트를 추출하고 있어요');
+    document.getElementById('auto-extract-form').submit();
+    return;
+  }
+  if (data.analysis_status === 'pending') {
+    fired = true;
+    showAutoLoading('AI 학습 작업을 분석하고 있어요');
+    document.getElementById('auto-analyze-form').submit();
+    return;
+  }
+
+  /* 여기까지 왔다는 건 stage/extraction_status/analysis_status 값이
+     내가 예상한 값(PENDING/EXTRACTING/ANALYZING/COMPLETED/FAILED) 중
+     어느 것과도 안 맞았다는 뜻 — 백엔드 응답 형식이 다를 가능성이 큼 */
+  showAutoLoading('상태를 판단할 수 없어요');
+  document.getElementById('auto-loading-stuck').classList.add('show');
+  showDebug('알 수 없는 상태 - 이 내용을 캡처해서 보내주세요', data);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  checkStatusAndAct();
+
+  document.getElementById('stale-retry-btn').addEventListener('click', function () {
+    document.getElementById('auto-loading-stale').classList.remove('show');
+    document.getElementById('auto-loading-spinner').style.display = '';
+    showAutoLoading('다시 분석을 시작하고 있어요');
+    document.getElementById('auto-retry-form').submit();
+  });
+});
+</script>
+{% endblock %}
