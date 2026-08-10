@@ -422,8 +422,13 @@ def calendar(request):
     )
 
     today_date = timezone.localdate()
-    year = int(request.GET.get('year', today_date.year))
-    month = int(request.GET.get('month', today_date.month))
+    try:
+        year = int(request.GET.get('year', today_date.year))
+        month = int(request.GET.get('month', today_date.month))
+        if not (1 <= month <= 12):
+            raise ValueError("month out of range")
+    except (TypeError, ValueError):
+        year, month = today_date.year, today_date.month
 
     prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
     next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
