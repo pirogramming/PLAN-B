@@ -50,7 +50,6 @@
             · 오늘 배정 <b class="num">{{ today_minutes }}분</b>
           </div>
         </div>
-        {# TODO: {% url 'planner:today' %} 로 교체 #}
         <a class="btn btn-primary btn-lg ml-auto" href="{% url 'planner:today' %}">
           오늘의 공부 시작<svg class="ico"><use href="#i-arrow-right"/></svg>
         </a>
@@ -65,7 +64,7 @@
                지금 계획은 <b>{{ overall.status_label }}</b> 상태 그대로입니다.</p>
           </div>
           <div class="actions">
-            <a class="btn btn-accent btn-sm" href="#">복구안 보기</a>
+            <a class="btn btn-accent btn-sm" href="{% url 'planner:recovery_compare' group_id=pending_recovery.recovery_group_id %}">복구안 보기</a>
           </div>
         </div>
       {% endif %}
@@ -115,7 +114,7 @@
 
       <div class="section-head">
         <h3>과목</h3>
-        <a class="btn btn-ghost btn-sm" href="#">
+        <a class="btn btn-ghost btn-sm" href="{% url 'planner:calendar' %}">
           전체 계획 보기<svg class="ico"><use href="#i-chevron-right"/></svg>
         </a>
       </div>
