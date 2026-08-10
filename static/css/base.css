@@ -1,17 +1,31 @@
-/* 전역 안내 메시지 (Django messages) - 화면 맨 위 배너 형태 */
+/* 전역 안내 메시지 (Django messages) - 화면 상단에 잠깐 떴다 사라지는 토스트.
+   .app(사이드바) 레이아웃을 안 쓰는 화면도 있어서(로그인, exams 폼 등) 특정
+   컨테이너 안에 넣지 않고 position:fixed로 모든 화면 위에 동일하게 띄운다. */
 .site-messages {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 14px 24px 0;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
 }
 .site-message {
-  max-width: var(--container);
-  margin: 0 auto;
   padding: 12px 18px;
   border-radius: 12px;
   font-size: 13px;
   font-weight: 600;
+  box-shadow: 0 8px 24px rgba(20, 24, 43, .16);
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity .25s ease, transform .25s ease;
+}
+.site-message.is-leaving {
+  opacity: 0;
+  transform: translateY(-8px);
 }
 .site-message-success {
   background: var(--judge1-bg);
@@ -32,4 +46,8 @@
   background: var(--neutral2);
   color: var(--neutral9);
   border: 1px solid var(--neutral4);
+}
+
+@media (max-width: 767px) {
+  .site-messages { top: 12px; width: calc(100vw - 24px); }
 }
