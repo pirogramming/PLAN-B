@@ -309,7 +309,7 @@ def today(request):
         'tasks': [],
         'is_finalized': False,
         'pending_recovery': None,
-        'calendar_url': reverse('planner:dashboard'),
+        'calendar_url': reverse('planner:calendar'),
     }
 
     if exam_period is None:
