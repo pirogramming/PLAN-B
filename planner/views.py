@@ -755,9 +755,25 @@ def recovery_compare(request, group_id):
         "available_days": len({item.date for item in future_capacity}),
     }
 
+    # 미리보기에서 돌아온 경우 직전에 보고 있던 복구안을 그대로 선택 상태로 유지한다.
+    # 없거나 이미 사라진 plan id면 기존 기본값(마지막 복구안)으로 되돌아간다.
+    try:
+        requested_selected_id = int(request.GET.get("selected"))
+    except (TypeError, ValueError):
+        requested_selected_id = None
+
+    valid_ids = {p["id"] for p in plan_contexts}
+    selected_plan_id = (
+        requested_selected_id if requested_selected_id in valid_ids else plan_contexts[-1]["id"]
+    )
+    for p in plan_contexts:
+        p["is_selected"] = (p["id"] == selected_plan_id)
+    selected_plan = next(p for p in plan_contexts if p["id"] == selected_plan_id)
+
     return render(request, "planner/recovery_compare.html", {
         "exam_period": exam_period,
         "plans": plan_contexts,
+        "selected_plan": selected_plan,
         "reason": reason,
     })
 
@@ -872,9 +888,12 @@ def recovery_preview(request, plan_id):
             "exclude_minutes": exclude_minutes,
             "exclude_summary": exclude_summary,
         },
-        "compare_url": reverse(
-            "planner:recovery_compare",
-            kwargs={"group_id": recovery_plan.recovery_group_id},
+        "compare_url": (
+            reverse(
+                "planner:recovery_compare",
+                kwargs={"group_id": recovery_plan.recovery_group_id},
+            )
+            + f"?selected={recovery_plan.id}"
         ),
     }
     return render(request, "planner/recovery_result.html", context)
