@@ -44,12 +44,18 @@
   {% endif %}
 
   <div class="side-foot">
-    <form method="post" action="{% url 'accounts:logout' %}">
-      {% csrf_token %}
-      <button class="nav-i" type="submit" style="width:100%;text-align:left">
-        <svg class="ico"><use href="#i-user"/></svg>
-        {% if user.is_authenticated %}{{ user.username }}{% else %}로그인{% endif %}
-      </button>
-    </form>
+    <div class="nav-i" style="pointer-events:none">
+      <svg class="ico"><use href="#i-user"/></svg>
+      {% if user.is_authenticated %}{{ user.username }}{% else %}로그인{% endif %}
+    </div>
+    {% if user.is_authenticated %}
+      <form method="post" action="{% url 'accounts:logout' %}">
+        {% csrf_token %}
+        <button class="nav-i" type="submit" style="width:100%;text-align:left">
+          <svg class="ico"><use href="#i-logout"/></svg>
+          로그아웃
+        </button>
+      </form>
+    {% endif %}
   </div>
 </aside>
