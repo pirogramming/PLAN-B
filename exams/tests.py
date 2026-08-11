@@ -1635,3 +1635,98 @@ class MaterialAnalysisViewTestCase(TestCase):
             "분석 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
         )
         self.assertEqual(self.material.analysis_retry_count, 1)
+
+class AvailableTimeUpdateRedirectTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='tester',
+            email='tester@example.com',
+            password='testpass123',
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title='테스트 기간',
+            start_date='2026-09-01',
+            end_date='2026-09-05',
+        )
+        self.available_time = AvailableTime.objects.create(
+            exam_period=self.period,
+            date='2026-09-01',
+            available_minutes=0,
+        )
+        self.url = reverse(
+            'exams:available_time_update', kwargs={'period_id': self.period.id}
+        )
+
+    def _management_form_data(self):
+        return {
+            'form-TOTAL_FORMS': '1',
+            'form-INITIAL_FORMS': '1',
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+        }
+
+    def _valid_formset_data(self):
+        data = self._management_form_data()
+        data.update({
+            'form-0-id': str(self.available_time.id),
+            'form-0-date': '2026-09-01',
+            'form-0-hours': '2',
+            'form-0-minutes': '30',
+        })
+        return data
+
+    def _invalid_formset_data(self):
+        # date 없이 보내서 formset invalid 유도
+        data = self._management_form_data()
+        data.update({
+            'form-0-id': str(self.available_time.id),
+            'form-0-date': '',
+            'form-0-hours': '2',
+            'form-0-minutes': '30',
+        })
+        return data
+
+    # 1. 정상 next 복귀
+    def test_valid_next_redirects_back(self):
+        data = self._valid_formset_data()
+        data['next'] = '/dashboard/'
+
+        response = self.client.post(self.url, data)
+
+        self.assertRedirects(
+            response, '/dashboard/', fetch_redirect_response=False
+        )
+
+    # 2. 외부 URL next 차단 -> period_detail로 폴백
+    def test_external_next_is_blocked(self):
+        data = self._valid_formset_data()
+        data['next'] = 'https://evil.com/steal'
+
+        response = self.client.post(self.url, data)
+
+        expected = reverse(
+            'exams:period_detail', kwargs={'period_id': self.period.id}
+        )
+        self.assertRedirects(response, expected, fetch_redirect_response=False)
+
+    # 3. formset invalid 후에도 기존 next 유지
+    def test_next_preserved_after_invalid_formset(self):
+        data = self._invalid_formset_data()
+        data['next'] = '/dashboard/'
+
+        response = self.client.post(self.url, data)
+
+        # invalid라서 리다이렉트가 아니라 200으로 폼 재렌더
+        self.assertEqual(response.status_code, 200)
+        # 재렌더된 hidden input에 next 값이 그대로 살아있는지 확인
+        self.assertContains(response, 'name="next" value="/dashboard/"')
+
+    # (보너스) next 없이 GET 진입 시 Referer로 채워지는지
+    def test_next_falls_back_to_referer_on_get(self):
+        response = self.client.get(self.url, HTTP_REFERER='/some/page/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="next" value="/some/page/"')

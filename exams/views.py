@@ -222,6 +222,8 @@ def available_time_update(request, period_id):
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
 
     if request.method == 'POST':
+        next_url = request.POST.get('next', '')
+
         formset = AvailableTimeFormSet(request.POST, queryset=queryset)
         if formset.is_valid():
             instances = formset.save(commit=False)
@@ -229,7 +231,6 @@ def available_time_update(request, period_id):
                 instance.exam_period = period
                 instance.save()
 
-            next_url = request.POST.get('next')
             if next_url and url_has_allowed_host_and_scheme(
                 next_url,
                 allowed_hosts={request.get_host()},
@@ -239,8 +240,7 @@ def available_time_update(request, period_id):
             return redirect('exams:period_detail', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
-
-    next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')
+        next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')
 
     return render(request, 'exams/available_time_form.html', {
         'formset': formset,
