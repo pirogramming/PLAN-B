@@ -1,5 +1,6 @@
 import datetime
 import io
+import json
 import logging
 import uuid
 from unittest.mock import patch
@@ -1739,7 +1740,9 @@ class SourcePagesTestCase(TestCase):
 
     @override_settings(AI_MOCK_MODE=True)
     def test_fetch_extracted_tasks_returns_source_pages_from_mock(self):
-        tasks = task_extractor.fetch_extracted_tasks(self.exam, "1장 --- 페이지 4 --- 내용")
+        tasks = task_extractor.fetch_extracted_tasks(
+            self.exam, "1장 --- 페이지 4 --- 내용 --- 페이지 5 --- 더 내용"
+        )
         # _MOCK_RESPONSE 기준: 첫 작업은 [4, 5], 두 번째는 빈 리스트
         self.assertEqual(tasks[0].source_pages, [4, 5])
         self.assertEqual(tasks[1].source_pages, [])
@@ -1747,7 +1750,8 @@ class SourcePagesTestCase(TestCase):
     @override_settings(AI_MOCK_MODE=True)
     def test_save_extracted_tasks_persists_source_pages(self):
         material = StudyMaterial.objects.create(
-            exam=self.exam, title="테스트 자료", extracted_text="--- 페이지 4 --- 1장 내용",
+            exam=self.exam, title="테스트 자료",
+            extracted_text="--- 페이지 4 --- 1장 내용 --- 페이지 5 --- 더 내용",
             status=MaterialStatus.COMPLETED,
         )
         extracted_tasks = task_extractor.fetch_extracted_tasks(self.exam, material.extracted_text)
@@ -1841,3 +1845,58 @@ startxref
             task_extractor._RESPONSE_SCHEMA["properties"]["tasks"]["items"]["required"]
         )
         self.assertEqual(schema_required, task_extractor._REQUIRED_TASK_FIELDS)
+    # ---------- 실제 문서 페이지 범위 검증 (리뷰 반영) ----------
+
+    def test_extract_available_page_numbers_from_markers(self):
+        text = "--- 페이지 4 --- 내용\n--- 페이지 7 --- 더 내용\n--- 페이지 9 --- 마지막"
+        self.assertEqual(task_extractor._extract_available_page_numbers(text), {4, 7, 9})
+
+    def test_extract_available_page_numbers_empty_when_no_markers(self):
+        self.assertEqual(task_extractor._extract_available_page_numbers("그냥 텍스트입니다"), set())
+
+    def test_parse_source_pages_filters_out_pages_not_in_valid_set(self):
+        """
+        리뷰 반영: response_schema는 "정수 배열"이라는 형식만 강제하지, 그 정수가
+        실제 문서 범위 안의 페이지인지는 보장하지 않는다. 문서에 4, 5페이지만
+        있는데 AI가 21페이지를 지어내 반환하면, 21은 걸러지고 4만 남아야 한다.
+        """
+        result = task_extractor._parse_source_pages([4, 21], valid_pages={4, 5})
+        self.assertEqual(result, [4])
+
+    def test_parse_source_pages_valid_pages_none_skips_check(self):
+        """valid_pages를 안 넘기면(None) 기존처럼 범위 검증을 건너뛴다 (하위 호환)."""
+        result = task_extractor._parse_source_pages([4, 21], valid_pages=None)
+        self.assertEqual(result, [4, 21])
+
+    def test_parse_and_validate_filters_out_of_range_pages(self):
+        raw = """{
+            "tasks": [
+                {"unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                 "importance": "high", "depth": "core", "difficulty": "normal",
+                 "ai_reason": "테스트", "source_pages": [4, 5, 21]}
+            ]
+        }"""
+        tasks = task_extractor._parse_and_validate(raw, valid_pages={4, 5})
+        self.assertEqual(tasks[0].source_pages, [4, 5])
+
+    @override_settings(AI_MOCK_MODE=False, GOOGLE_API_KEY="fake-key-for-test")
+    @patch("exams.services.task_extractor.genai.Client")
+    def test_fetch_extracted_tasks_end_to_end_rejects_page_out_of_document_range(self, mock_client_cls):
+        """
+        end-to-end: 문서에 4페이지만 있는데 AI가 [4, 21]을 반환하면, 존재하지
+        않는 21페이지는 실제로 최종 결과에서 제거되어야 한다.
+        """
+        fake_ai_response = json.dumps({
+            "tasks": [{
+                "unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                "importance": "high", "depth": "core", "difficulty": "normal",
+                "ai_reason": "테스트", "source_pages": [4, 21],
+            }]
+        })
+        mock_response = type("Resp", (), {"text": fake_ai_response})()
+        mock_client_instance = mock_client_cls.return_value
+        mock_client_instance.models.generate_content.return_value = mock_response
+
+        tasks = task_extractor.fetch_extracted_tasks(self.exam, "--- 페이지 4 --- 1장 내용")
+
+        self.assertEqual(tasks[0].source_pages, [4])

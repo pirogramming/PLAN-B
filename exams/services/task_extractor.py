@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from google import genai
@@ -51,12 +52,29 @@ MAX_VALIDATION_RETRIES = 1
 # 완전한 결정론을 보장하진 않지만(모델 특성상), temperature와 함께 재현성을 높인다.
 GENERATION_SEED = 42
 
+# Django model의 choices가 이 프로젝트에서 "허용되는 값"의 유일한 기준(source of
+# truth)이다. _RESPONSE_SCHEMA(API에 강제하는 JSON 스키마)도 아래 값들을 그대로
+# 재사용한다 - enum을 따로 하드코딩해두면, 나중에 core.choices의 선택지가 바뀔 때
+# 스키마 쪽을 깜빡하고 안 고쳐서 "AI API가 허용하는 값"과 "모델이 실제로 허용하는
+# 값"이 어긋나는 사고가 날 수 있다.
+_VALID_TASK_TYPES = {c[0] for c in TaskType.choices}
+_VALID_IMPORTANCE = {c[0] for c in PriorityLevel.choices}
+_VALID_DEPTH = {c[0] for c in TaskDepth.choices}
+_VALID_DIFFICULTY = {c[0] for c in TaskDifficulty.choices}
+
+_REQUIRED_TASK_FIELDS = {
+    "unit_name", "title", "task_type", "importance", "depth", "difficulty", "ai_reason",
+}
+
 # API 차원에서 JSON 스키마를 강제한다. response_mime_type="application/json"만으로는
 # "JSON이라는 것"만 보장하고 필드 구조/enum 값까지는 강하게 제한하지 않는데, 이걸
 # 추가하면 필드 누락·enum 오타 같은 형식 오류 자체가 줄어들어(Python 검증 단계에서
 # 걸러내기 전에 API가 먼저 막아줌) self-correction 재요청 빈도가 줄어든다.
 # 주의: 이건 "형식"이 맞다는 것만 보장하지, "의미"(예: 작업을 몇 개로 나눌지)까지
 # 안정시켜주지는 않는다 - 그건 프롬프트의 명시적 규칙(4번)이 담당한다.
+#
+# enum/required 값은 위 _VALID_*, _REQUIRED_TASK_FIELDS를 그대로 재사용한다
+# (직접 하드코딩하지 않음 - 단일 소스 오브 트루스 유지).
 _RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -69,19 +87,19 @@ _RESPONSE_SCHEMA = {
                     "title": {"type": "string"},
                     "task_type": {
                         "type": "string",
-                        "enum": ["concept", "practice", "review", "summary", "custom"],
+                        "enum": sorted(_VALID_TASK_TYPES),
                     },
                     "importance": {
                         "type": "string",
-                        "enum": ["high", "medium", "low"],
+                        "enum": sorted(_VALID_IMPORTANCE),
                     },
                     "depth": {
                         "type": "string",
-                        "enum": ["core", "basic", "optional"],
+                        "enum": sorted(_VALID_DEPTH),
                     },
                     "difficulty": {
                         "type": "string",
-                        "enum": ["easy", "normal", "hard"],
+                        "enum": sorted(_VALID_DIFFICULTY),
                     },
                     "ai_reason": {"type": "string"},
                     "source_pages": {
@@ -89,23 +107,11 @@ _RESPONSE_SCHEMA = {
                         "items": {"type": "integer"},
                     },
                 },
-                "required": [
-                    "unit_name", "title", "task_type",
-                    "importance", "depth", "difficulty", "ai_reason",
-                ],
+                "required": sorted(_REQUIRED_TASK_FIELDS),
             },
         },
     },
     "required": ["tasks"],
-}
-
-_VALID_TASK_TYPES = {c[0] for c in TaskType.choices}
-_VALID_IMPORTANCE = {c[0] for c in PriorityLevel.choices}
-_VALID_DEPTH = {c[0] for c in TaskDepth.choices}
-_VALID_DIFFICULTY = {c[0] for c in TaskDifficulty.choices}
-
-_REQUIRED_TASK_FIELDS = {
-    "unit_name", "title", "task_type", "importance", "depth", "difficulty", "ai_reason",
 }
 
 
@@ -153,13 +159,13 @@ def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: st
    - difficulty: 다음 중 하나 - easy, normal, hard
    - ai_reason: 이 작업을 이렇게 분류한 이유를 1~2문장으로 설명
 3. 예상 학습 시간(분)은 계산하지 마라. 이 단계에서는 다루지 않는다.
-4. 각 학습 작업은 일반적으로 20~60분 안에 완료할 수 있는 크기를 목표로 한다.
-   다만 이 크기 자체가 작업을 몇 개로 나눌지를 직접 결정하지는 않는다 - 아래
-   b의 명시적 조건에 해당할 때만 나누고, 해당하지 않으면 크기가 이 범위를
-   조금 벗어나더라도 임의로 쪼개지 마라. 하나의 단원 안에서 작업을 몇 개
-   만들지는 아래 순서를 그대로 따라 정하라. 추상적으로 "적당히", "필요하면"
-   판단하지 말고, 이 순서대로 조건을 하나씩 확인하라 - 이게 지켜지지 않으면
-   같은 자료를 다시 분석해도 매번 작업 개수가 달라진다.
+4. 각 학습 작업은 일반적으로 20~60분 안에 완료할 수 있는 크기를 목표로 한다
+   (이하 "크기 목표"). 다만 크기 목표 자체가 작업을 몇 개로 나눌지를 직접
+   결정하지는 않는다 - 아래 b의 명시적 조건에 해당할 때만 나누고, 그 외에는
+   크기 목표를 조금 벗어나더라도 임의로 쪼개지 마라. 하나의 단원 안에서
+   작업을 몇 개 만들지는 아래 순서를 그대로 따라 정하라. 추상적으로 "적당히",
+   "필요하면" 판단하지 말고, 이 순서대로 조건을 하나씩 확인하라 - 이게
+   지켜지지 않으면 같은 자료를 다시 분석해도 매번 작업 개수가 달라진다.
    a. 기본값: 하나의 단원에는 작업을 1개만 만든다.
    b. 아래 조건 중 하나라도 원문에 명시적으로 나타나면, 그 조건에 맞춰서만
       작업을 분리한다.
@@ -177,12 +183,12 @@ def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: st
         다른 학습 행동이 원문에 각각 명시되어 있다
         → 학습 행동별로 분리한다.
    c. 위 b의 조건에 하나도 해당하지 않으면 절대 임의로 나누지 마라.
-      "내용이 많아 보여서", "20~60분보다 클 것 같아서" 같은 막연한 느낌만으로
+      "내용이 많아 보여서", "크기 목표보다 클 것 같아서" 같은 막연한 느낌만으로
       작업을 쪼개지 마라. 분리 여부는 오직 b에서 나열한 명시적 조건으로만 정한다.
    d. 반대로 어떤 단원이 원문에서 지나치게 넓은 범위를 가리켜서(예: 여러
-      장에 걸친 원문 전체) b를 적용해도 각 작업이 20~60분보다 훨씬 커진다면,
-      작업만 여러 개로 쪼개지 말고 그 단원 자체를 원문의 소제목 기준으로 더
-      잘게 나눈 뒤, 그 안에서 a~c를 다시 적용하라.
+      장에 걸친 원문 전체) b를 적용해도 각 작업이 크기 목표보다 훨씬
+      커진다면, 작업만 여러 개로 쪼개지 말고 그 단원 자체를 원문의 소제목
+      기준으로 더 잘게 나눈 뒤, 그 안에서 a~c를 다시 적용하라.
    e. 제목만 다르고 실질적으로 같은 내용을 다루는 작업을 중복 생성하지 마라.
       (예: "OSI 계층 구조 학습"과 "OSI 계층별 역할 비교"는 다루는 내용이
       실제로 다르면 둘 다 유지해도 되지만, 사실상 같은 내용을 제목만 바꿔
@@ -360,8 +366,15 @@ def _strip_code_fence(raw: str) -> str:
     return text.strip()
 
 
-def _parse_and_validate(raw_response: str) -> list[ExtractedTask]:
-    """AI 응답 텍스트를 검증하고 ExtractedTask 목록으로 변환한다."""
+def _parse_and_validate(raw_response: str, valid_pages: set[int] | None = None) -> list[ExtractedTask]:
+    """
+    AI 응답 텍스트를 검증하고 ExtractedTask 목록으로 변환한다.
+
+    valid_pages: 입력 텍스트에 실제로 존재하는 페이지 번호 집합(_extract_available_page_numbers()
+    참고). 주어지면 각 작업의 source_pages를 이 집합 기준으로 한 번 더 걸러낸다 - AI가 응답
+    스키마(정수 배열이라는 "형식")는 지켰지만 실제로 존재하지 않는 페이지 번호를 지어낸
+    경우(예: 문서가 20페이지인데 21을 반환)를 막기 위함이다. None이면 이 검증을 건너뛴다.
+    """
     cleaned = _strip_code_fence(raw_response)
 
     try:
@@ -410,13 +423,27 @@ def _parse_and_validate(raw_response: str) -> list[ExtractedTask]:
             depth=item["depth"],
             difficulty=item["difficulty"],
             ai_reason=str(item["ai_reason"]).strip(),
-            source_pages=_parse_source_pages(item.get("source_pages")),
+            source_pages=_parse_source_pages(item.get("source_pages"), valid_pages),
         ))
 
     return tasks
 
 
-def _parse_source_pages(raw_value) -> list[int]:
+_PAGE_MARKER_PATTERN = re.compile(r"--- 페이지 (\d+) ---")
+
+
+def _extract_available_page_numbers(text: str) -> set[int]:
+    """
+    입력 텍스트 안에 실제로 존재하는 "--- 페이지 N ---" 마커의 페이지 번호를 전부
+    모아 집합으로 반환한다. pdf_extractor.py가 텍스트가 없는 페이지는 마커 자체를
+    안 남기므로(연속되지 않은 번호가 있을 수 있음), 이 집합이 "1부터 마지막 페이지까지의
+    범위"가 아니라 "실제로 텍스트가 있었던 페이지들의 정확한 목록"이라는 점에 유의한다.
+    마커가 하나도 없으면(텍스트 직접 입력 등) 빈 집합을 반환한다.
+    """
+    return {int(n) for n in _PAGE_MARKER_PATTERN.findall(text)}
+
+
+def _parse_source_pages(raw_value, valid_pages: set[int] | None = None) -> list[int]:
     """
     source_pages는 필수 필드가 아니다 (텍스트 직접 입력 등 페이지 개념이 없는
     입력에서는 항상 빈 배열이다). 다른 필드와 달리, 이 값이 이상하다고 해서
@@ -427,6 +454,12 @@ def _parse_source_pages(raw_value) -> list[int]:
     - 정수/숫자 문자열만 인정, 0 이하나 bool, 그 외 형식은 조용히 버림
     - 중복 제거, 오름차순 정렬
     - raw_value 자체가 리스트가 아니면(응답 형식이 완전히 틀어진 경우) 빈 리스트
+    - valid_pages가 주어지면(입력 텍스트에 실제로 존재하는 페이지 번호 집합),
+      그 안에 없는 페이지 번호는 걸러낸다. response_schema는 "정수 배열"이라는
+      형식만 강제하지, 그 정수가 실제 문서 범위 안의 페이지인지는 보장하지
+      않는다 - 예를 들어 문서가 20페이지인데 AI가 21을 반환해도 스키마는
+      통과하므로, 여기서 실제 페이지 목록과 대조해 한 번 더 걸러낸다.
+      None이면(문맥상 실제 페이지 목록을 알 수 없는 경우) 이 단계를 건너뛴다.
     """
     if not isinstance(raw_value, list):
         return []
@@ -439,6 +472,15 @@ def _parse_source_pages(raw_value) -> list[int]:
             pages.add(item)
         elif isinstance(item, str) and item.strip().isdigit():
             pages.add(int(item.strip()))
+
+    if valid_pages is not None:
+        invalid = pages - valid_pages
+        if invalid:
+            logger.warning(
+                "AI가 실제 문서에 존재하지 않는 페이지 번호를 반환해 제거함: %s",
+                sorted(invalid),
+            )
+        pages &= valid_pages
 
     return sorted(pages)
 
@@ -458,6 +500,11 @@ def fetch_extracted_tasks(exam: Exam, extracted_text: str) -> list[ExtractedTask
     실패 시 AIAnalysisError 계열 예외(AICallFailedError, AIResponseValidationError)를
     발생시킨다.
     """
+    # 입력 텍스트에 실제로 존재하는 페이지 번호를 미리 추출해둔다. AI가 source_pages에
+    # 이 목록에 없는 페이지(예: 문서에 없는 21페이지)를 지어내 응답하더라도,
+    # _parse_and_validate()에서 이 목록 기준으로 걸러낸다 (리뷰 반영).
+    valid_pages = _extract_available_page_numbers(extracted_text)
+
     extracted_tasks = None
     last_validation_error: str | None = None
 
@@ -470,7 +517,7 @@ def fetch_extracted_tasks(exam: Exam, extracted_text: str) -> list[ExtractedTask
         )
         raw_response = _call_ai(prompt)
         try:
-            extracted_tasks = _parse_and_validate(raw_response)
+            extracted_tasks = _parse_and_validate(raw_response, valid_pages)
             break
         except AIResponseValidationError as exc:
             last_validation_error = str(exc)
