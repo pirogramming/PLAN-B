@@ -198,6 +198,7 @@ document.addEventListener('DOMContentLoaded', function () {
   };
 
   let status = null;
+  let currentItemId = null;
 
   document.querySelectorAll('.js-result').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -206,6 +207,7 @@ document.addEventListener('DOMContentLoaded', function () {
       el.title.textContent = row.querySelector('.task-title').textContent;
       el.meta.textContent = row.querySelector('.task-time .l').textContent;
 
+      currentItemId = btn.dataset.id;
       status = btn.dataset.status || null;
       const prevMinutes = parseInt(btn.dataset.minutes, 10) || 0;
       el.hour.value = Math.floor(prevMinutes / 60);
@@ -283,4 +285,42 @@ document.addEventListener('DOMContentLoaded', function () {
       status === 'partial'  ? '일부완료로 기록' :
       status === 'not_done' ? '못함으로 기록' : '기록하기';
   }
+
+  el.submit.addEventListener('click', function () {
+    if (el.submit.disabled || !currentItemId) return;
+
+    const hour = Number(el.hour.value) || 0;
+    const min  = Number(el.min.value) || 0;
+
+    const payload = { status: status };
+    payload.actual_minutes = (status === 'done' || status === 'partial')
+      ? hour * 60 + min
+      : 0;
+    if (status === 'partial') {
+      payload.completion_percent = parseInt(el.pct.value, 10);
+    }
+
+    const csrfInput = modal.querySelector('[name=csrfmiddlewaretoken]');
+    const url = modal.dataset.progressUrlTemplate.replace('999999999', currentItemId);
+
+    el.submit.disabled = true;
+    el.submit.textContent = '저장하는 중...';
+
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-CSRFToken': csrfInput ? csrfInput.value : '',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('progress record failed: ' + res.status);
+        window.location.reload();
+      })
+      .catch(function () {
+        el.submit.textContent = '실패했어요, 다시 시도';
+        setTimeout(paint, 2000);
+      });
+  });
 });
