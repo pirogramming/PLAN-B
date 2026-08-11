@@ -91,17 +91,20 @@ document.addEventListener('DOMContentLoaded', function () {
   if (eod) {
     const confirmView   = document.getElementById('eodConfirm');
     const progressView  = document.getElementById('eodProgress');
-    const progressFoot  = document.getElementById('eodProgressFoot');
+    const progressHint  = document.getElementById('eodProgressHint');
     const progressDone  = document.getElementById('eodProgressDone');
     const steps = eod.querySelectorAll('.steps-run li');
     let recalcDone = false;
+    let finalizeResult = null;
 
     document.querySelectorAll('.js-end-day').forEach(function (btn) {
       btn.addEventListener('click', function () {
         confirmView.hidden = false;
         progressView.hidden = true;
-        progressFoot.hidden = true;
+        progressDone.disabled = true;
+        progressHint.textContent = '잠시만 기다려 주세요.';
         recalcDone = false;
+        finalizeResult = null;
         steps.forEach(s => s.classList.remove('doing', 'done'));
         eod.hidden = false;
         document.body.style.overflow = 'hidden';
@@ -118,29 +121,59 @@ document.addEventListener('DOMContentLoaded', function () {
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape' && !eod.hidden) closeEod();
     });
-    if (progressDone) progressDone.addEventListener('click', closeEod);
+
+    if (progressDone) {
+      progressDone.addEventListener('click', function () {
+        if (progressDone.disabled) return;
+        closeEod();
+
+        if (!finalizeResult || finalizeResult.error) return;
+
+        if (finalizeResult.needs_recovery && finalizeResult.recovery_group_id) {
+          window.location.href = eod.dataset.recoveryUrlTemplate.replace(
+            '00000000-0000-0000-0000-000000000000', finalizeResult.recovery_group_id
+          );
+        } else {
+          window.location.href = eod.dataset.todayUrl;
+        }
+      });
+    }
 
     const eodSubmit = document.getElementById('eodSubmit');
     if (eodSubmit) {
       eodSubmit.addEventListener('click', function () {
         confirmView.hidden = true;
         progressView.hidden = false;
-        runSteps(0);
+        steps.forEach(s => s.classList.add('doing'));
+        submitFinalize();
       });
     }
 
-    function runSteps(i) {
-      if (i > 0) {
-        steps[i - 1].classList.remove('doing');
-        steps[i - 1].classList.add('done');
-      }
-      if (i >= steps.length) {
-        recalcDone = true;
-        progressFoot.hidden = false;
-        return;
-      }
-      steps[i].classList.add('doing');
-      setTimeout(() => runSteps(i + 1), 500);
+    function submitFinalize() {
+      const csrfInput = eod.querySelector('[name=csrfmiddlewaretoken]');
+      fetch(eod.dataset.finalizeUrl, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrfInput ? csrfInput.value : '' },
+      })
+        .then(function (res) {
+          if (!res.ok) throw new Error('finalize failed: ' + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          finalizeResult = data;
+        })
+        .catch(function () {
+          finalizeResult = { error: true };
+          progressHint.textContent = '오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+        })
+        .finally(function () {
+          steps.forEach(function (s) {
+            s.classList.remove('doing');
+            s.classList.add('done');
+          });
+          recalcDone = true;
+          progressDone.disabled = false;
+        });
     }
   }
 
