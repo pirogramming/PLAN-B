@@ -3,7 +3,7 @@ from django.http import JsonResponse
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
-from datetime import timedelta
+from datetime import timedelta, MINYEAR, MAXYEAR
 from collections import defaultdict
 from django.db.models import Sum
 from django.contrib import messages
@@ -427,8 +427,15 @@ def calendar(request):
         month = int(request.GET.get('month', today_date.month))
         if not (1 <= month <= 12):
             raise ValueError("month out of range")
+        if not (MINYEAR <= year <= MAXYEAR):
+            raise ValueError("year out of range")
+        calendar_context = build_calendar_context(exam_period, year, month)
     except (TypeError, ValueError):
+        # year/month가 정수로 안 읽히거나 범위를 벗어난 경우뿐 아니라, 유효한
+        # 정수라도 6주 격자 패딩이 연도 경계를 넘는 경우(예: 9999년 12월)까지
+        # build_calendar_context 내부에서 ValueError가 날 수 있어 여기서 함께 잡는다.
         year, month = today_date.year, today_date.month
+        calendar_context = build_calendar_context(exam_period, year, month)
 
     prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
     next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
@@ -441,7 +448,7 @@ def calendar(request):
         'prev_month': prev_month,
         'next_year': next_year,
         'next_month': next_month,
-        **build_calendar_context(exam_period, year, month),
+        **calendar_context,
     }
     return render(request, 'planner/calendar.html', context)
 

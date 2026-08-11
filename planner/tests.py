@@ -2840,6 +2840,16 @@ class CalendarViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["month"], self.today.month)
 
+    def test_invalid_year_falls_back_to_current_year(self):
+        self._make_active_exam_period()
+
+        for bad_year in (0, 10000):
+            response = self.client.get(self.url, {"year": bad_year, "month": 8})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.context["year"], self.today.year)
+            self.assertEqual(response.context["month"], self.today.month)
+
     def test_week_grid_has_six_weeks_of_seven_days(self):
         self._make_active_exam_period()
         response = self.client.get(
@@ -3432,13 +3442,14 @@ class RecoveryPreviewViewTests(TestCase):
         self.assertEqual(preview["exclude_count"], 1)
         self.assertEqual(preview["exclude_minutes"], 45)
 
-    # ── 6. compare_url이 올바른 그룹으로 연결되는지 ──
+    # ── 6. compare_url이 올바른 그룹으로 연결되고, 방금 미리보기한 복구안을
+    #      selected 쿼리파라미터로 넘겨서 비교 화면 복귀 시 선택이 유지되는지 ──
     def test_compare_url_points_back_to_same_group(self):
         response = self._get(self.recovery_plan.id)
         expected = reverse(
             "planner:recovery_compare",
             kwargs={"group_id": self.recovery_plan.recovery_group_id},
-        )
+        ) + f"?selected={self.recovery_plan.id}"
         self.assertEqual(response.context["compare_url"], expected)
 
     # ── 7. 존재하지 않는 plan_id ─────────────────────
