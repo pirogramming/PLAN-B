@@ -15,7 +15,7 @@
       <svg class="ico"><use href="#i-today"/></svg>오늘의 공부
       {% if today_count %}<span class="count" title="오늘 계획된 작업 {{ today_count }}개">{{ today_count }}</span>{% endif %}
     </a>
-    <a class="nav-i {% if nav == 'calendar' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="#">
+    <a class="nav-i {% if nav == 'calendar' %}on{% endif %}" href="{% url 'planner:calendar' %}">
       <svg class="ico"><use href="#i-calendar"/></svg>전체 계획
     </a>
   </nav>
@@ -44,10 +44,18 @@
   {% endif %}
 
   <div class="side-foot">
-    {# TODO: {% url 'accounts:logout' %} 로 교체 #}
-    <a class="nav-i" href="#">
+    <div class="nav-i" style="pointer-events:none">
       <svg class="ico"><use href="#i-user"/></svg>
       {% if user.is_authenticated %}{{ user.username }}{% else %}로그인{% endif %}
-    </a>
+    </div>
+    {% if user.is_authenticated %}
+      <form method="post" action="{% url 'accounts:logout' %}">
+        {% csrf_token %}
+        <button class="nav-i" type="submit" style="width:100%;text-align:left">
+          <svg class="ico"><use href="#i-logout"/></svg>
+          로그아웃
+        </button>
+      </form>
+    {% endif %}
   </div>
 </aside>

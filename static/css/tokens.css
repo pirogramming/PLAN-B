@@ -30,6 +30,18 @@
   --on-dark-sub:rgba(255,255,255,.6);       /* 선택된 pick-item 보조 텍스트 */
   --overlay:rgba(20,24,43,.34);             /* 모달 배경 딤 처리 (neutral11 34%) */
 
+  /* 모서리 반경 — planner.css 전역에서 참조만 하고 값이 없어 죽어있던 토큰.
+     기존에 쓰이던 리터럴 값들(.nav-i/.icon-btn 9px, .side-box/.sum-list 12px,
+     components.css .modal 18px)과 맞춰서 채웠다 */
+  --r-sm:9px;
+  --r-md:12px;
+  --r-lg:18px;
+
+  /* 그림자 — 위와 같은 이유로 채움. components.css의 동급 요소 그림자와
+     톤만 --overlay 계열(rgba(20,24,43,..))로 맞췄다 */
+  --shadow:0 2px 4px rgba(20,24,43,.08);
+  --shadow-lg:0 10px 40px rgba(20,24,43,.2);
+
   --ui:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
   --mono:'IBM Plex Mono',monospace;   /* 숫자용 */
 
