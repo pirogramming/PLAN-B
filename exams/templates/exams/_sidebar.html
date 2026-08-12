@@ -1,0 +1,46 @@
+{% load static %}
+{# 사용법: {% include "exams/_sidebar.html" with nav="periods" %} #}
+
+<aside class="side">
+  <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
+    <span class="brand-logo"><img src="{% static 'images/logo-lockup.png' %}" alt="PLAN B"></span>
+  </button>
+
+  <nav>
+    <a class="nav-i {% if nav == 'periods' %}on{% endif %}"
+       href="{% url 'exams:period_list' %}">
+      <svg class="ico"><use href="#i-graduation"/></svg>내 시험기간
+    </a>
+    {% if period %}
+    <a class="nav-i {% if nav == 'period_detail' %}on{% endif %}"
+       href="{% url 'exams:period_detail' period.id %}">
+      <svg class="ico"><use href="#i-dashboard"/></svg>시험기간 홈
+    </a>
+    {% elif exam %}
+    <a class="nav-i {% if nav == 'period_detail' %}on{% endif %}"
+       href="{% url 'exams:period_detail' exam.exam_period_id %}">
+      <svg class="ico"><use href="#i-dashboard"/></svg>시험기간 홈
+    </a>
+    {% endif %}
+  </nav>
+
+  {% if period %}
+  <div class="side-label">시험기간</div>
+  <div class="side-box">
+    <h4>{{ period.title }}</h4>
+    <p class="num">
+      {{ period.start_date|date:"m.d" }} ~ {{ period.end_date|date:"m.d" }}
+    </p>
+  </div>
+  {% endif %}
+
+  <div class="side-foot">
+    <form method="post" action="{% url 'accounts:logout' %}" style="margin:0;">
+      {% csrf_token %}
+      <button type="submit" class="nav-i" style="width:100%; text-align:left;">
+        <svg class="ico"><use href="#i-logout"/></svg>
+        {{ request.user.nickname|default:request.user.username }} · 로그아웃
+      </button>
+    </form>
+  </div>
+</aside>

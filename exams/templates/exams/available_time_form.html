@@ -1,27 +1,23 @@
-{% extends "base.html" %}
-{% load static exam_extras %}
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
 {% block title %}
 가용시간 입력 - PLAN B
 {% endblock %}
+{% block page_heading %}가용시간 입력하기{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
+{% block exam_content %}
 {% get_calendar_grid period.id as calendar_days %}
 
-<div class="container avail-wrap">
-  <div class="crumb-text">
-    <a href="{% url 'exams:period_detail' period.id %}">PLAN B</a>
-    &nbsp;›&nbsp; 가용시간 입력
-  </div>
-  <div class="page-title">
-    가용시간 입력하기
-  </div>
-  <div class="page-sub">
-    하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요
+<div class="avail-wrap" style="max-width:960px; margin:0 auto;">
+  <div class="page-head">
+    <div>
+      <h1>가용시간 입력하기</h1>
+      <p class="sub">하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요</p>
+    </div>
   </div>
 
   {% if formset.non_form_errors %}
@@ -47,7 +43,7 @@
     </div>
 
     <div class="avail-body">
-      <div class="card avail-cal-col">
+      <div class="card card-body avail-cal-col">
         <div class="avail-cal-title">
           {{ period.start_date|date:"n월 j일" }} -
           {{ period.end_date|date:"n월 j일" }}
@@ -98,7 +94,7 @@
         </div>
       </div>
 
-      <div class="card avail-side-col disabled" id="side-panel">
+      <div class="card card-body avail-side-col disabled" id="side-panel">
         <div id="side-panel-date" class="avail-side-date">
           날짜를 선택하세요
         </div>
@@ -112,19 +108,22 @@
         <div class="avail-side-hint">분 단위로 입력</div>
 
         <button type="button"
-                class="btn btn-brand btn-block avail-save-btn"
+                class="btn btn-primary avail-save-btn"
+                style="width:100%;"
                 id="side-panel-save">
           저장
         </button>
       </div>
     </div>
 
-    <button type="submit" class="btn btn-brand avail-next-btn">
+    <button type="submit" class="btn btn-primary btn-lg avail-next-btn">
       다음
     </button>
   </form>
 </div>
+{% endblock %}
 
+{% block exam_extra_js %}
 <script>
 (function () {
   var sidePanel = document.getElementById('side-panel');
