@@ -1,5 +1,6 @@
 import datetime
 import io
+import json
 import logging
 import uuid
 from unittest.mock import patch
@@ -788,6 +789,28 @@ startxref
         dummy_file = SimpleUploadedFile("valid_sample.pdf", raw_pdf_data, content_type="application/pdf")
         extracted_text = extract_text_from_pdf(dummy_file)
         self.assertIn("Hello Plan B PDF Text Extraction", extracted_text)
+
+    def test_extract_text_encrypted_not_supported(self):
+        """pypdf 기반으로 실제 비밀번호가 걸린 암호화 PDF를 생성하여
+        pypdfium2가 암호화된 PDF 예외를 처리하는지 검증"""
+        import pypdf
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        # 빈 비밀번호는 pypdfium2가 자동으로 빈 암호로 열어버릴 수 있어
+        # "암호화 분기"가 아니라 "빈 페이지라 텍스트 없음" 분기로 우연히 통과할 위험이 있음.
+        # 실제 사용자 비밀번호를 걸어서 진짜 암호화 예외 분기를 검증한다.
+        writer.encrypt(user_password="secret_password", owner_password="secret_password")
+
+        pdf_buffer = io.BytesIO()
+        writer.write(pdf_buffer)
+        pdf_buffer.seek(0)
+
+        dummy_file = SimpleUploadedFile("encrypted.pdf", pdf_buffer.read(), content_type="application/pdf")
+
+        with self.assertRaises(PdfExtractionError) as context:
+            extract_text_from_pdf(dummy_file)
+
+        self.assertIn("암호화된 PDF 파일은 지원하지 않습니다", str(context.exception))
 
     def test_extract_text_encrypted_with_empty_password(self):
         import pypdf
@@ -1730,3 +1753,244 @@ class AvailableTimeUpdateRedirectTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'name="next" value="/some/page/"')
+class SourcePagesTestCase(TestCase):
+    """
+    PDF 페이지 번호 추적 기능 (pdf_extractor.py가 "--- 페이지 N ---" 경계
+    표시를 남기고, task_extractor.py가 각 작업의 근거가 된 모든 페이지를
+    AI 응답에서 읽어 StudyTask.source_pages(리스트)에 저장한다).
+
+    "대표 페이지 하나"가 아니라 "관련된 모든 페이지"를 담는 방식으로 확정했다
+    (한 작업이 여러 페이지 내용을 종합한 경우가 많아서 하나만 고르면 정보 손실).
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="source_pages_tester@example.com",
+            email="source_pages_tester@example.com", password="pass1234!",
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="페이지 추적 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="자료구조", exam_date=datetime.date(2026, 8, 18),
+        )
+
+    # ---------- _parse_source_pages 단위 테스트 ----------
+
+    def test_parse_source_pages_accepts_int_list(self):
+        self.assertEqual(task_extractor._parse_source_pages([4, 5, 6]), [4, 5, 6])
+
+    def test_parse_source_pages_dedupes_and_sorts(self):
+        self.assertEqual(task_extractor._parse_source_pages([9, 5, 5, 6, 9]), [5, 6, 9])
+
+    def test_parse_source_pages_accepts_numeric_strings(self):
+        self.assertEqual(task_extractor._parse_source_pages(["12", "7"]), [7, 12])
+
+    def test_parse_source_pages_empty_when_missing(self):
+        self.assertEqual(task_extractor._parse_source_pages(None), [])
+
+    def test_parse_source_pages_empty_when_not_a_list(self):
+        # 응답 형식이 완전히 틀어져서 리스트가 아닌 값이 온 경우
+        self.assertEqual(task_extractor._parse_source_pages(4), [])
+        self.assertEqual(task_extractor._parse_source_pages("4"), [])
+
+    def test_parse_source_pages_drops_invalid_elements_but_keeps_valid_ones(self):
+        # 개별 원소가 이상해도 전체를 버리지 않고 유효한 것만 취한다
+        self.assertEqual(
+            task_extractor._parse_source_pages([5, "페이지", -1, 0, True, "8", None]),
+            [5, 8],
+        )
+
+    def test_parse_source_pages_empty_when_all_invalid(self):
+        self.assertEqual(task_extractor._parse_source_pages(["없음", -3, False]), [])
+
+    # ---------- _parse_and_validate가 source_pages를 채우는지 ----------
+
+    def test_parse_and_validate_fills_source_pages_from_response(self):
+        raw = """{
+            "tasks": [
+                {"unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                 "importance": "high", "depth": "core", "difficulty": "normal",
+                 "ai_reason": "테스트", "source_pages": [5, 6, 9]}
+            ]
+        }"""
+        tasks = task_extractor._parse_and_validate(raw)
+        self.assertEqual(tasks[0].source_pages, [5, 6, 9])
+
+    def test_parse_and_validate_source_pages_optional(self):
+        """source_pages 키 자체가 없어도(텍스트 직접 입력 등) 검증 실패로 취급하지 않는다."""
+        raw = """{
+            "tasks": [
+                {"unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                 "importance": "high", "depth": "core", "difficulty": "normal",
+                 "ai_reason": "테스트"}
+            ]
+        }"""
+        tasks = task_extractor._parse_and_validate(raw)
+        self.assertEqual(tasks[0].source_pages, [])
+
+    # ---------- mock 모드 기준 end-to-end ----------
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_fetch_extracted_tasks_returns_source_pages_from_mock(self):
+        tasks = task_extractor.fetch_extracted_tasks(
+            self.exam, "1장 --- 페이지 4 --- 내용 --- 페이지 5 --- 더 내용"
+        )
+        # _MOCK_RESPONSE 기준: 첫 작업은 [4, 5], 두 번째는 빈 리스트
+        self.assertEqual(tasks[0].source_pages, [4, 5])
+        self.assertEqual(tasks[1].source_pages, [])
+
+    @override_settings(AI_MOCK_MODE=True)
+    def test_save_extracted_tasks_persists_source_pages(self):
+        material = StudyMaterial.objects.create(
+            exam=self.exam, title="테스트 자료",
+            extracted_text="--- 페이지 4 --- 1장 내용 --- 페이지 5 --- 더 내용",
+            status=MaterialStatus.COMPLETED,
+        )
+        extracted_tasks = task_extractor.fetch_extracted_tasks(self.exam, material.extracted_text)
+        saved = task_extractor.save_extracted_tasks(material, extracted_tasks)
+
+        self.assertEqual(saved[0].source_pages, [4, 5])
+        self.assertEqual(saved[1].source_pages, [])
+
+        saved[0].refresh_from_db()
+        self.assertEqual(saved[0].source_pages, [4, 5])
+
+    # ---------- pdf_extractor.py가 만드는 실제 마커 형식과 진짜로 연동되는지 ----------
+
+    def test_page_marker_format_matches_pdf_extractor_output(self):
+        """
+        pdf_extractor.extract_text_from_pdf()를 실제로 호출해서 나온 텍스트를
+        그대로 task_extractor.build_prompt()에 넣어봐서, 두 서비스(BE2/BE3)
+        사이의 연동 지점(페이지 마커 형식)이 실제로 맞물리는지 확인한다.
+        형식이 하드코딩된 문자열 비교가 아니라 실제 pdf_extractor 출력 기준이라
+        pdf_extractor.py 쪽 마커 형식이 나중에 바뀌면 이 테스트가 잡아준다.
+        """
+        from exams.services.pdf_extractor import extract_text_from_pdf
+
+        raw_pdf_data = b"""%PDF-1.4
+1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj
+2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj
+3 0 obj <</Type /Page /Parent 2 0 R /Resources <</Font <</F1 4 0 R>>>> /MediaBox [0 0 612 792] /Contents 5 0 R>> endobj
+4 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj
+5 0 obj <</Length 55>> stream
+BT
+/F1 12 Tf
+100 700 Td
+(Circular Linked List concept) Tj
+ET
+endstream endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000231 00000 n 
+trailer <</Size 6 /Root 1 0 R>>
+startxref
+367
+%%EOF"""
+        pdf_file = SimpleUploadedFile("sample.pdf", raw_pdf_data, content_type="application/pdf")
+        extracted_text = extract_text_from_pdf(pdf_file)
+
+        # pdf_extractor가 실제로 "--- 페이지 1 ---" 마커를 붙였는지 확인
+        self.assertIn("--- 페이지 1 ---", extracted_text)
+
+        # 이 실제 출력을 그대로 task_extractor의 프롬프트에 넣었을 때
+        # 페이지 마커가 원문 그대로 프롬프트에 살아있는지 확인
+        prompt = task_extractor.build_prompt(
+            self.exam.subject_name, self.exam.exam_date, extracted_text,
+        )
+        self.assertIn("--- 페이지 1 ---", prompt)
+        self.assertIn('"--- 페이지 N ---"', prompt)  # 규칙 9번 안내 문구도 포함되는지
+
+    # ---------- 결과 편차 완화(seed/response_schema) 실제 API 호출 설정 검증 ----------
+
+    @override_settings(AI_MOCK_MODE=False, GOOGLE_API_KEY="fake-key-for-test")
+    @patch("exams.services.task_extractor.genai.Client")
+    def test_call_ai_passes_seed_and_response_schema(self, mock_client_cls):
+        """
+        리뷰 반영: 같은 자료를 여러 번 분석해도 작업 개수/분류가 흔들리는 문제를
+        줄이기 위해 seed 고정 + response_schema 강제를 추가했다. 실제 API 호출
+        설정(config)에 이 값들이 정확히 전달되는지 확인한다 (mock 모드가 아닌
+        진짜 호출 경로를 patch로 가로채서 검증).
+        """
+        mock_response = type("Resp", (), {"text": task_extractor._MOCK_RESPONSE})()
+        mock_client_instance = mock_client_cls.return_value
+        mock_client_instance.models.generate_content.return_value = mock_response
+
+        task_extractor._call_ai("테스트 프롬프트")
+
+        mock_client_instance.models.generate_content.assert_called_once()
+        _, call_kwargs = mock_client_instance.models.generate_content.call_args
+        config = call_kwargs["config"]
+
+        self.assertEqual(config.seed, task_extractor.GENERATION_SEED)
+        self.assertEqual(config.response_schema, task_extractor._RESPONSE_SCHEMA)
+        self.assertEqual(config.response_mime_type, "application/json")
+        self.assertEqual(config.temperature, 0.2)
+
+    def test_response_schema_matches_required_task_fields(self):
+        """_RESPONSE_SCHEMA의 required 목록이 _REQUIRED_TASK_FIELDS와 어긋나지 않는지
+        확인한다 (둘 중 하나만 고치고 다른 하나를 깜빡하는 실수를 방지)."""
+        schema_required = set(
+            task_extractor._RESPONSE_SCHEMA["properties"]["tasks"]["items"]["required"]
+        )
+        self.assertEqual(schema_required, task_extractor._REQUIRED_TASK_FIELDS)
+    # ---------- 실제 문서 페이지 범위 검증 (리뷰 반영) ----------
+
+    def test_extract_available_page_numbers_from_markers(self):
+        text = "--- 페이지 4 --- 내용\n--- 페이지 7 --- 더 내용\n--- 페이지 9 --- 마지막"
+        self.assertEqual(task_extractor._extract_available_page_numbers(text), {4, 7, 9})
+
+    def test_extract_available_page_numbers_empty_when_no_markers(self):
+        self.assertEqual(task_extractor._extract_available_page_numbers("그냥 텍스트입니다"), set())
+
+    def test_parse_source_pages_filters_out_pages_not_in_valid_set(self):
+        """
+        리뷰 반영: response_schema는 "정수 배열"이라는 형식만 강제하지, 그 정수가
+        실제 문서 범위 안의 페이지인지는 보장하지 않는다. 문서에 4, 5페이지만
+        있는데 AI가 21페이지를 지어내 반환하면, 21은 걸러지고 4만 남아야 한다.
+        """
+        result = task_extractor._parse_source_pages([4, 21], valid_pages={4, 5})
+        self.assertEqual(result, [4])
+
+    def test_parse_source_pages_valid_pages_none_skips_check(self):
+        """valid_pages를 안 넘기면(None) 기존처럼 범위 검증을 건너뛴다 (하위 호환)."""
+        result = task_extractor._parse_source_pages([4, 21], valid_pages=None)
+        self.assertEqual(result, [4, 21])
+
+    def test_parse_and_validate_filters_out_of_range_pages(self):
+        raw = """{
+            "tasks": [
+                {"unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                 "importance": "high", "depth": "core", "difficulty": "normal",
+                 "ai_reason": "테스트", "source_pages": [4, 5, 21]}
+            ]
+        }"""
+        tasks = task_extractor._parse_and_validate(raw, valid_pages={4, 5})
+        self.assertEqual(tasks[0].source_pages, [4, 5])
+
+    @override_settings(AI_MOCK_MODE=False, GOOGLE_API_KEY="fake-key-for-test")
+    @patch("exams.services.task_extractor.genai.Client")
+    def test_fetch_extracted_tasks_end_to_end_rejects_page_out_of_document_range(self, mock_client_cls):
+        """
+        end-to-end: 문서에 4페이지만 있는데 AI가 [4, 21]을 반환하면, 존재하지
+        않는 21페이지는 실제로 최종 결과에서 제거되어야 한다.
+        """
+        fake_ai_response = json.dumps({
+            "tasks": [{
+                "unit_name": "1장", "title": "개념 정리", "task_type": "concept",
+                "importance": "high", "depth": "core", "difficulty": "normal",
+                "ai_reason": "테스트", "source_pages": [4, 21],
+            }]
+        })
+        mock_response = type("Resp", (), {"text": fake_ai_response})()
+        mock_client_instance = mock_client_cls.return_value
+        mock_client_instance.models.generate_content.return_value = mock_response
+
+        tasks = task_extractor.fetch_extracted_tasks(self.exam, "--- 페이지 4 --- 1장 내용")
+
+        self.assertEqual(tasks[0].source_pages, [4])

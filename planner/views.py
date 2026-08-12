@@ -26,10 +26,21 @@ from planner.services.schedule_generator import (
     MismatchedExamPeriodError,
     DuplicateTaskAllocationError,
 )
+from planner.services.calendar import build_calendar_context
 from planner.services.progress_recorder import (
     finalize_daily_plan,
     DailyPlanAlreadyFinalizedError,
 )
+from planner.services.recovery import (
+    apply_recovery_plan,
+    RecoveryPlanAlreadyProcessedError,
+    RecoveryPlanStaleError,
+    RecoveryPlanInvalidDataError,
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
@@ -399,6 +410,35 @@ def today(request):
         },
     })
     return render(request, 'planner/today.html', context)
+
+@login_required
+@require_http_methods(["GET"])
+def calendar(request):
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
+        .order_by('-created_at')
+        .first()
+    )
+
+    today_date = timezone.localdate()
+    year = int(request.GET.get('year', today_date.year))
+    month = int(request.GET.get('month', today_date.month))
+
+    prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+    next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+    context = {
+        'exam_period': exam_period,
+        'year': year,
+        'month': month,
+        'prev_year': prev_year,
+        'prev_month': prev_month,
+        'next_year': next_year,
+        'next_month': next_month,
+        **build_calendar_context(exam_period, year, month),
+    }
+    return render(request, 'planner/calendar.html', context)
 
 @login_required
 @require_http_methods(["POST"])
@@ -833,3 +873,51 @@ def recovery_preview(request, plan_id):
         ),
     }
     return render(request, "planner/recovery_result.html", context)
+
+
+@login_required
+@require_http_methods(["POST"])
+def recovery_apply(request, plan_id):
+    recovery_plan = get_object_or_404(
+        RecoveryPlan.objects
+        .select_related("exam_period", "source_daily_plan")
+        .prefetch_related("items__study_task__exam"),
+        pk=plan_id,
+        exam_period__user=request.user,
+    )
+
+    try:
+        apply_recovery_plan(recovery_plan)
+    except RecoveryPlanAlreadyProcessedError:
+        messages.error(request, "이미 처리된 복구안입니다.")
+        return redirect("planner:dashboard")
+    except RecoveryPlanStaleError:
+        messages.error(
+            request,
+            "일정이나 가능시간이 변경되어 이 복구안을 적용할 수 없습니다. 복구안을 다시 확인해주세요.",
+        )
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+    except RecoveryPlanInvalidDataError:
+        messages.error(request, "복구안 데이터에 문제가 있어 적용할 수 없습니다.")
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "복구안 적용 중 예상치 못한 오류 (plan_id=%s)", plan_id
+        )
+        messages.error(
+            request, "복구안 적용 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    messages.success(request, "선택한 복구안이 일정에 적용되었습니다.")
+    return redirect("planner:dashboard")

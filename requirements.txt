@@ -8,9 +8,9 @@ tzdata==2026.3
 python-decouple==3.8
 
 # PDF 텍스트 추출 (pypdfium2 + pytesseract OCR 폴백 파이프라인)
-pypdfium2>=4.30.0
-pytesseract>=0.3.13
-pillow>=12.3.0
+pypdfium2==5.12.1
+pytesseract==0.3.13
+pillow==12.3.0
 
 # 테스트 픽스처 생성용 (암호화 PDF 등 테스트 데이터 제작에만 사용, 프로덕션 코드에서는 미사용)
 pypdf==6.14.2
