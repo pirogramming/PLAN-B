@@ -1,9 +1,9 @@
 {% extends "exams/_exam_base.html" %}
 {% load exam_extras %}
 {% block title %}
-가용시간 입력 - PLAN B
+공부가능 시간 입력 - PLAN B
 {% endblock %}
-{% block page_heading %}가용시간 입력하기{% endblock %}
+{% block page_heading %}공부가능 시간 입력하기{% endblock %}
 
 {% block sidebar %}
 {% include "exams/_sidebar.html" with nav="period_detail" %}
@@ -15,7 +15,7 @@
 <div class="avail-wrap" style="max-width:960px; margin:0 auto;">
   <div class="page-head">
     <div>
-      <h1>가용시간 입력하기</h1>
+      <h1>공부가능 시간 입력하기</h1>
       <p class="sub">하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요</p>
     </div>
   </div>
@@ -29,7 +29,6 @@
   <form method="post" novalidate id="available-time-form">
     {% csrf_token %}
     {{ formset.management_form }}
-    <input type="hidden" name="next" value="{{ next }}">
 
     <div class="formset-hidden">
       {% for form in formset %}
@@ -60,37 +59,27 @@
 
           {% for day in calendar_days %}
             {% if forloop.first %}
-              {% if day.is_exam_day %}
-              <button type="button" class="avail-day exam-day" disabled
-                      data-date="{{ day.date|date:'Y-m-d' }}"
-                      style="grid-column-start:{{ day.weekday }};">
-                {{ day.date|date:"j" }}
-              </button>
-              {% else %}
-              <button type="button"
-                      class="avail-day{% if day.has_value %} has-value{% endif %}"
-                      data-index="{{ day.formset_index }}"
-                      data-date="{{ day.date|date:'Y-m-d' }}"
-                      style="grid-column-start:{{ day.weekday }};">
-                {{ day.date|date:"j" }}
-              </button>
-              {% endif %}
+            <button type="button"
+                    class="avail-day{% if day.has_value %} has-value{% endif %}{% if day.is_exam_day %} exam-day-marker{% endif %}"
+                    data-index="{{ day.formset_index }}"
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    style="grid-column-start:{{ day.weekday }};">
+              {{ day.date|date:"j" }}
+              {% if day.is_exam_day %}<span class="exam-day-dot"></span>{% endif %}
+            </button>
             {% else %}
-              {% if day.is_exam_day %}
-              <button type="button" class="avail-day exam-day" disabled
-                      data-date="{{ day.date|date:'Y-m-d' }}">
-                {{ day.date|date:"j" }}
-              </button>
-              {% else %}
-              <button type="button"
-                      class="avail-day{% if day.has_value %} has-value{% endif %}"
-                      data-index="{{ day.formset_index }}"
-                      data-date="{{ day.date|date:'Y-m-d' }}">
-                {{ day.date|date:"j" }}
-              </button>
-              {% endif %}
+            <button type="button"
+                    class="avail-day{% if day.has_value %} has-value{% endif %}{% if day.is_exam_day %} exam-day-marker{% endif %}"
+                    data-index="{{ day.formset_index }}"
+                    data-date="{{ day.date|date:'Y-m-d' }}">
+              {{ day.date|date:"j" }}
+              {% if day.is_exam_day %}<span class="exam-day-dot"></span>{% endif %}
+            </button>
             {% endif %}
           {% endfor %}
+        </div>
+        <div class="avail-legend">
+          <span class="exam-day-dot"></span> 시험일
         </div>
       </div>
 
@@ -104,7 +93,7 @@
         <input type="number" min="0" step="10"
                class="form-control num"
                id="side-panel-minutes"
-               placeholder="240">
+               placeholder="예) 240분">
         <div class="avail-side-hint">분 단위로 입력</div>
 
         <button type="button"
@@ -151,13 +140,11 @@
     minutesInput.value = total || '';
   }
 
-  document.querySelectorAll('.avail-day:not(.exam-day)').forEach(
-    function (btn) {
-      btn.addEventListener('click', function () {
-        selectDay(btn);
-      });
-    }
-  );
+  document.querySelectorAll('.avail-day').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      selectDay(btn);
+    });
+  });
 
   saveBtn.addEventListener('click', function () {
     if (!currentDay) return;
