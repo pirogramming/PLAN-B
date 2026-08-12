@@ -33,6 +33,7 @@
   <form method="post" novalidate id="available-time-form">
     {% csrf_token %}
     {{ formset.management_form }}
+    <input type="hidden" name="next" value="{{ next }}">
 
     <div class="formset-hidden">
       {% for form in formset %}
