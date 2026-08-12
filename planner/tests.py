@@ -1853,6 +1853,15 @@ class PlanGenerateFlowTests(TestCase):
             response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
         )
 
+    def test_feasibility_includes_available_time_edit_url(self):
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        expected = reverse(
+            'exams:available_time_update', kwargs={'period_id': self.exam_period.id}
+        )
+        self.assertEqual(response.context['available_time_edit_url'], expected)
+
 class FeasibilitySubjectResultsTests(TestCase):
     """
     #90 feasibility() subject_results context 테스트.
