@@ -165,9 +165,22 @@
 <script>
 var STATUS_URL = "{% url 'exams:material_analysis_status' material.id %}";
 var TASK_REVIEW_URL = "{% url 'exams:task_review' material.exam.id %}";
+
+/* 서버 렌더링 시점의 초기 상태 - 이미 완료/실패면 자동 폴링 자체를 시작 안 함 */
+var INITIAL_EXTRACT_STATUS = "{{ material.status }}";
+var INITIAL_ANALYSIS_STATUS = "{{ material.analysis_status }}";
+
 var fired = false;
 var stuckTimer = null;
 var pollCount = 0;
+var networkErrorCount = 0;
+var MAX_NETWORK_RETRIES = 3;
+
+function shouldAutoPoll() {
+  var inProgress = ['pending', 'processing'];
+  return inProgress.indexOf(INITIAL_EXTRACT_STATUS) !== -1
+      || inProgress.indexOf(INITIAL_ANALYSIS_STATUS) !== -1;
+}
 
 function showAutoLoading(text) {
   document.getElementById('auto-loading-text').textContent = text;
@@ -206,13 +219,23 @@ function checkStatusAndAct() {
       return res.json();
     })
     .then(function (data) {
+      networkErrorCount = 0;
       showDebug('요청 ' + pollCount + '회 - 응답 성공', data);
       handleStatus(data);
     })
     .catch(function (err) {
-      showAutoLoading('상태를 확인하는 중 문제가 발생했어요');
-      document.getElementById('auto-loading-stuck').classList.add('show');
-      showDebug('요청 ' + pollCount + '회 - 에러', String(err));
+      networkErrorCount += 1;
+      showDebug(
+        '요청 ' + pollCount + '회 - 네트워크 에러 (' + networkErrorCount + '/' + MAX_NETWORK_RETRIES + ')',
+        String(err)
+      );
+      if (networkErrorCount <= MAX_NETWORK_RETRIES) {
+        showAutoLoading('네트워크 상태를 다시 확인하고 있어요');
+        scheduleNextCheck();
+      } else {
+        showAutoLoading('상태를 확인하는 중 문제가 발생했어요');
+        document.getElementById('auto-loading-stuck').classList.add('show');
+      }
     });
 }
 
@@ -295,7 +318,9 @@ function handleStatus(data) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-  checkStatusAndAct();
+  if (shouldAutoPoll()) {
+    checkStatusAndAct();
+  }
 
   document.getElementById('stale-retry-btn').addEventListener('click', function () {
     document.getElementById('auto-loading-stale').classList.remove('show');
