@@ -3950,3 +3950,85 @@ class DashboardContextTests(TestCase):
 
         # task_c(배치됨, 미착수) + 미배치 2개 = 총 3개
         self.assertEqual(progress["core_left"], 3)
+
+
+class CalendarServiceYearMonthValidationTests(TestCase):
+    """
+    build_calendar_context() 자체가 year/month를 검증하는지 확인한다 (리뷰 반영).
+    View(planner/views.py)에 방어 코드가 없어도(또는 나중에 또 빠지더라도),
+    이 서비스 함수를 직접 호출하는 어떤 경로에서든 최소한의 안전장치가
+    되도록 함수 내부에서도 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="calendar_service_tester", email="calendar_service_tester@example.com",
+            password="pass1234",
+        )
+        self.today = django_timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="검증 테스트 시험기간",
+            start_date=self.today - timedelta(days=3),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def test_month_13_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, self.today.year, 13)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
+    def test_month_zero_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, self.today.year, 0)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_year_out_of_datetime_range_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 10000, 8)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_non_integer_values_fall_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, "abc", "xyz")
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_year_9999_december_boundary_does_not_crash(self):
+        """
+        year=9999, month=12는 1~12/1~9999 범위 안이라 '형식상' 유효하지만,
+        6주 격자를 채우다 보면 다음 해(10000년) 날짜가 필요해져서 그대로
+        두면 ValueError가 난다. 이 경계 케이스도 오늘 날짜로 안전하게
+        대체되어야 한다.
+        """
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 9999, 12)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
+    def test_valid_year_month_is_not_altered(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 2026, 8)
+
+        self.assertEqual(data["year"], 2026)
+        self.assertEqual(data["month"], 8)
