@@ -52,8 +52,27 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_
             "tasks": [{"title": str, "subject_name": str, "planned_minutes": int, "shade_index": int}, ...],
             "more_count": int,        # tasks에 안 들어간 나머지 개수
         }
+
+    year, month는 이 함수 자체에서도 검증한다 (호출부인 View에서 이미 걸러줬을 수도
+    있지만, 이 서비스 함수가 View를 거치지 않는 다른 경로에서 재사용되더라도 안전하게
+    동작해야 하므로). 잘못된 값(month가 1~12 범위 밖이거나 정수로 변환이 안 되는 값
+    등)이 들어오면 오늘 날짜 기준 (year, month)로 조용히 대체한다 - 실제로 사용된
+    값은 반환 dict의 "year"/"month" 키로 알려주므로, 호출부는 이 값을 그대로 써서
+    화면에 "2026년 13월" 같은 잘못된 제목이 뜨는 걸 막을 수 있다.
     """
-    weeks_dates = _month_grid_dates(year, month)
+    year, month = _normalize_year_month(year, month)
+
+    try:
+        weeks_dates = _month_grid_dates(year, month)
+    except (ValueError, OverflowError):
+        # year/month 자체는 _normalize_year_month()를 통과할 만큼 "형식상"
+        # 유효(1~12, 1~9999)하더라도, 그 달의 마지막 주가 다음 해로 넘어가면서
+        # datetime이 표현 가능한 범위(최대 9999-12-31)를 벗어나는 경계 케이스가
+        # 있다 (예: year=9999, month=12 -> 마지막 주에 10000년 날짜가 필요해짐).
+        # 이 경우도 안전하게 오늘 날짜로 대체한다.
+        today = timezone.localdate()
+        year, month = today.year, today.month
+        weeks_dates = _month_grid_dates(year, month)
     all_dates = [d for week in weeks_dates for d in week]
     min_date, max_date = min(all_dates), max(all_dates)
 
@@ -163,7 +182,34 @@ def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_
 
         weeks.append(week_cells)
 
-    return {"weeks": weeks, "day_details": day_details}
+    return {"year": year, "month": month, "weeks": weeks, "day_details": day_details}
+
+
+def _normalize_year_month(year, month) -> tuple[int, int]:
+    """
+    year/month가 유효하지 않으면(정수 변환 실패, month가 1~12 범위 밖, year가
+    datetime이 다룰 수 있는 범위 밖) 오늘 날짜 기준 (year, month)로 대체한다.
+
+    calendar.Calendar.monthdatescalendar()는 month가 1~12 범위를 벗어나면
+    IllegalMonthError를 그대로 던진다. 이 검증이 없으면, 사용자가 URL 쿼리
+    파라미터(?year=..&month=..)를 직접 조작했을 때(예: month=13, year=abc)
+    View를 거쳐 들어온 값이 그대로 여기까지 와서 500 에러로 이어진다.
+    """
+    today = timezone.localdate()
+
+    try:
+        year = int(year)
+        month = int(month)
+    except (TypeError, ValueError):
+        return today.year, today.month
+
+    if not (1 <= month <= 12):
+        return today.year, today.month
+
+    if not (datetime.MINYEAR <= year <= datetime.MAXYEAR):
+        return today.year, today.month
+
+    return year, month
 
 
 def _month_grid_dates(year: int, month: int) -> list[list[datetime.date]]:
