@@ -25,10 +25,6 @@
  
     <div class="content">
 
-      {% for message in messages %}
-        <div class="banner" style="margin-bottom:20px">{{ message }}</div>
-      {% endfor %}
-
       {# ---- 왜 복구가 필요한지 ---- #}
       <div class="banner" style="margin-bottom:24px;padding:22px 24px">
         <svg class="ico ico-lg"><use href="#i-alert"/></svg>
@@ -69,7 +65,7 @@
       {% if plans %}
         <div class="rec-grid">
           {% for p in plans %}
-            {% include "planner/includes/recovery_card.html" with plan=p selected=forloop.last %}
+            {% include "planner/includes/recovery_card.html" with plan=p selected=p.is_selected %}
           {% endfor %}
         </div>
       {% else %}
@@ -81,7 +77,6 @@
     </div>
 
     {% if plans %}
-      {% with selected_plan=plans|last %}
       <div class="bottom-bar">
         <div>
           <div class="info">선택한 복구안 · <span id="recLabel">{{ selected_plan.type_label }}</span></div>
@@ -94,7 +89,6 @@
           </a>
         </div>
       </div>
-      {% endwith %}
     {% endif %}
   </div>
 </div>

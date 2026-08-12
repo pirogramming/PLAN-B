@@ -86,7 +86,7 @@
     {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
   </div>
   <div class="feasibility-action-row">
-    <a href="{% url 'exams:available_time_update' exam_period.id %}" class="btn btn-ghost">
+    <a href="{% url 'exams:available_time_update' exam_period.id %}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가능시간 수정
     </a>
     <a href="{% url 'exams:period_detail' exam_period.id %}" class="btn btn-ghost">

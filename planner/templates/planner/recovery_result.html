@@ -25,10 +25,6 @@
 
     <div class="content">
 
-      {% for message in messages %}
-        <div class="banner" style="margin-bottom:20px">{{ message }}</div>
-      {% endfor %}
-
       <div class="page-head">
         <div>
           <h1>{{ plan.type_label }}</h1>
@@ -128,10 +124,12 @@
       <a class="btn btn-secondary" href="{{ compare_url }}">비교로 돌아가기</a>
       <div class="row ml-auto" style="gap:8px">
         <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
-        {# TODO: 복구안 적용 POST 연결 #}
-        <button class="btn btn-accent btn-lg" type="button" data-plan-id="{{ plan.id }}">
-          {{ plan.type_label }} 적용<svg class="ico"><use href="#i-check"/></svg>
-        </button>
+        <form method="post" action="{% url 'planner:recovery_apply' plan.id %}">
+          {% csrf_token %}
+          <button class="btn btn-accent btn-lg" type="submit">
+            {{ plan.type_label }} 적용<svg class="ico"><use href="#i-check"/></svg>
+          </button>
+        </form>
       </div>
     </div>
   </div>

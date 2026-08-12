@@ -198,6 +198,7 @@ class StudyTask(models.Model):
     estimated_min_minutes = models.PositiveIntegerField(default=0, verbose_name="최소 예상시간(분)")
     estimated_max_minutes = models.PositiveIntegerField(default=0, verbose_name="최대 예상시간(분)")
     ai_reason = models.TextField(null=True, blank=True, verbose_name="AI 추천 이유")
+    source_pages = models.JSONField(default=list, blank=True, verbose_name="근거 PDF 페이지 목록")
     is_user_modified = models.BooleanField(default=False, verbose_name="사용자 직접 수정 여부")
     is_confirmed = models.BooleanField(default=False, verbose_name="작업 확정 여부")
     order = models.PositiveIntegerField(default=1, verbose_name="작업 순서")

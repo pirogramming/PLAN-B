@@ -1,10 +1,13 @@
 {% comment %}
   학습 결과 입력 모달.
   화면에 하나만 두고 JS(planner.js)가 작업 정보를 채워 넣습니다.
-  전송 방식(POST URL, 필드명)은 BE 확정 후 연결합니다.
+  전송은 planner:progress_record로 간다 (POST, JSON body: status/actual_minutes/completion_percent).
+  item_id는 클릭한 .js-result 버튼의 data-id에서 읽어서 data-progress-url-template의
+  자리표시 id(999999999)를 실제 id로 치환해서 사용한다.
 {% endcomment %}
 
-<div class="modal-bg" id="resultModal" hidden>
+<div class="modal-bg" id="resultModal" hidden
+     data-progress-url-template="{% url 'planner:progress_record' item_id=999999999 %}">
   <div class="modal">
     {% csrf_token %}
 

@@ -30,7 +30,7 @@
         총 <span class="num">{{ available_times|length }}</span>일 등록됨
       </div>
     </div>
-    <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-primary">
+    <a href="{% url 'exams:available_time_update' period.id %}?next={{ request.path|urlencode }}" class="btn btn-primary">
       가능시간 입력하기
     </a>
   </div>

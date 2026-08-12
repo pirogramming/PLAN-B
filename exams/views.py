@@ -10,7 +10,7 @@ import logging
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
 from planner.services.time_estimator import estimate_task_minutes
-
+from django.utils.http import url_has_allowed_host_and_scheme
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
 from .forms import (
     ExamPeriodForm,
@@ -222,18 +222,31 @@ def available_time_update(request, period_id):
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
 
     if request.method == 'POST':
+        next_url = request.POST.get('next', '')
+
         formset = AvailableTimeFormSet(request.POST, queryset=queryset)
         if formset.is_valid():
             instances = formset.save(commit=False)
             for instance in instances:
                 instance.exam_period = period
                 instance.save()
+
+            if next_url and url_has_allowed_host_and_scheme(
+                next_url,
+                allowed_hosts={request.get_host()},
+                require_https=request.is_secure(),
+            ):
+                return redirect(next_url)
             return redirect('exams:period_detail', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
+        next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')
 
-    return render(request, 'exams/available_time_form.html', {'formset': formset, 'period': period})
-
+    return render(request, 'exams/available_time_form.html', {
+        'formset': formset,
+        'period': period,
+        'next': next_url,
+    })
 
 # =====================================================================
 # 자료 등록 (exams:material_create) 

@@ -3,7 +3,7 @@ from django.http import JsonResponse
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
-from datetime import timedelta
+from datetime import timedelta, MINYEAR, MAXYEAR
 from collections import defaultdict
 from django.db.models import Sum
 from django.contrib import messages
@@ -26,10 +26,21 @@ from planner.services.schedule_generator import (
     MismatchedExamPeriodError,
     DuplicateTaskAllocationError,
 )
+from planner.services.calendar import build_calendar_context
 from planner.services.progress_recorder import (
     finalize_daily_plan,
     DailyPlanAlreadyFinalizedError,
 )
+from planner.services.recovery import (
+    apply_recovery_plan,
+    RecoveryPlanAlreadyProcessedError,
+    RecoveryPlanStaleError,
+    RecoveryPlanInvalidDataError,
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _get_owned_exam_period(user, period_id):
     return get_object_or_404(ExamPeriod, id=period_id, user=user)
@@ -298,7 +309,7 @@ def today(request):
         'tasks': [],
         'is_finalized': False,
         'pending_recovery': None,
-        'calendar_url': reverse('planner:dashboard'),
+        'calendar_url': reverse('planner:calendar'),
     }
 
     if exam_period is None:
@@ -399,6 +410,47 @@ def today(request):
         },
     })
     return render(request, 'planner/today.html', context)
+
+@login_required
+@require_http_methods(["GET"])
+def calendar(request):
+    exam_period = (
+        ExamPeriod.objects
+        .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
+        .order_by('-created_at')
+        .first()
+    )
+
+    today_date = timezone.localdate()
+    try:
+        year = int(request.GET.get('year', today_date.year))
+        month = int(request.GET.get('month', today_date.month))
+        if not (1 <= month <= 12):
+            raise ValueError("month out of range")
+        if not (MINYEAR <= year <= MAXYEAR):
+            raise ValueError("year out of range")
+        calendar_context = build_calendar_context(exam_period, year, month)
+    except (TypeError, ValueError):
+        # year/month가 정수로 안 읽히거나 범위를 벗어난 경우뿐 아니라, 유효한
+        # 정수라도 6주 격자 패딩이 연도 경계를 넘는 경우(예: 9999년 12월)까지
+        # build_calendar_context 내부에서 ValueError가 날 수 있어 여기서 함께 잡는다.
+        year, month = today_date.year, today_date.month
+        calendar_context = build_calendar_context(exam_period, year, month)
+
+    prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+    next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+    context = {
+        'exam_period': exam_period,
+        'year': year,
+        'month': month,
+        'prev_year': prev_year,
+        'prev_month': prev_month,
+        'next_year': next_year,
+        'next_month': next_month,
+        **calendar_context,
+    }
+    return render(request, 'planner/calendar.html', context)
 
 @login_required
 @require_http_methods(["POST"])
@@ -710,9 +762,25 @@ def recovery_compare(request, group_id):
         "available_days": len({item.date for item in future_capacity}),
     }
 
+    # 미리보기에서 돌아온 경우 직전에 보고 있던 복구안을 그대로 선택 상태로 유지한다.
+    # 없거나 이미 사라진 plan id면 기존 기본값(마지막 복구안)으로 되돌아간다.
+    try:
+        requested_selected_id = int(request.GET.get("selected"))
+    except (TypeError, ValueError):
+        requested_selected_id = None
+
+    valid_ids = {p["id"] for p in plan_contexts}
+    selected_plan_id = (
+        requested_selected_id if requested_selected_id in valid_ids else plan_contexts[-1]["id"]
+    )
+    for p in plan_contexts:
+        p["is_selected"] = (p["id"] == selected_plan_id)
+    selected_plan = next(p for p in plan_contexts if p["id"] == selected_plan_id)
+
     return render(request, "planner/recovery_compare.html", {
         "exam_period": exam_period,
         "plans": plan_contexts,
+        "selected_plan": selected_plan,
         "reason": reason,
     })
 
@@ -827,9 +895,60 @@ def recovery_preview(request, plan_id):
             "exclude_minutes": exclude_minutes,
             "exclude_summary": exclude_summary,
         },
-        "compare_url": reverse(
-            "planner:recovery_compare",
-            kwargs={"group_id": recovery_plan.recovery_group_id},
+        "compare_url": (
+            reverse(
+                "planner:recovery_compare",
+                kwargs={"group_id": recovery_plan.recovery_group_id},
+            )
+            + f"?selected={recovery_plan.id}"
         ),
     }
     return render(request, "planner/recovery_result.html", context)
+
+
+@login_required
+@require_http_methods(["POST"])
+def recovery_apply(request, plan_id):
+    recovery_plan = get_object_or_404(
+        RecoveryPlan.objects
+        .select_related("exam_period", "source_daily_plan")
+        .prefetch_related("items__study_task__exam"),
+        pk=plan_id,
+        exam_period__user=request.user,
+    )
+
+    try:
+        apply_recovery_plan(recovery_plan)
+    except RecoveryPlanAlreadyProcessedError:
+        messages.error(request, "이미 처리된 복구안입니다.")
+        return redirect("planner:dashboard")
+    except RecoveryPlanStaleError:
+        messages.error(
+            request,
+            "일정이나 가능시간이 변경되어 이 복구안을 적용할 수 없습니다. 복구안을 다시 확인해주세요.",
+        )
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+    except RecoveryPlanInvalidDataError:
+        messages.error(request, "복구안 데이터에 문제가 있어 적용할 수 없습니다.")
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "복구안 적용 중 예상치 못한 오류 (plan_id=%s)", plan_id
+        )
+        messages.error(
+            request, "복구안 적용 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
+        return redirect(
+            "planner:recovery_compare",
+            group_id=recovery_plan.recovery_group_id,
+        )
+
+    messages.success(request, "선택한 복구안이 일정에 적용되었습니다.")
+    return redirect("planner:dashboard")
