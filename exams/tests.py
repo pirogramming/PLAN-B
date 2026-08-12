@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import ProtectedError
 
 from .models import ExamPeriod, Exam, AvailableTime, StudyMaterial, StudyTask
 from core.choices import (
@@ -26,6 +27,9 @@ from core.choices import (
     TaskDifficulty,
     PriorityLevel,
     TaskDepth,
+    RecoveryActionType,
+    RecoveryPlanStatus,
+    RecoveryType,
 )
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
@@ -47,7 +51,7 @@ from exams.services.analysis_orchestrator import (
 
 from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
-
+from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanItem
 User = get_user_model()
 logger = logging.getLogger(__name__)
 TEMP_MEDIA_ROOT = tempfile.mkdtemp()
@@ -2136,3 +2140,133 @@ class StudyMaterialFileDeleteRollbackTests(TransactionTestCase):
         # 트랜잭션이 롤백됐으므로 DB row도, 파일도 그대로 남아 있어야 함
         self.assertTrue(StudyMaterial.objects.filter(pk=material_pk).exists())
         self.assertTrue(storage.exists(file_path))
+
+class PeriodDeleteWithPlanTests(TestCase):
+    def setUp(self):
+        # 1. 고유한 email과 함께 유저 생성
+        self.user = User.objects.create_user(
+            username='tester',
+            email='tester@example.com',
+            password='pass1234'
+        )
+        # 2. client.force_login으로 세션 유지
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title='중간고사',
+            start_date=datetime.date(2026, 8, 1),
+            end_date=datetime.date(2026, 8, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        
+        # 3. Exam 필수 필드(exam_date) 포함
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name='알고리즘',
+            exam_date=datetime.date(2026, 8, 5),
+        )
+        
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            title='탐색 알고리즘',
+        )
+
+        # 4. 계획 생성 상태 재현 (DailyPlan + DailyPlanItem)
+        self.plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=datetime.date(2026, 8, 1),
+            available_minutes=120,
+            planned_minutes=60,
+        )
+        self.plan_item = DailyPlanItem.objects.create(
+            daily_plan=self.plan,
+            study_task=self.task,
+            planned_minutes=60,
+            order=1,
+        )
+
+    def test_direct_orm_delete_raises_protected_error(self):
+        """
+        회귀 방지: PROTECT 제약이 여전히 살아있는지 확인.
+        (ExamPeriod를 거치지 않고 StudyTask만 바로 지우면 막혀야 함)
+        """
+        with self.assertRaises(ProtectedError):
+            self.task.delete()
+
+    def test_period_delete_view_cascades_successfully(self):
+        """
+        버그 수정 검증: 계획(DailyPlan, RecoveryPlan)이 생성된 시험기간을 뷰로 삭제 시 
+        500(ProtectedError) 없이 관련 플랜 및 ExamPeriod가 정상적으로 모두 연쇄 삭제되어야 함.
+        """
+        # RecoveryPlan 및 RecoveryPlanItem 생성하여 복구안 연쇄 삭제 경로도 함께 재현
+        recovery_plan = RecoveryPlan.objects.create(
+            exam_period=self.period,
+            source_daily_plan=self.plan,
+            recovery_type=RecoveryType.MAINTAIN_VOLUME,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        recovery_plan_item = RecoveryPlanItem.objects.create(
+            recovery_plan=recovery_plan,
+            study_task=self.task,
+            action_type=RecoveryActionType.RESCHEDULE,
+        )
+
+        period_id = self.period.id
+        recovery_plan_id = recovery_plan.id
+        recovery_plan_item_id = recovery_plan_item.id
+        study_task_id = self.task.id
+
+        url = reverse('exams:period_delete', args=[period_id])
+        response = self.client.post(url)
+
+        # 302 리다이렉트 및 목록 화면으로 이동 확인
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+        # ExamPeriod, DailyPlan, RecoveryPlan 및 연결된 Item/Task 연쇄 삭제 확인
+        self.assertFalse(ExamPeriod.objects.filter(id=period_id).exists())
+        self.assertFalse(DailyPlan.objects.filter(exam_period=period_id).exists())
+        self.assertFalse(DailyPlanItem.objects.filter(study_task_id=study_task_id).exists())
+        self.assertFalse(RecoveryPlan.objects.filter(id=recovery_plan_id).exists())
+        self.assertFalse(RecoveryPlanItem.objects.filter(id=recovery_plan_item_id).exists())
+        self.assertFalse(StudyTask.objects.filter(id=study_task_id).exists())
+
+    def test_period_delete_without_plan_still_works(self):
+        """
+        회귀 방지: 계획이 없는 일반적인 경우도 그대로 잘 지워지는지 확인.
+        """
+        period2 = ExamPeriod.objects.create(
+            user=self.user,
+            title='기말고사',
+            start_date=datetime.date(2026, 12, 1),
+            end_date=datetime.date(2026, 12, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        url = reverse('exams:period_delete', args=[period2.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ExamPeriod.objects.filter(id=period2.id).exists())
+
+    def test_other_users_period_cannot_be_deleted(self):
+        """
+        권한 체크 회귀 방지: 다른 유저의 ExamPeriod 삭제 시 404가 발생해야 함.
+        """
+        other_user = User.objects.create_user(
+            username='other',
+            email='other@example.com',
+            password='pass1234'
+        )
+        other_period = ExamPeriod.objects.create(
+            user=other_user,
+            title='남의 시험',
+            start_date=datetime.date(2026, 9, 1),
+            end_date=datetime.date(2026, 9, 5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        url = reverse('exams:period_delete', args=[other_period.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(ExamPeriod.objects.filter(id=other_period.id).exists())
