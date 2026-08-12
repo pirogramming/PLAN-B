@@ -17,6 +17,7 @@ from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
 from django.utils import timezone
 from django.urls import reverse
+from django.utils.http import urlencode
 from exams.models import ExamPeriod, StudyTask, AvailableTime
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE, RISKY, IMPOSSIBLE
 from planner.services.schedule_generator import (
@@ -310,6 +311,14 @@ def feasibility(request, period_id):
         'task_count': len(tasks),
         'can_generate': is_ready and result['status'] == POSSIBLE,
         'readiness_error': readiness_error,
+        'available_time_edit_url': (
+            reverse('exams:available_time_update', kwargs={'period_id': exam_period.id})
+            + '?' + urlencode({'next': request.path})
+        ),
+        # plan_generate()가 UnallocatedTasksError로 되돌아온 경우, can_generate는
+        # 여전히 True라 기존 '가능시간 수정' 버튼(not can_generate 블록)이 안 뜬다.
+        # 그 경우를 구분하려고 redirect 쿼리파라미터를 따로 둔다.
+        'show_unallocated_hint': request.GET.get('unallocated') == '1',
     }
     return render(request, 'planner/feasibility.html', context)
 
@@ -349,7 +358,10 @@ def plan_generate(request, period_id):
             "전체 가능시간은 충분하지만 시험일 또는 날짜별 가능시간 제약으로 "
             "일부 작업을 배치하지 못했습니다. 날짜별 가능시간을 조정해주세요.",
         )
-        return redirect('planner:feasibility', period_id=exam_period.id)
+        return redirect(
+            reverse('planner:feasibility', kwargs={'period_id': exam_period.id})
+            + '?unallocated=1'
+        )
     except (MismatchedExamPeriodError, DuplicateTaskAllocationError):
         messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
         return redirect('planner:feasibility', period_id=exam_period.id)

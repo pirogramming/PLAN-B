@@ -86,11 +86,21 @@
     {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
   </div>
   <div class="feasibility-action-row">
-    <a href="{% url 'exams:available_time_update' exam_period.id %}?next={{ request.path|urlencode }}" class="btn btn-ghost">
+    <a href="{{ available_time_edit_url }}" class="btn btn-ghost">
       가능시간 수정
     </a>
     <a href="{% url 'exams:period_detail' exam_period.id %}" class="btn btn-ghost">
       학습작업 수정
+    </a>
+  </div>
+  {% elif show_unallocated_hint %}
+  {# can_generate는 True지만, 계획 생성 시 시험일/날짜별 가능시간 제약으로 일부
+     작업을 배치하지 못해 되돌아온 경우 (plan_generate의 UnallocatedTasksError).
+     에러 문구 자체는 plan_generate()의 messages.error가 이미 전역 토스트로
+     띄우므로, 여기서는 중복해서 또 보여주지 않고 이동 버튼만 둔다. #}
+  <div class="feasibility-action-row">
+    <a href="{{ available_time_edit_url }}" class="btn btn-ghost">
+      가용시간 수정하기
     </a>
   </div>
   {% endif %}
