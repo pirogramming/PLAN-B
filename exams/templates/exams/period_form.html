@@ -72,10 +72,10 @@
 
   {% if period %}
   <form method="post" action="{% url 'exams:period_delete' period.id %}"
-        onsubmit="return confirm('정말 이 시험기간을 삭제할까요? 되돌릴 수 없어요.');"
-        style="margin-top:12px;">
+    onsubmit="return confirm('정말 이 시험기간을 삭제할까요? 되돌릴 수 없어요.');" style="margin-top:12px;">
     {% csrf_token %}
-    <button type="submit" class="btn btn-secondary" style="width:100%; color:var(--judge3); border-color:var(--judge3-line);">
+    <button type="submit" class="btn btn-secondary"
+      style="width:100%; color:var(--judge3); border-color:var(--judge3-line);">
       시험기간 삭제
     </button>
   </form>
