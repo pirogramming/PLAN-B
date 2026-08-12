@@ -12,6 +12,7 @@ from core.exceptions import AIAnalysisError
 from planner.services.time_estimator import estimate_task_minutes
 from django.utils.http import url_has_allowed_host_and_scheme
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
+from planner.models import DailyPlan, RecoveryPlan
 from .forms import (
     ExamPeriodForm,
     AvailableTimeFormSet,
@@ -138,9 +139,20 @@ def period_update(request, period_id):
 @require_http_methods(["POST"])
 def period_delete(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    title = period.title
-    period.delete()
-    messages.success(request, f"'{title}' 시험기간이 삭제되었습니다.")
+    
+    # 1. delete() 실행 전, 알림 메시지에 쓸 title 변수 추출 (안전성 보장)
+    period_title = period.title
+
+    with transaction.atomic():
+        # 2. PROTECT 조건 방해 요인인 DailyPlan / RecoveryPlan 선-삭제
+        # (CASCADE에 의해 DailyPlanItem, ProgressLog, RecoveryPlanItem이 함께 정리됨)
+        DailyPlan.objects.filter(exam_period=period).delete()
+        RecoveryPlan.objects.filter(exam_period=period).delete()
+        
+        # 3. ExamPeriod 삭제 (Exam, StudyTask, AvailableTime, StudyMaterial CASCADE 삭제)
+        period.delete()
+
+    messages.success(request, f"'{period_title}' 시험기간과 관련 학습 계획이 모두 삭제되었습니다.")
     return redirect('exams:period_list')
 
 
