@@ -2850,6 +2850,28 @@ class CalendarViewTests(TestCase):
             self.assertEqual(response.context["year"], self.today.year)
             self.assertEqual(response.context["month"], self.today.month)
 
+    def test_boundary_year_month_navigation_links_use_normalized_month(self):
+        """
+        리뷰 반영: year=9999, month=12는 build_calendar_context() 내부에서
+        오늘 날짜로 보정되지만(그래야 6주 격자 패딩이 연도 경계를 안 넘음),
+        View가 그 보정된 값을 다시 받아오지 않으면 화면 제목(year/month)은
+        정상인데 "다음 달" 링크(next_year/next_month)는 여전히 9999/12
+        기준(예: next_year=10000)으로 깨질 수 있었다. 이제는 prev/next도
+        보정된 값 기준으로 계산되어야 한다.
+        """
+        self._make_active_exam_period()
+
+        response = self.client.get(self.url, {"year": 9999, "month": 12})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["year"], self.today.year)
+        self.assertEqual(response.context["month"], self.today.month)
+        # next_month가 1~12 범위를 벗어나거나(예: 13), next_year가 10000처럼
+        # 깨진 값이면 안 된다.
+        self.assertTrue(1 <= response.context["next_month"] <= 12)
+        self.assertTrue(1 <= response.context["prev_month"] <= 12)
+        self.assertNotEqual(response.context["next_year"], 10000)
+
     def test_week_grid_has_six_weeks_of_seven_days(self):
         self._make_active_exam_period()
         response = self.client.get(
@@ -4025,6 +4047,22 @@ class CalendarServiceYearMonthValidationTests(TestCase):
         self.assertEqual(data["month"], self.today.month)
         self.assertEqual(len(data["weeks"]), 6)
 
+    def test_year_1_january_boundary_does_not_crash(self):
+        """
+        year=1, month=1은 하한 경계값이다 (datetime.MINYEAR=1). 1월 1일이
+        속한 주(일요일 시작)를 채우려면 그 전 며칠(0년 12월)이 필요한데,
+        datetime은 0년을 표현할 수 없어 ValueError("year 0 is out of range")가
+        난다. 상한 경계(9999/12)뿐 아니라 이 하한 경계도 오늘 날짜로 안전하게
+        대체되어야 한다.
+        """
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 1, 1)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
     def test_valid_year_month_is_not_altered(self):
         from planner.services.calendar import build_calendar_context
 
@@ -4032,4 +4070,3 @@ class CalendarServiceYearMonthValidationTests(TestCase):
 
         self.assertEqual(data["year"], 2026)
         self.assertEqual(data["month"], 8)
-        

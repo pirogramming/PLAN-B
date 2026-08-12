@@ -3,7 +3,7 @@ from django.http import JsonResponse
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, ProgressLog
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
-from datetime import timedelta, MINYEAR, MAXYEAR
+from datetime import timedelta
 from collections import defaultdict
 from django.db.models import Sum
 from django.contrib import messages
@@ -577,17 +577,24 @@ def calendar(request):
     try:
         year = int(request.GET.get('year', today_date.year))
         month = int(request.GET.get('month', today_date.month))
-        if not (1 <= month <= 12):
-            raise ValueError("month out of range")
-        if not (MINYEAR <= year <= MAXYEAR):
-            raise ValueError("year out of range")
-        calendar_context = build_calendar_context(exam_period, year, month)
     except (TypeError, ValueError):
-        # year/month가 정수로 안 읽히거나 범위를 벗어난 경우뿐 아니라, 유효한
-        # 정수라도 6주 격자 패딩이 연도 경계를 넘는 경우(예: 9999년 12월)까지
-        # build_calendar_context 내부에서 ValueError가 날 수 있어 여기서 함께 잡는다.
         year, month = today_date.year, today_date.month
-        calendar_context = build_calendar_context(exam_period, year, month)
+
+    # 리뷰 반영: year/month의 최종 검증·보정은 build_calendar_context()가 이미
+    # 책임지고 있다 (1<=month<=12, MINYEAR<=year<=MAXYEAR 범위 체크뿐 아니라,
+    # year=9999·month=12처럼 "형식은 유효하지만 6주 격자 패딩이 연도 경계를
+    # 넘는" 경계 케이스까지). 그래서 여기서는 정수 변환 실패만 방어하고,
+    # 나머지 검증은 그쪽에 맡긴다.
+    #
+    # 중요: build_calendar_context()가 내부에서 값을 보정해도 그 사실이 이
+    # 함수의 지역변수 year/month에는 반영되지 않는다. prev/next 링크를 계산할
+    # 때 이 지역변수를 그대로 쓰면(과거에 그랬던 것처럼), 화면 제목은
+    # "2026년 8월"인데 "다음 달" 링크는 next_year=10000처럼 깨진 값을 가리키는
+    # 불일치가 생긴다. 그래서 반환값에서 실제로 사용된 year/month를 다시
+    # 받아와 그 값 기준으로 prev/next를 계산해야 한다.
+    calendar_context = build_calendar_context(exam_period, year, month)
+    year = calendar_context["year"]
+    month = calendar_context["month"]
 
     prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
     next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
