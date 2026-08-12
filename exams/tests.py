@@ -3,10 +3,13 @@ import io
 import json
 import logging
 import uuid
+import shutil
+import tempfile
 from unittest.mock import patch
 
 import pypdfium2 as pdfium
-
+from django.db import transaction
+from django.conf import settings
 from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings, Client
 from django.urls import reverse
@@ -47,6 +50,7 @@ from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionErr
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+TEMP_MEDIA_ROOT = tempfile.mkdtemp()
 
 
 class OwnershipTests(TestCase):
@@ -1994,3 +1998,141 @@ startxref
         tasks = task_extractor.fetch_extracted_tasks(self.exam, "--- 페이지 4 --- 1장 내용")
 
         self.assertEqual(tasks[0].source_pages, [4])
+
+
+def make_file(name='sample.pdf'):
+    return SimpleUploadedFile(name, b'dummy pdf content', content_type='application/pdf')
+ 
+ 
+@override_settings(MEDIA_ROOT=TEMP_MEDIA_ROOT)
+class StudyMaterialFileDeleteSignalTests(TestCase):
+    """
+    StudyMaterial.file이 post_delete 시그널을 통해
+    (단독 삭제 / CASCADE / QuerySet 대량삭제 모든 경로에서) 정리되는지 검증.
+    """
+ 
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
+ 
+    def setUp(self):
+        self.user = User.objects.create_user(username='tester', password='pw')
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title='2026 2학기 중간고사',
+            start_date='2026-10-01',
+            end_date='2026-10-10',
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name='자료구조',
+            exam_date='2026-10-05',
+        )
+ 
+    def _create_material_with_file(self, filename='sample.pdf'):
+        material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title='1단원 요약',
+            file=make_file(filename),
+        )
+        self.assertTrue(material.file.storage.exists(material.file.name))
+        return material
+ 
+    def test_delete_study_material_directly_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_delete_exam_cascades_and_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            self.exam.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_delete_exam_period_cascades_and_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            self.exam_period.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_bulk_queryset_delete_removes_file(self):
+        """QuerySet.delete()로 대량삭제해도 post_delete 시그널이 걸려서 파일이 지워져야 함"""
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            StudyMaterial.objects.filter(pk=material.pk).delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_material_without_file_deletes_without_error(self):
+        material = StudyMaterial.objects.create(exam=self.exam, title='텍스트만 있는 자료')
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.delete()  # 에러 없이 통과해야 함
+ 
+    def test_replacing_file_deletes_old_file(self):
+        material = self._create_material_with_file('old.pdf')
+        old_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.file = make_file('new.pdf')
+            material.save()
+ 
+        self.assertFalse(storage.exists(old_path))
+        self.assertTrue(storage.exists(material.file.name))
+ 
+ 
+@override_settings(MEDIA_ROOT=TEMP_MEDIA_ROOT)
+class StudyMaterialFileDeleteRollbackTests(TransactionTestCase):
+    """
+    실제 트랜잭션 커밋/롤백이 필요한 테스트라 TransactionTestCase 사용.
+    (TestCase는 매 테스트를 롤백하는 방식이라 on_commit이 실제로 발생하지 않음)
+    """
+ 
+    def tearDown(self):
+        shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
+ 
+    def test_rollback_does_not_delete_file(self):
+        user = User.objects.create_user(username='tester2', password='pw')
+        exam_period = ExamPeriod.objects.create(
+            user=user, title='기말고사', start_date='2026-12-01', end_date='2026-12-10'
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name='알고리즘', exam_date='2026-12-05'
+        )
+        material = StudyMaterial.objects.create(exam=exam, title='요약', file=make_file())
+        material_pk = material.pk  # delete() 호출 시 material.pk가 None으로 바뀌므로 미리 저장
+        file_path = material.file.name
+        storage = material.file.storage
+        self.assertTrue(storage.exists(file_path))
+ 
+        class RollbackTriggered(Exception):
+            pass
+ 
+        try:
+            with transaction.atomic():
+                material.delete()
+                raise RollbackTriggered('의도적으로 롤백 발생')
+        except RollbackTriggered:
+            pass
+ 
+        # 트랜잭션이 롤백됐으므로 DB row도, 파일도 그대로 남아 있어야 함
+        self.assertTrue(StudyMaterial.objects.filter(pk=material_pk).exists())
+        self.assertTrue(storage.exists(file_path))
