@@ -161,16 +161,21 @@ document.addEventListener('DOMContentLoaded', function () {
         })
         .then(function (data) {
           finalizeResult = data;
-        })
-        .catch(function () {
-          finalizeResult = { error: true };
-          progressHint.textContent = '오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
-        })
-        .finally(function () {
           steps.forEach(function (s) {
             s.classList.remove('doing');
             s.classList.add('done');
           });
+        })
+        .catch(function () {
+          finalizeResult = { error: true };
+          progressHint.textContent = '오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+          // 실패 시에는 done 처리하지 않는다 (마감이 안 됐는데 단계가 끝난 것처럼
+          // 보이면 안 됨). 확인을 누르면 그냥 모달만 닫히고 새로고침/이동은 안 한다.
+          steps.forEach(function (s) {
+            s.classList.remove('doing', 'done');
+          });
+        })
+        .finally(function () {
           recalcDone = true;
           progressDone.disabled = false;
         });
