@@ -112,16 +112,15 @@
 (function () {
   var tabs = document.querySelectorAll('[data-method-tabs] .tab');
   var typeInput = document.getElementById('{{ form.material_type.id_for_label }}');
-
   var pdfValue = '';
   var textValue = '';
+
   if (typeInput) {
     Array.prototype.forEach.call(typeInput.options, function (opt) {
       var upper = opt.value.toUpperCase();
       if (upper === 'PDF') pdfValue = opt.value;
       if (upper === 'TEXT') textValue = opt.value;
     });
-
     /* PDF 탭이 기본 활성 탭이므로, select의 기존 initial 값과 무관하게
        페이지 로드 시 항상 pdf로 맞춰줌 */
     typeInput.value = pdfValue;
@@ -152,7 +151,7 @@
 
   var titleInput = document.getElementById('{{ form.title.id_for_label }}');
   if (titleInput && !titleInput.value) {
-    titleInput.value = '{{ exam.subject_name }} 시험범위';
+    titleInput.value = '{{ exam.subject_name|escapejs }} 시험범위';
   }
 })();
 
