@@ -26,3 +26,13 @@ google-genai==2.16.0
 
 # 소셜 로그인
 django-allauth[socialaccount]==65.18.0
+
+# 배포용
+gunicorn==23.0.0
+psycopg[binary]==3.2.13
+dj-database-url==2.3.0
+whitenoise==6.8.2
+
+# 업로드 파일(PDF) 영구 저장용
+django-storages[google]==1.14.4
+google-cloud-storage==2.19.0
