@@ -824,3 +824,31 @@
   color: var(--neutral7);
   margin-top: 4px;
 }
+
+/* 가용시간 입력 - 시험일 잠금 해제 + 표시만 남김 */
+.exam-day-marker {
+  border: 1.5px solid var(--judge3);
+}
+.exam-day-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--judge3);
+  margin-left: 2px;
+  vertical-align: super;
+}
+.avail-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--neutral7);
+  margin-top: 12px;
+}
+
+/* placeholder를 연하게 (예시 텍스트임을 명확히) */
+#side-panel-minutes::placeholder {
+  color: var(--neutral6);
+  opacity: 1;
+}
