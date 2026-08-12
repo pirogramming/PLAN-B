@@ -310,6 +310,9 @@ def feasibility(request, period_id):
         'task_count': len(tasks),
         'can_generate': is_ready and result['status'] == POSSIBLE,
         'readiness_error': readiness_error,
+        'available_time_edit_url': reverse(
+            'exams:available_time_update', kwargs={'period_id': exam_period.id}
+        ),
     }
     return render(request, 'planner/feasibility.html', context)
 
