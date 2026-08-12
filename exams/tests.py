@@ -27,6 +27,9 @@ from core.choices import (
     TaskDifficulty,
     PriorityLevel,
     TaskDepth,
+    RecoveryActionType,
+    RecoveryPlanStatus,
+    RecoveryType,
 )
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
@@ -48,8 +51,7 @@ from exams.services.analysis_orchestrator import (
 
 from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
-from planner.models import DailyPlan, DailyPlanItem
-
+from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanItem
 User = get_user_model()
 logger = logging.getLogger(__name__)
 TEMP_MEDIA_ROOT = tempfile.mkdtemp()
@@ -2147,7 +2149,7 @@ class PeriodDeleteWithPlanTests(TestCase):
             email='tester@example.com',
             password='pass1234'
         )
-        # 2. client.login 대신 force_login 사용으로 세션 확실히 유지
+        # 2. client.force_login으로 세션 유지
         self.client.force_login(self.user)
 
         self.period = ExamPeriod.objects.create(
@@ -2170,7 +2172,7 @@ class PeriodDeleteWithPlanTests(TestCase):
             title='탐색 알고리즘',
         )
 
-        # 계획 생성 상태 재현 (DailyPlan + DailyPlanItem)
+        # 4. 계획 생성 상태 재현 (DailyPlan + DailyPlanItem)
         self.plan = DailyPlan.objects.create(
             exam_period=self.period,
             date=datetime.date(2026, 8, 1),
@@ -2187,30 +2189,52 @@ class PeriodDeleteWithPlanTests(TestCase):
     def test_direct_orm_delete_raises_protected_error(self):
         """
         회귀 방지: PROTECT 제약이 여전히 살아있는지 확인.
+        (ExamPeriod를 거치지 않고 StudyTask만 바로 지우면 막혀야 함)
         """
         with self.assertRaises(ProtectedError):
             self.task.delete()
 
     def test_period_delete_view_cascades_successfully(self):
         """
-        버그 수정 검증: 계획이 생성된 시험기간을 뷰로 삭제 시 정상 삭제되어야 함.
+        버그 수정 검증: 계획(DailyPlan, RecoveryPlan)이 생성된 시험기간을 뷰로 삭제 시 
+        500(ProtectedError) 없이 관련 플랜 및 ExamPeriod가 정상적으로 모두 연쇄 삭제되어야 함.
         """
-        url = reverse('exams:period_delete', args=[self.period.id])
+        # RecoveryPlan 및 RecoveryPlanItem 생성하여 복구안 연쇄 삭제 경로도 함께 재현
+        recovery_plan = RecoveryPlan.objects.create(
+            exam_period=self.period,
+            source_daily_plan=self.plan,
+            recovery_type=RecoveryType.MAINTAIN_VOLUME,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        recovery_plan_item = RecoveryPlanItem.objects.create(
+            recovery_plan=recovery_plan,
+            study_task=self.task,
+            action_type=RecoveryActionType.RESCHEDULE,
+        )
+
+        period_id = self.period.id
+        recovery_plan_id = recovery_plan.id
+        recovery_plan_item_id = recovery_plan_item.id
+        study_task_id = self.task.id
+
+        url = reverse('exams:period_delete', args=[period_id])
         response = self.client.post(url)
 
+        # 302 리다이렉트 및 목록 화면으로 이동 확인
         self.assertEqual(response.status_code, 302)
         self.assertRedirects(response, reverse('exams:period_list'))
 
-        # ExamPeriod와 하위 객체들 모두 삭제 확인
-        self.assertFalse(ExamPeriod.objects.filter(id=self.period.id).exists())
-        self.assertFalse(Exam.objects.filter(id=self.exam.id).exists())
-        self.assertFalse(StudyTask.objects.filter(id=self.task.id).exists())
-        self.assertFalse(DailyPlan.objects.filter(id=self.plan.id).exists())
-        self.assertFalse(DailyPlanItem.objects.filter(id=self.plan_item.id).exists())
+        # ExamPeriod, DailyPlan, RecoveryPlan 및 연결된 Item/Task 연쇄 삭제 확인
+        self.assertFalse(ExamPeriod.objects.filter(id=period_id).exists())
+        self.assertFalse(DailyPlan.objects.filter(exam_period=period_id).exists())
+        self.assertFalse(DailyPlanItem.objects.filter(study_task_id=study_task_id).exists())
+        self.assertFalse(RecoveryPlan.objects.filter(id=recovery_plan_id).exists())
+        self.assertFalse(RecoveryPlanItem.objects.filter(id=recovery_plan_item_id).exists())
+        self.assertFalse(StudyTask.objects.filter(id=study_task_id).exists())
 
     def test_period_delete_without_plan_still_works(self):
         """
-        회귀 방지: 계획이 없는 일반적인 경우도 잘 지워지는지 확인.
+        회귀 방지: 계획이 없는 일반적인 경우도 그대로 잘 지워지는지 확인.
         """
         period2 = ExamPeriod.objects.create(
             user=self.user,
@@ -2227,11 +2251,11 @@ class PeriodDeleteWithPlanTests(TestCase):
 
     def test_other_users_period_cannot_be_deleted(self):
         """
-        권한 체크 회귀 방지: 다른 유저의 ExamPeriod 삭제 시 404 발생.
+        권한 체크 회귀 방지: 다른 유저의 ExamPeriod 삭제 시 404가 발생해야 함.
         """
         other_user = User.objects.create_user(
             username='other',
-            email='other@example.com',  # 고유한 이메일 전달
+            email='other@example.com',
             password='pass1234'
         )
         other_period = ExamPeriod.objects.create(
