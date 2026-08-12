@@ -3916,3 +3916,26 @@ class DashboardContextTests(TestCase):
 
         response = self._get_dashboard()
         self.assertIsNone(response.context["exam_period"])
+
+# ── 8. core_left는 계획에 아직 안 들어간 CORE 작업도 포함 ──
+    def test_core_left_includes_unscheduled_core_tasks(self):
+        from exams.models import StudyTask
+
+        # task_c는 이미 어제 계획에 배치돼 있음(setUp에서). 여기에 아직
+        # 계획에 안 들어간 CORE 작업 2개를 추가로 만든다.
+        StudyTask.objects.create(
+            exam=self.exam, title="미배치 핵심 작업 1", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=4,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        StudyTask.objects.create(
+            exam=self.exam, title="미배치 핵심 작업 2", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=5,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # task_c(배치됨, 미착수) + 미배치 2개 = 총 3개
+        self.assertEqual(progress["core_left"], 3)

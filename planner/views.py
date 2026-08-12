@@ -202,9 +202,8 @@ def _build_progress(exam_period, today_plan, today_count, today_minutes):
     total_total, total_done = _credit(all_items)
 
     core_left = sum(
-        1 for item in all_items
-        if item.study_task.depth == TaskDepth.CORE
-        and getattr(item, 'progress_log', None) is None
+        1 for task in _confirmed_tasks(exam_period)
+        if task.depth == TaskDepth.CORE and _remaining_task_minutes(task)[1] > 0
     )
 
     return {
