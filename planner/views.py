@@ -1,6 +1,6 @@
 import json
 from django.http import JsonResponse
-from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan
+from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, ProgressLog
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
 from django.contrib.auth.decorators import login_required
 from datetime import timedelta, MINYEAR, MAXYEAR
@@ -11,14 +11,14 @@ from django.http import JsonResponse
 from django.http import Http404
 from core.choices import RecoveryActionType, RecoveryType, TaskDepth
 from planner.services.recovery import get_future_available_capacity
-from planner.services.time_estimator import estimate_task_minutes
+from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
 from django.utils import timezone
 from django.urls import reverse
 from exams.models import ExamPeriod, StudyTask, AvailableTime
-from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE
+from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE, RISKY, IMPOSSIBLE
 from planner.services.schedule_generator import (
     generate_schedule,
     ScheduleAlreadyExistsError,
@@ -70,6 +70,151 @@ def _get_pending_recovery(exam_period):
         'count': pending_recovery_qs.values('recovery_group_id').distinct().count(),
     }
 
+def _remaining_task_minutes(task):
+    """
+    아직 안 끝난 작업의 남은 필요시간(min/max).
+    recovery.py의 _remaining_minutes()와 같은 방식(최신 speed_factor로 재추정 +
+    완료율 반영)이지만, "오늘 계획" 범위가 아니라 이 작업의 가장 최근 ProgressLog
+    전체를 본다 (대시보드는 시험기간 전체 기준이라 특정 날짜에 묶이지 않음).
+    """
+    latest_log = (
+        ProgressLog.objects
+        .filter(daily_plan_item__study_task=task)
+        .order_by('-recorded_at')
+        .first()
+    )
+    est_min, est_max = estimate_task_minutes(
+        task.task_type, task.difficulty, task.exam.speed_factor
+    )
+    if latest_log is None or latest_log.progress_status == ProgressStatus.NOT_DONE:
+        return est_min, est_max
+    if latest_log.progress_status == ProgressStatus.DONE:
+        return 0, 0
+    # PARTIAL
+    remaining_ratio = max(100 - (latest_log.completion_percent or 0), 0) / 100
+    return (
+        round_up_to_five(est_min * remaining_ratio),
+        round_up_to_five(est_max * remaining_ratio),
+    )
+
+
+def _build_overall(exam_period, remaining_days):
+    """
+    시험기간 전체 기준 Fit Bar. recovery_compare의 _fit_bar_context()와
+    같은 공식(A~B 구간 + axis_max = max(가용,필요) * 1.15)을 재사용한다.
+    """
+    tasks = list(_confirmed_tasks(exam_period))
+    required_min = required_max = 0
+    for task in tasks:
+        mn, mx = _remaining_task_minutes(task)
+        required_min += mn
+        required_max += mx
+
+    future_capacity = get_future_available_capacity(exam_period, timezone.localdate())
+    available_minutes = sum(item.available_minutes for item in future_capacity)
+
+    result = calculate_feasibility(required_min, required_max, available_minutes)
+    status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+
+    axis_max = max(available_minutes, required_max, 1) * 1.15
+    min_pct = round(required_min / axis_max * 100, 1)
+    max_pct = round(required_max / axis_max * 100, 1)
+
+    daily_extra_minutes = (
+        round(result["shortage_minutes"] / remaining_days)
+        if remaining_days and result["shortage_minutes"] else 0
+    )
+
+    return {
+        "status": result["status"],
+        "status_label": status_label_map[result["status"]],
+        "viewed_at": timezone.now(),
+        "min_minutes": required_min,
+        "max_minutes": required_max,
+        "available_minutes": available_minutes,
+        "max_shortage_minutes": result["shortage_minutes"],
+        "daily_extra_minutes": daily_extra_minutes,
+        "min_pct": min_pct,
+        "band_pct": round(max_pct - min_pct, 1),
+        "mark_pct": round(min(available_minutes / axis_max * 100, 100), 1),
+        "need_label_pct": round((min_pct + max_pct) / 2, 1),
+        "axis_max": round(axis_max),
+    }
+
+
+def _build_subject_summary(exam_period):
+    today = timezone.localdate()
+    summary = []
+    for exam in exam_period.exams.all().order_by('exam_date'):
+        subject_tasks = _confirmed_tasks(exam_period).filter(exam=exam)
+        remaining_minutes = 0
+        remaining_task_count = 0
+        for task in subject_tasks:
+            _mn, mx = _remaining_task_minutes(task)
+            if mx > 0:
+                remaining_minutes += mx
+                remaining_task_count += 1
+
+        d_day = (exam.exam_date - today).days
+        summary.append({
+            "subject_name": exam.subject_name,
+            "exam_date": exam.exam_date,
+            "d_day": d_day,
+            "is_near": d_day <= 3,
+            "remaining_minutes": remaining_minutes,
+            "remaining_task_count": remaining_task_count,
+        })
+    return summary
+
+
+def _build_progress(exam_period, today_plan, today_count, today_minutes):
+    """
+    완료 크레딧 방식은 today()와 동일: DONE은 planned_minutes 전액,
+    PARTIAL은 completion_percent 비율만큼만 인정.
+    today_*는 오늘 하루, total_*는 이 시험기간에 지금까지 생성된 모든
+    DailyPlanItem 누적 기준이다.
+    """
+    def _credit(items):
+        total = 0
+        done = 0
+        for item in items:
+            planned = item.planned_minutes
+            total += planned
+            log = getattr(item, 'progress_log', None)
+            if log is None:
+                continue
+            if log.progress_status == ProgressStatus.DONE:
+                done += planned
+            elif log.progress_status == ProgressStatus.PARTIAL:
+                done += planned * (log.completion_percent or 0) // 100
+        return total, done
+
+    today_items = list(
+        today_plan.items.select_related('progress_log')
+    ) if today_plan else []
+    today_total, today_done = _credit(today_items)
+
+    all_items = list(
+        DailyPlanItem.objects
+        .filter(daily_plan__exam_period=exam_period)
+        .select_related('progress_log', 'study_task')
+    )
+    total_total, total_done = _credit(all_items)
+
+    core_left = sum(
+        1 for task in _confirmed_tasks(exam_period)
+        if task.depth == TaskDepth.CORE and _remaining_task_minutes(task)[1] > 0
+    )
+
+    return {
+        "today_percent": round(today_done / today_total * 100) if today_total else 0,
+        "today_done_minutes": today_done,
+        "today_total_minutes": today_total,
+        "total_percent": round(total_done / total_total * 100) if total_total else 0,
+        "total_done_minutes": total_done,
+        "total_minutes": total_total,
+        "core_left": core_left,
+    }
 
 def _available_times(exam_period):
     """
@@ -241,8 +386,7 @@ def plan_complete(request, period_id):
 @require_http_methods(["GET"])
 def dashboard(request):
     """
-    1단계 최소 버전: 시험기간 존재 여부, 계획 존재 여부, 오늘 할 일 개수만 보여준다.
-    Fit Bar/과목별 요약/진행률 집계는 #51 머지 후 데이터 파이프라인이 갖춰지면 추가한다.
+    시험기간/계획 존재 여부에 따라 온보딩 화면 또는 전체 대시보드를 보여준다.
     """
     exam_period = (
         ExamPeriod.objects
@@ -280,6 +424,10 @@ def dashboard(request):
     today_count = today_plan.items.count() if today_plan else 0
     today_minutes = today_plan.planned_minutes if today_plan else 0
 
+    remaining_days = len(
+        {at.date for at in get_future_available_capacity(exam_period, today)}
+    )
+
     context = {
         'exam_period': exam_period,
         'has_plan': True,
@@ -287,6 +435,10 @@ def dashboard(request):
         'today_count': today_count,
         'today_minutes': today_minutes,
         'pending_recovery': _get_pending_recovery(exam_period),
+        'remaining_days': remaining_days,
+        'overall': _build_overall(exam_period, remaining_days),
+        'subject_summary': _build_subject_summary(exam_period),
+        'progress': _build_progress(exam_period, today_plan, today_count, today_minutes),
     }
     return render(request, 'planner/dashboard.html', context)
 

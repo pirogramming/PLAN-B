@@ -3762,3 +3762,191 @@ class RecoveryApplyViewTests(TestCase):
         self.assertTrue(
             any("오류가 발생했습니다" in str(m) for m in messages_list)
         )
+
+class DashboardContextTests(TestCase):
+    """
+    #102 dashboard() context(remaining_days/overall/subject_summary/progress) 테스트.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="dashboard_ctx_tester",
+            email="dashboard_ctx@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="dashboard_ctx@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="대시보드 context 테스트 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=7),
+            speed_factor=1.0,
+        )
+
+        # task_a: 완료 (concept/normal -> 20~40분, DONE이라 remaining 0)
+        self.task_a = StudyTask.objects.create(
+            exam=self.exam, title="완료 작업", importance="high", depth="basic",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        # task_b: 오늘 절반 완료 (PARTIAL 50%) -> remaining min=10, max=20
+        self.task_b = StudyTask.objects.create(
+            exam=self.exam, title="일부완료 작업", importance="high", depth="basic",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        # task_c: 손도 안 댐, CORE -> remaining min=20, max=40, core_left에 잡혀야 함
+        self.task_c = StudyTask.objects.create(
+            exam=self.exam, title="미착수 핵심 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=3,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+
+        # 오늘 계획: task_a(완료), task_b(일부완료)
+        self.today_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=80, planned_minutes=80,
+        )
+        item_a = DailyPlanItem.objects.create(
+            daily_plan=self.today_plan, study_task=self.task_a,
+            planned_minutes=40, order=1,
+        )
+        item_b = DailyPlanItem.objects.create(
+            daily_plan=self.today_plan, study_task=self.task_b,
+            planned_minutes=40, order=2,
+        )
+        record_progress(daily_plan_item=item_a, status="done", actual_minutes=35)
+        record_progress(
+            daily_plan_item=item_b, status="partial",
+            actual_minutes=20, completion_percent=50,
+        )
+
+        # 어제 계획: task_c(미착수, 기록 없음) -> total에는 잡히지만 today에는 안 잡혀야 함
+        yesterday_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=1),
+            available_minutes=40, planned_minutes=40,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=yesterday_plan, study_task=self.task_c,
+            planned_minutes=40, order=1,
+        )
+
+        # 미래 가용시간 3일치 (remaining_days, overall.available_minutes 계산용)
+        for i in range(1, 4):
+            AvailableTime.objects.create(
+                exam_period=self.exam_period,
+                date=self.today + timedelta(days=i),
+                available_minutes=60,
+            )
+
+    def _get_dashboard(self):
+        return self.client.get(reverse("planner:dashboard"))
+
+    # ── 1. remaining_days ──────────────────────────
+    def test_remaining_days_counts_future_available_dates(self):
+        response = self._get_dashboard()
+        self.assertEqual(response.context["remaining_days"], 3)
+
+    # ── 2. overall - 필요시간 계산 (DONE/PARTIAL/미착수 각각 다르게) ──
+    def test_overall_required_minutes_reflects_each_task_status(self):
+        response = self._get_dashboard()
+        overall = response.context["overall"]
+
+        # task_a(DONE)=0,0 + task_b(PARTIAL 50%)=10,20 + task_c(미착수)=20,40
+        self.assertEqual(overall["min_minutes"], 30)
+        self.assertEqual(overall["max_minutes"], 60)
+
+    # ── 3. overall - 가용시간 및 판정 ────────────────
+    def test_overall_available_minutes_and_status(self):
+        response = self._get_dashboard()
+        overall = response.context["overall"]
+
+        self.assertEqual(overall["available_minutes"], 180)  # 60분 x 3일
+        self.assertEqual(overall["status"], POSSIBLE)
+        self.assertEqual(overall["max_shortage_minutes"], 0)
+
+    # ── 4. subject_summary ────────────────────────
+    def test_subject_summary_excludes_done_task(self):
+        response = self._get_dashboard()
+        summary = response.context["subject_summary"]
+
+        self.assertEqual(len(summary), 1)
+        subject = summary[0]
+        self.assertEqual(subject["subject_name"], "테스트 과목")
+        # task_a(DONE)는 remaining 0이라 카운트에서 빠지고, task_b(20)+task_c(40)만 잡힘
+        self.assertEqual(subject["remaining_task_count"], 2)
+        self.assertEqual(subject["remaining_minutes"], 60)
+        self.assertEqual(subject["d_day"], 7)
+
+    # ── 5. progress - 오늘 vs 전체가 다른 범위를 봐야 함 ──
+    def test_progress_today_differs_from_total(self):
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # 오늘: task_a(40, DONE 전액) + task_b(40, 50%=20) = done 60 / total 80
+        self.assertEqual(progress["today_total_minutes"], 80)
+        self.assertEqual(progress["today_done_minutes"], 60)
+        self.assertEqual(progress["today_percent"], 75)
+
+        # 전체: 오늘(80) + 어제 task_c(40, 기록없음=0 인정) = done 60 / total 120
+        self.assertEqual(progress["total_minutes"], 120)
+        self.assertEqual(progress["total_done_minutes"], 60)
+        self.assertEqual(progress["total_percent"], 50)
+
+    # ── 6. core_left - 기록 없는 CORE 작업만 카운트 ──
+    def test_core_left_counts_untouched_core_tasks_only(self):
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # task_c만 CORE이고 기록이 없음 -> 1
+        self.assertEqual(progress["core_left"], 1)
+
+    # ── 7. 다른 사용자 시험기간은 안 보임 (기존 패턴 재확인) ──
+    def test_other_user_does_not_see_this_exam_period(self):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        other = User.objects.create_user(
+            username="dashboard_ctx_other",
+            email="dashboard_ctx_other@example.com",
+            password="pass1234",
+        )
+        self.client.logout()
+        self.client.login(username="dashboard_ctx_other@example.com", password="pass1234")
+
+        response = self._get_dashboard()
+        self.assertIsNone(response.context["exam_period"])
+
+# ── 8. core_left는 계획에 아직 안 들어간 CORE 작업도 포함 ──
+    def test_core_left_includes_unscheduled_core_tasks(self):
+        from exams.models import StudyTask
+
+        # task_c는 이미 어제 계획에 배치돼 있음(setUp에서). 여기에 아직
+        # 계획에 안 들어간 CORE 작업 2개를 추가로 만든다.
+        StudyTask.objects.create(
+            exam=self.exam, title="미배치 핵심 작업 1", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=4,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+        StudyTask.objects.create(
+            exam=self.exam, title="미배치 핵심 작업 2", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=5,
+            estimated_min_minutes=20, estimated_max_minutes=40, is_confirmed=True,
+        )
+
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # task_c(배치됨, 미착수) + 미배치 2개 = 총 3개
+        self.assertEqual(progress["core_left"], 3)
