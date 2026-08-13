@@ -79,6 +79,8 @@ class AvailableTimeForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.fields['date'].disabled = True
+
         total_minutes = self.instance.available_minutes or 0
 
         self.fields['hours'].initial = total_minutes // 60
