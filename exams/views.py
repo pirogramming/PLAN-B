@@ -1,4 +1,5 @@
 import datetime
+from django.utils import timezone
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
@@ -6,7 +7,7 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.db import transaction
 import logging
-
+from django.core.exceptions import ValidationError
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
 from planner.services.time_estimator import estimate_task_minutes
@@ -225,40 +226,250 @@ def subject_delete(request, period_id, exam_id):
 
 
 # =====================================================================
-# 가능시간 입력 (exams:available_time_update) 
+# 가능시간 입력 (exams:available_time_update)
 # =====================================================================
 @login_required
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+    period = get_object_or_404(
+        ExamPeriod,
+        id=period_id,
+        user=request.user,
+    )
 
-    if request.method == 'POST':
-        next_url = request.POST.get('next', '')
+    queryset = AvailableTime.objects.filter(
+        exam_period=period
+    ).order_by("date")
 
-        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
-        if formset.is_valid():
-            instances = formset.save(commit=False)
-            for instance in instances:
+    today = timezone.localdate()
+
+    # ================================================================
+    # POST
+    # ================================================================
+    if request.method == "POST":
+
+        formset = AvailableTimeFormSet(
+            request.POST,
+            queryset=queryset,
+        )
+
+        next_url = (
+            request.POST.get("next")
+            or request.GET.get("next")
+            or request.META.get("HTTP_REFERER", "")
+        )
+
+        # ------------------------------------------------------------
+        # FormSet validation
+        # ------------------------------------------------------------
+        if not formset.is_valid():
+            return render(
+                request,
+                "exams/available_time_form.html",
+                {
+                    "formset": formset,
+                    "period": period,
+                    "next": next_url,
+                },
+            )
+
+        # ------------------------------------------------------------
+        # 이미 마감된 날짜 조회
+        # ------------------------------------------------------------
+        finalized_dates = set(
+            DailyPlan.objects.filter(
+                exam_period=period,
+                finalized_at__isnull=False,
+            ).values_list("date", flat=True)
+        )
+
+        # ------------------------------------------------------------
+        # 변경된 폼 + 수정 불가능한 날짜 검사
+        # ------------------------------------------------------------
+        changed_forms = []
+        blocked_dates = []
+
+        for form in formset.forms:
+
+            if not form.cleaned_data:
+                continue
+
+            form_date = form.cleaned_data.get("date")
+
+            hours = form.cleaned_data.get("hours") or 0
+            minutes = form.cleaned_data.get("minutes") or 0
+
+            submitted_minutes = hours * 60 + minutes
+
+            instance = form.instance
+
+            current_minutes = (
+                instance.available_minutes
+                if instance and instance.pk
+                else 0
+            ) or 0
+
+            # 실제 값이 바뀐 경우만 처리
+            is_changed = submitted_minutes != current_minutes
+
+            if not is_changed:
+                continue
+
+            changed_forms.append(form)
+
+            # --------------------------------------------------------
+            # 과거 날짜
+            # --------------------------------------------------------
+            if form_date < today:
+                blocked_dates.append(
+                    (
+                        form_date,
+                        "past",
+                    )
+                )
+                continue
+
+            # --------------------------------------------------------
+            # 마감된 날짜
+            # --------------------------------------------------------
+            if form_date in finalized_dates:
+                blocked_dates.append(
+                    (
+                        form_date,
+                        "finalized",
+                    )
+                )
+
+        # ------------------------------------------------------------
+        # 수정 불가능한 날짜가 하나라도 있으면
+        # 전체 저장 취소
+        # ------------------------------------------------------------
+        if blocked_dates:
+            
+            for blocked_date, reason in blocked_dates:
+                if reason == "past":
+                    msg = (
+                        f"{blocked_date} 은(는) 지난 날짜라 "
+                        "가용 시간을 수정할 수 없습니다."
+                    )
+                else:
+                    msg = (
+                        f"{blocked_date} 은(는) 이미 마감된 날짜라 "
+                        "가용 시간을 수정할 수 없습니다."
+                    )
+
+
+                formset._non_form_errors.append(
+                    ValidationError(msg)
+                )
+
+                print(
+                    formset.non_form_errors()
+                )
+
+                messages.error(request, msg)
+
+            return render(
+                request,
+                "exams/available_time_form.html",
+                {
+                    "formset": formset,
+                    "period": period,
+                    "next": next_url,
+                },
+            )
+
+        # ------------------------------------------------------------
+        # 변경된 값 저장
+        # ------------------------------------------------------------
+        saved_instances = []
+
+        with transaction.atomic():
+
+            for form in changed_forms:
+
+                instance = form.save(commit=False)
+
                 instance.exam_period = period
+
                 instance.save()
 
-            if next_url and url_has_allowed_host_and_scheme(
-                next_url,
-                allowed_hosts={request.get_host()},
-                require_https=request.is_secure(),
-            ):
-                return redirect(next_url)
-            return redirect('exams:period_detail', period_id=period.id)
-    else:
-        formset = AvailableTimeFormSet(queryset=queryset)
-        next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')
+                saved_instances.append(instance)
 
-    return render(request, 'exams/available_time_form.html', {
-        'formset': formset,
-        'period': period,
-        'next': next_url,
-    })
+            # --------------------------------------------------------
+            # DailyPlan available_minutes 동기화
+            # --------------------------------------------------------
+            if saved_instances:
+
+                dates = [
+                    instance.date
+                    for instance in saved_instances
+                ]
+
+                minutes_by_date = {
+                    instance.date: instance.available_minutes
+                    for instance in saved_instances
+                }
+
+                daily_plans = list(
+                    DailyPlan.objects.filter(
+                        exam_period=period,
+                        date__in=dates,
+                    )
+                )
+
+                for plan in daily_plans:
+                    plan.available_minutes = minutes_by_date[
+                        plan.date
+                    ]
+
+                if daily_plans:
+                    DailyPlan.objects.bulk_update(
+                        daily_plans,
+                        ["available_minutes"],
+                    )
+
+        messages.success(
+            request,
+            "가용 시간이 성공적으로 저장되었습니다.",
+        )
+
+        # ------------------------------------------------------------
+        # next URL 검증 후 redirect
+        # ------------------------------------------------------------
+        if next_url and url_has_allowed_host_and_scheme(
+            next_url,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure(),
+        ):
+            return redirect(next_url)
+
+        return redirect(
+            "exams:period_detail",
+            period_id=period.id,
+        )
+
+    # ================================================================
+    # GET
+    # ================================================================
+    formset = AvailableTimeFormSet(
+        queryset=queryset,
+    )
+
+    next_url = (
+        request.GET.get("next")
+        or request.META.get("HTTP_REFERER", "")
+    )
+
+    return render(
+        request,
+        "exams/available_time_form.html",
+        {
+            "formset": formset,
+            "period": period,
+            "next": next_url,
+        },
+    )
 
 # =====================================================================
 # 자료 등록 (exams:material_create) 

@@ -2270,3 +2270,177 @@ class PeriodDeleteWithPlanTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertTrue(ExamPeriod.objects.filter(id=other_period.id).exists())
+
+def _minutes_to_hm(total_minutes):
+    return divmod(total_minutes, 60)
+
+
+class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
+    """
+    정책:
+    - 미래 날짜: 자유롭게 수정 가능
+    - 과거 날짜 또는 이미 마감된(DailyPlan.finalized_at 존재) 날짜: 수정 차단
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester3",
+            email="tester3@test.com",
+            password="pw12345!",
+        )
+
+        login_result = self.client.login(
+            email="tester3@test.com",
+            password="pw12345!",
+        )
+
+
+        self.today = timezone.localdate()
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="쪽지시험",
+            start_date=self.today - datetime.timedelta(days=2),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        self.past_date = self.today - datetime.timedelta(days=1)
+        self.finalized_future_date = self.today + datetime.timedelta(days=1)
+        self.open_future_date = self.today + datetime.timedelta(days=3)
+
+        self.at_past = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.past_date,
+            available_minutes=30,
+        )
+
+        self.at_finalized_future = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.finalized_future_date,
+            available_minutes=60,
+        )
+
+        self.at_open_future = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.open_future_date,
+            available_minutes=60,
+        )
+
+        self.finalized_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=self.finalized_future_date,
+            available_minutes=60,
+            planned_minutes=60,
+            finalized_at=timezone.now(),
+        )
+
+        self.open_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=self.open_future_date,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+
+        self.url = reverse(
+            "exams:available_time_update",
+            args=[self.period.id],
+        )
+    def _build_data(self, overrides=None):
+        overrides = overrides or {}
+        queryset = AvailableTime.objects.filter(exam_period=self.period).order_by("date")
+        
+        at_by_id = {obj.id: obj for obj in queryset}
+        
+        overrides_by_id = {}
+        for at_obj, new_minutes in overrides.items():
+            at_obj.refresh_from_db()
+            overrides_by_id[at_obj.id] = new_minutes
+        
+        data = {
+            "form-TOTAL_FORMS": str(queryset.count()),
+            "form-INITIAL_FORMS": str(queryset.count()),
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+        }
+        
+        for i, obj in enumerate(queryset):
+            target_minutes = overrides_by_id.get(obj.id, obj.available_minutes)
+            hours, minutes = _minutes_to_hm(target_minutes)
+            
+            data[f"form-{i}-id"] = str(obj.id)
+            data[f"form-{i}-date"] = obj.date.isoformat()
+            data[f"form-{i}-hours"] = str(hours)
+            data[f"form-{i}-minutes"] = str(minutes)
+        
+        # ⚠️ 디버깅: 실제 생성된 폼 데이터 출력
+        print(f"\n=== _build_data 생성 결과 ===")
+        print(f"TOTAL_FORMS: {data['form-TOTAL_FORMS']}")
+        for i in range(queryset.count()):
+            print(f"form-{i}: id={data.get(f'form-{i}-id')}, date={data.get(f'form-{i}-date')}, "
+                f"hours={data.get(f'form-{i}-hours')}, minutes={data.get(f'form-{i}-minutes')}")
+        
+        return data
+
+
+
+    def test_open_future_date_is_freely_editable(self):
+        data = self._build_data({self.at_open_future: 100})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 302)
+
+        self.at_open_future.refresh_from_db()
+        self.assertEqual(self.at_open_future.available_minutes, 100)
+
+        self.open_plan.refresh_from_db()
+        self.assertEqual(self.open_plan.available_minutes, 100)
+
+    def test_finalized_future_date_is_blocked(self):
+        original_minutes = self.at_finalized_future.available_minutes
+        data = self._build_data({self.at_finalized_future: 999})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 200)
+
+        formset = response.context["formset"]
+        self.assertTrue(formset.non_form_errors())
+
+        self.at_finalized_future.refresh_from_db()
+        self.assertEqual(self.at_finalized_future.available_minutes, original_minutes)
+
+        self.finalized_plan.refresh_from_db()
+        self.assertEqual(self.finalized_plan.available_minutes, 60)
+
+    def test_past_date_is_blocked(self):
+        original_minutes = self.at_past.available_minutes
+        data = self._build_data({self.at_past: 999})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 200)
+
+        self.at_past.refresh_from_db()
+        self.assertEqual(self.at_past.available_minutes, original_minutes)
+
+    def test_finalized_date_blocks_entire_submission(self):
+        data = self._build_data({
+            self.at_finalized_future: 999,
+            self.at_open_future: 100,
+        })
+        self.client.post(self.url, data)
+
+        self.at_open_future.refresh_from_db()
+        self.assertEqual(self.at_open_future.available_minutes, 60)
+
+    def test_future_date_without_daily_plan_is_editable(self):
+        no_plan_date = self.today + datetime.timedelta(days=4)
+        at_no_plan = AvailableTime.objects.create(
+            exam_period=self.period, date=no_plan_date, available_minutes=30
+        )
+        data = self._build_data({at_no_plan: 45})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 302)
+
+        at_no_plan.refresh_from_db()
+        self.assertEqual(at_no_plan.available_minutes, 45)
