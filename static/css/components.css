@@ -190,6 +190,13 @@
   cursor: not-allowed;
   margin-bottom: 14px;
 }
+.task-readonly-value {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--neutral3);
+  color: var(--neutral9);
+  font-size: 14px;
+}
 .task-field-group {
   margin-bottom: 14px;
 }
@@ -416,6 +423,7 @@
   color: var(--neutral9);
   font-family: var(--mono);
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
   padding: 6px;
@@ -427,6 +435,11 @@
   color: var(--neutral6);
   cursor: not-allowed;
 }
+.avail-day.past-day {
+  background: var(--neutral2);
+  color: var(--neutral5);
+  cursor: not-allowed;
+}
 .avail-day.has-value::after {
   content: "";
   position: absolute;
@@ -436,6 +449,18 @@
   height: 5px;
   border-radius: 50%;
   background: var(--judge1);
+}
+/* period_manage_available_time.html 전용 — 점 표시 대신 칸 자체 색이
+   바뀌고 설정한 시간이 숫자로 보이는 버전. 기존 available_time_form.html은
+   .has-value(점)를 그대로 쓰므로 서로 영향 없다. */
+.avail-day.value-set {
+  background: var(--brand1);
+  color: var(--brand4);
+}
+.avail-day-val {
+  font-size: 10.5px;
+  font-weight: 700;
+  margin-top: auto;
 }
 .avail-day.sel {
   background: var(--brand4);
@@ -470,6 +495,72 @@
 }
 .avail-next-btn {
   margin-top: 18px;
+}
+
+/* period_manage_available_time.html 전용 스코프 — 같은 .avail-* 클래스를
+   재사용하되 .pmavail-wrap 아래에서만 다시 스타일링해서 애플 느낌으로
+   다듬는다. available_time_form.html(공용 화면)은 .pmavail-wrap이 없어서
+   영향 없다. */
+.pmavail-wrap {
+  max-width: 900px;
+  margin: 0 auto;
+  padding-bottom: 60px;
+}
+.pmavail-wrap .card {
+  border: 1px solid var(--neutral5);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+}
+.pmavail-wrap .avail-body {
+  align-items: stretch;
+}
+.pmavail-wrap .avail-side-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.pmavail-wrap .avail-side-col {
+  flex: 1;
+}
+.pmavail-wrap .avail-next-btn {
+  margin-top: 0;
+}
+.pmavail-wrap .avail-side-date {
+  margin-bottom: 20px;
+}
+.pmavail-wrap .form-control {
+  border: 1px solid var(--neutral5);
+  box-shadow: none;
+}
+.pmavail-wrap .form-control:focus {
+  border-color: var(--brand4);
+}
+
+/* period_manage_task_view.html 전용 스코프 — task_review.html(공용 화면)의
+   .task-item-card 등은 그대로 두고, .pmtask-wrap 아래에서만 얇은 테두리·
+   부드러운 그림자로 다듬는다. */
+.pmtask-wrap .card {
+  border: 1px solid var(--neutral5);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+}
+/* .badge는 이 화면에서 planner.css 버전(테두리+배경 필)을 쓰는데,
+   components.css의 .badge::before(점 표시)가 같이 로드돼서 색 없는
+   빈 점이 겹쳐 보이는 문제가 있었다 — 이 화면에서만 점을 없앤다. */
+.pmtask-wrap .badge::before {
+  content: none;
+}
+.pmtask-wrap .task-title-row {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--neutral11);
+  margin: 6px 0 14px;
+}
+.pmtask-wrap .task-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 .formset-hidden {
   display: none;

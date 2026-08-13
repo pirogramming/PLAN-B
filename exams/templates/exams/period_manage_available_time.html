@@ -1,0 +1,185 @@
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
+{% block title %}
+가능시간 수정 - PLAN B
+{% endblock %}
+{% block page_heading %}가능시간 수정{% endblock %}
+
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_manage_available_time" period=period %}
+{% endblock %}
+
+{% block exam_content %}
+{% get_calendar_grid period.id as calendar_days %}
+
+<div class="pmavail-wrap">
+  <div class="page-head">
+    <div>
+      <h1>가능시간 수정</h1>
+      <p class="sub">하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요</p>
+    </div>
+  </div>
+
+  {% if formset.non_form_errors %}
+  <div class="form-error-box">
+    {{ formset.non_form_errors|striptags }}
+  </div>
+  {% endif %}
+
+  <form method="post" novalidate id="available-time-form">
+    {% csrf_token %}
+    {{ formset.management_form }}
+
+    <div class="formset-hidden">
+      {% for form in formset %}
+      <div data-formset-row="{{ forloop.counter0 }}">
+        {{ form.id }}
+        {{ form.date }}
+        {{ form.hours }}
+        {{ form.minutes }}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="avail-body">
+      <div class="card card-body avail-cal-col">
+        <div class="avail-cal-title">
+          {{ period.start_date|date:"n월 j일" }} -
+          {{ period.end_date|date:"n월 j일" }}
+        </div>
+
+        <div class="avail-cal-grid">
+          <div class="avail-weekday">월</div>
+          <div class="avail-weekday">화</div>
+          <div class="avail-weekday">수</div>
+          <div class="avail-weekday">목</div>
+          <div class="avail-weekday">금</div>
+          <div class="avail-weekday">토</div>
+          <div class="avail-weekday">일</div>
+
+          {% for day in calendar_days %}
+            {% if day.is_exam_day or day.is_past %}
+            <button type="button"
+                    class="avail-day {% if day.is_exam_day %}exam-day{% else %}past-day{% endif %}" disabled
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
+              {{ day.date|date:"j" }}
+            </button>
+            {% else %}
+            <button type="button"
+                    class="avail-day{% if day.has_value %} value-set{% endif %}"
+                    data-index="{{ day.formset_index }}"
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
+              {{ day.date|date:"j" }}
+              <span class="avail-day-val">{% if day.has_value %}{{ day.minutes }}분{% endif %}</span>
+            </button>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="avail-side-wrap">
+        <div class="card card-body avail-side-col disabled" id="side-panel">
+          <div id="side-panel-date" class="avail-side-date">
+            날짜를 선택하세요
+          </div>
+
+          <div class="row" style="justify-content:space-between;align-items:baseline;margin-bottom:7px">
+            <label class="field-label" style="margin-bottom:0">공부 가능한 시간</label>
+            <span class="avail-side-hint" style="margin-top:0">분 단위로 입력</span>
+          </div>
+          <input type="number" min="0" step="10"
+                 class="form-control num"
+                 id="side-panel-minutes"
+                 placeholder="ex) 200분">
+
+          <button type="button"
+                  class="btn btn-brand avail-save-btn"
+                  style="width:100%;"
+                  id="side-panel-save">
+            수정
+          </button>
+        </div>
+
+        <button type="submit" class="btn btn-lg onboarding-cta avail-next-btn" style="width:100%;">
+          저장
+        </button>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block exam_extra_js %}
+<script>
+(function () {
+  var sidePanel = document.getElementById('side-panel');
+  var dateLabel = document.getElementById('side-panel-date');
+  var minutesInput = document.getElementById('side-panel-minutes');
+  var saveBtn = document.getElementById('side-panel-save');
+  var currentDay = null;
+
+  // "수정" 버튼으로 확정한 날짜만 선택 가능 (시험일/과거 날짜는 disabled라
+  // 애초에 여기 안 들어옴) — Enter로 다음 칸 넘어갈 때 이 순서를 따라간다.
+  var selectableDays = Array.prototype.slice.call(
+    document.querySelectorAll('.avail-day:not(.exam-day):not(.past-day)')
+  );
+
+  function selectDay(dayBtn) {
+    document.querySelectorAll('.avail-day').forEach(function (d) {
+      d.classList.remove('sel');
+    });
+    dayBtn.classList.add('sel');
+    currentDay = dayBtn;
+    sidePanel.classList.remove('disabled');
+    dateLabel.textContent = dayBtn.dataset.date;
+
+    var row = document.querySelector(
+      '[data-formset-row="' + dayBtn.dataset.index + '"]'
+    );
+    var hoursInput = row.querySelector('input[name$="-hours"]');
+    var minInput = row.querySelector('input[name$="-minutes"]');
+    var total = (parseInt(hoursInput.value || 0, 10) * 60) +
+                parseInt(minInput.value || 0, 10);
+    minutesInput.value = total || '';
+    minutesInput.focus();
+    minutesInput.select();
+  }
+
+  function commitCurrentDay() {
+    if (!currentDay) return;
+    var total = parseInt(minutesInput.value || 0, 10);
+    var row = document.querySelector(
+      '[data-formset-row="' + currentDay.dataset.index + '"]'
+    );
+    row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
+    row.querySelector('input[name$="-minutes"]').value = total % 60;
+    currentDay.classList.toggle('value-set', total > 0);
+
+    var valEl = currentDay.querySelector('.avail-day-val');
+    valEl.textContent = total > 0 ? total + '분' : '';
+  }
+
+  selectableDays.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      selectDay(btn);
+    });
+  });
+
+  saveBtn.addEventListener('click', commitCurrentDay);
+
+  minutesInput.addEventListener('keydown', function (event) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    commitCurrentDay();
+
+    var index = selectableDays.indexOf(currentDay);
+    var next = selectableDays[index + 1];
+    if (next) {
+      selectDay(next);
+    }
+  });
+})();
+</script>
+{% endblock %}

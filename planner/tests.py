@@ -1823,14 +1823,12 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 2
         )
 
-    def test_plan_generate_twice_redirects_to_complete(self):
+    def test_plan_generate_twice_redirects_to_dashboard(self):
         self._make_confirmed_task(order=1, min_m=20, max_m=40)
         AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
 
@@ -1838,9 +1836,7 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 1
         )

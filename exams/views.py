@@ -158,6 +158,68 @@ def period_detail(request, period_id):
 
 
 # =====================================================================
+# 시험기간 관리 (exams:period_manage)
+# 계획이 이미 생성된 시험기간용 화면. period_detail과 달리 과목 추가/수정/
+# 삭제·시험범위 등록은 여기서 할 수 없다 (계획이 그 데이터를 기준으로 이미
+# 배치돼 있어서, 여기서 바꾸면 계획과 어긋난다) — 가능시간 수정, 학습작업
+# 확인, 시험기간 종료만 가능하다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET"])
+def period_manage(request, period_id):
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    exams = period.exams.all()
+    available_times = period.available_times.all()
+    context = {'period': period, 'exams': exams, 'available_times': available_times}
+    return render(request, 'exams/period_manage.html', context)
+
+
+# =====================================================================
+# 시험기간 관리 - 가능시간 수정 (exams:period_manage_available_time)
+# available_time_update의 축소판. feasibility 등 다른 화면은 여전히
+# available_time_update(다음 버튼, next 파라미터)를 그대로 쓰고, 이 화면은
+# period_manage 전용이라 저장 버튼 하나만 있고 항상 period_manage로 돌아간다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET", "POST"])
+def period_manage_available_time(request, period_id):
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+
+    if request.method == 'POST':
+        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
+        if formset.is_valid():
+            instances = formset.save(commit=False)
+            for instance in instances:
+                instance.exam_period = period
+                instance.save()
+            return redirect('exams:period_manage', period_id=period.id)
+    else:
+        formset = AvailableTimeFormSet(queryset=queryset)
+
+    return render(request, 'exams/period_manage_available_time.html', {
+        'formset': formset,
+        'period': period,
+    })
+
+
+# =====================================================================
+# 시험기간 관리 - 학습작업 확인 (exams:period_manage_task_view)
+# task_review의 읽기 전용 버전. 계획이 이미 생성된 뒤라 작업 추가/수정/삭제·
+# 확정은 계획과 어긋날 수 있어서 막고, 내용 확인만 가능하다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET"])
+def period_manage_task_view(request, exam_id):
+    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    tasks = StudyTask.objects.filter(exam=exam).order_by('order', 'id')
+    return render(request, 'exams/period_manage_task_view.html', {
+        'exam': exam,
+        'tasks': tasks,
+    })
+
+
+# =====================================================================
 # 과목 추가 (exams:subject_create) 
 # =====================================================================
 @login_required

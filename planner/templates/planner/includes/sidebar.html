@@ -30,13 +30,13 @@
 
   <div class="side-label">시험기간</div>
   {% if exam_period %}
-    <div class="side-box">
+    <a class="side-box" href="{% url 'exams:period_manage' exam_period.id %}">
       <h4>{{ exam_period.title }}</h4>
       <p class="num">{{ exam_period.start_date|date:"m.d" }} ~ {{ exam_period.end_date|date:"m.d" }}</p>
       <div class="meter" style="margin-top:12px">
         <i style="width:{{ exam_period.progress_percent|default:0 }}%"></i>
       </div>
-    </div>
+    </a>
   {% else %}
     <a class="side-box dashed"
        href="{% if user.is_authenticated %}{% url 'exams:period_create' %}{% else %}{% url 'accounts:login' %}{% endif %}">
@@ -46,11 +46,8 @@
 
   <div class="side-foot">
     {% if user.is_authenticated %}
-      {% comment %}
-      TODO: 계획이 완성된 상태에서는 복구안 생성 허브로 보내야 함 (지금은
-      시험기간 등록만 있어서 그리로 보냄)
-      {% endcomment %}
-      <a class="nav-i" href="{% url 'exams:period_create' %}">
+      <a class="nav-i"
+         href="{% if exam_period %}{% url 'exams:period_manage' exam_period.id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
         <svg class="ico"><use href="#i-user"/></svg>
         {{ user.nickname|default:user.username }}
       </a>

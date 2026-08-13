@@ -345,7 +345,7 @@ def plan_generate(request, period_id):
         )
     except ScheduleAlreadyExistsError:
         messages.info(request, "이미 생성된 계획이 있습니다.")
-        return redirect('planner:plan_complete', period_id=exam_period.id)
+        return redirect('planner:dashboard')
     except UnallocatedTasksError:
         messages.error(
             request,
@@ -357,7 +357,7 @@ def plan_generate(request, period_id):
         messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
         return redirect('planner:feasibility', period_id=exam_period.id)
 
-    return redirect('planner:plan_complete', period_id=exam_period.id)
+    return redirect('planner:dashboard')
 
 
 @login_required

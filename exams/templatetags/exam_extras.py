@@ -13,6 +13,8 @@ FE1(신예원) 전용 템플릿 태그.
 from datetime import timedelta
 
 from django import template
+from django.utils import timezone
+
 from exams.models import Exam, AvailableTime, ExamPeriod
 
 register = template.Library()
@@ -47,6 +49,7 @@ def get_calendar_grid(period_id):
     )
     date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
     date_to_minutes = {d: m for d, m in available_rows}
+    today = timezone.localdate()
 
     days = []
     current = period.start_date
@@ -55,8 +58,10 @@ def get_calendar_grid(period_id):
             'date': current,
             'weekday': current.isoweekday(),  # 1=월 ... 7=일
             'is_exam_day': current in exam_dates,
+            'is_past': current < today,
             'formset_index': date_to_index.get(current),
             'has_value': date_to_minutes.get(current, 0) > 0,
+            'minutes': date_to_minutes.get(current, 0),
         })
         current += timedelta(days=1)
     return days
