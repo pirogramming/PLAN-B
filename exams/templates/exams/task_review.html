@@ -6,7 +6,7 @@
 {% block page_heading %}학습 작업{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="task_review" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -143,15 +143,6 @@
             class="btn btn-primary btn-lg task-primary-btn"
           >
             저장하고 다음으로
-          </button>
-          <button
-            type="submit"
-            name="action"
-            value="save"
-            class="btn btn-secondary btn-sm task-secondary-btn"
-            id="save-action-btn"
-          >
-            임시 저장
           </button>
         </div>
         {% endif %}
