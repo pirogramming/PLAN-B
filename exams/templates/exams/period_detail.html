@@ -19,7 +19,7 @@
       </p>
     </div>
     <a href="{% url 'exams:period_update' period.id %}" class="btn btn-secondary" style="margin-left:auto;">
-      기간 수정
+      시험 기간 수정
     </a>
   </div>
 
@@ -30,7 +30,8 @@
         총 <span class="num">{{ available_times|length }}</span>일 등록됨
       </div>
     </div>
-    <a href="{% url 'exams:available_time_update' period.id %}?next={{ request.path|urlencode }}" class="btn btn-primary">
+    <a href="{% url 'exams:available_time_update' period.id %}?next={{ request.path|urlencode }}"
+      class="btn btn-primary">
       가능시간 입력하기
     </a>
   </div>
@@ -61,14 +62,11 @@
         </div>
       </div>
       <div class="period-subject-actions">
-        <a href="{% url 'exams:subject_update' period.id exam.id %}"
-           class="btn btn-secondary period-small-btn">
+        <a href="{% url 'exams:subject_update' period.id exam.id %}" class="btn btn-secondary period-small-btn">
           수정
         </a>
-        <form method="post"
-              action="{% url 'exams:subject_delete' period.id exam.id %}"
-              onsubmit="return confirm('{{ exam.subject_name }} 과목을 삭제할까요?');"
-              class="period-inline-form">
+        <form method="post" action="{% url 'exams:subject_delete' period.id exam.id %}"
+          onsubmit="return confirm('{{ exam.subject_name }} 과목을 삭제할까요?');" class="period-inline-form">
           {% csrf_token %}
           <button type="submit" class="btn btn-secondary period-small-btn period-delete-btn">
             삭제
@@ -91,4 +89,4 @@
 {% endblock %}
 
 {# available_times 요약은 아직 개수만 보여줌 — 더 자세한 요약(예: 채워진 날짜 비율)이
-   필요하면 이주헌/장희원한테 view에서 요약값을 context로 내려달라고 요청하면 됨. #}
+필요하면 이주헌/장희원한테 view에서 요약값을 context로 내려달라고 요청하면 됨. #}
