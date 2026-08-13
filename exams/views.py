@@ -90,7 +90,9 @@ def period_create(request):
                 )
                 curr_date += datetime.timedelta(days=1)
 
-            return redirect('exams:period_detail', period_id=period.id)
+            # FE1(신예원): 시험기간 생성 직후에는 허브(시험기간 홈)로 보내지 않고
+            # 피그마 3→4페이지 순서 그대로 '과목 등록'으로 바로 이어지게 한다.
+            return redirect('exams:subject_create', period_id=period.id)
     else:
         form = ExamPeriodForm()
 
@@ -171,7 +173,7 @@ def subject_create(request, period_id):
             exam = form.save(commit=False)
             exam.exam_period = period
             exam.save()
-            return redirect('exams:period_detail', period_id=period.id)
+            return redirect('exams:subject_create', period_id=period.id)
     else:
         form = ExamForm(exam_period=period)
 

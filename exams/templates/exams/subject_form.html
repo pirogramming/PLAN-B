@@ -6,7 +6,7 @@
 {% block page_heading %}과목 등록하기{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="subject_create" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -63,7 +63,7 @@
         </div>
 
         <button type="submit" class="btn btn-secondary" style="width:100%; margin-top:24px;">
-          + 과목 추가
+          + 과목 등록
         </button>
       </form>
     </div>
@@ -92,7 +92,8 @@
     </div>
   </div>
 
-  <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-primary btn-lg"
+  <a href="{% url 'exams:available_time_update' period.id %}?next={% if period_exams %}{% url 'exams:material_create' period_exams.0.id %}{% endif %}"
+     class="btn btn-primary btn-lg"
      style="margin-top:20px; {% if not period_exams %}pointer-events:none; opacity:.5;{% endif %}">
     다음
   </a>
