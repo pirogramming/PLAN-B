@@ -566,8 +566,20 @@ def task_review(request, exam_id):
 
             if action in ('confirm', 'confirm_and_next'):
                 exam.study_tasks.filter(is_confirmed=False).update(is_confirmed=True)
-                return redirect('planner:feasibility', period_id=exam.exam_period_id)
 
+                # #99 근본 수정 전까지 FE에서 임시로 처리: 같은 시험기간의 다른 과목 중
+                # 아직 미확정 작업이 남아있는 과목이 있으면 그 과목으로 계속 이동시키고,
+                # 전부 확정됐을 때만 feasibility로 넘어간다.
+                next_exam = Exam.objects.filter(
+                    exam_period_id=exam.exam_period_id,
+                    study_tasks__is_confirmed=False,
+                ).exclude(id=exam.id).order_by('exam_date').distinct().first()
+
+                if next_exam:
+                    return redirect('exams:task_review', exam_id=next_exam.id)
+
+                return redirect('planner:feasibility', period_id=exam.exam_period_id)
+                
             return redirect('exams:task_review', exam_id=exam.id)
     else:
         formset = StudyTaskFormSet(queryset=queryset)
