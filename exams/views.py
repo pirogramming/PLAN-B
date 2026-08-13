@@ -40,36 +40,57 @@ logger = logging.getLogger(__name__)
 
 
 def check_exam_period_locked_by_period_id(view_func):
-    """시험기간 ID(period_id)를 인자로 받아 이미 계획이 생성된 경우 수정/삭제 요청을 거부하는 데코레이터"""
+    """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
     @wraps(view_func)
     def wrapped_view(request, period_id, *args, **kwargs):
-        period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-        if DailyPlan.objects.filter(exam_period=period).exists():
-            messages.error(request, "이미 계획이 생성된 시험기간은 수정하거나 삭제할 수 없습니다.")
-            return redirect('exams:period_detail', period_id=period.id)
+        if request.method == 'POST':
+            with transaction.atomic():
+                period = get_object_or_404(
+                    ExamPeriod.objects.select_for_update(),
+                    id=period_id,
+                    user=request.user
+                )
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간은 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
         return view_func(request, period_id, *args, **kwargs)
     return wrapped_view
 
+
 def check_exam_period_locked_by_exam_id(view_func):
-    """과목 ID(exam_id)를 인자로 받아 소속 시험기간에 계획이 생성된 경우 수정/삭제 요청을 거부하는 데코레이터"""
+    """exam_id 기준: POST 요청 시 소속 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
     @wraps(view_func)
     def wrapped_view(request, exam_id, *args, **kwargs):
-        exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
-        if DailyPlan.objects.filter(exam_period=exam.exam_period).exists():
-            messages.error(request, "이미 계획이 생성된 시험기간의 과목은 수정하거나 삭제할 수 없습니다.")
-            return redirect('exams:period_detail', period_id=exam.exam_period.id)
+        if request.method == 'POST':
+            with transaction.atomic():
+                exam = get_object_or_404(
+                    Exam.objects.select_related('exam_period'),
+                    id=exam_id,
+                    exam_period__user=request.user
+                )
+                period = ExamPeriod.objects.select_for_update().get(id=exam.exam_period_id)
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간의 과목은 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
         return view_func(request, exam_id, *args, **kwargs)
     return wrapped_view
 
+
 def check_exam_period_locked_by_material_id(view_func):
-    """학습자료 ID(material_id)를 인자로 받아 소속 시험기간에 계획이 생성된 경우 수정/삭제 요청을 거부하는 데코레이터"""
+    """material_id 기준: POST 요청 시 소속 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
     @wraps(view_func)
     def wrapped_view(request, material_id, *args, **kwargs):
-        material = get_object_or_404(StudyMaterial, id=material_id, exam__exam_period__user=request.user)
-        period = material.exam.exam_period
-        if DailyPlan.objects.filter(exam_period=period).exists():
-            messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
-            return redirect('exams:period_detail', period_id=period.id)
+        if request.method == 'POST':
+            with transaction.atomic():
+                material = get_object_or_404(
+                    StudyMaterial.objects.select_related('exam__exam_period'),
+                    id=material_id,
+                    exam__exam_period__user=request.user
+                )
+                period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
         return view_func(request, material_id, *args, **kwargs)
     return wrapped_view
 
@@ -612,6 +633,7 @@ def material_detail(request, material_id):
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_material_id
 @require_http_methods(["POST"])
 def material_extract(request, material_id):
     material = get_object_or_404(
@@ -642,8 +664,7 @@ def material_extract(request, material_id):
         else:
             messages.error(
                 request,
-                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 "
-                "화면에서 확인해주세요.",
+                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.",
             )
         return redirect('exams:material_detail', material_id=material.id)
 
@@ -714,6 +735,7 @@ def material_delete(request, material_id):
 # AI 분석 실행 (exams:material_analyze) - E-AI-01
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_material_id
 @require_http_methods(["POST"])
 def material_analyze(request, material_id):
     material = get_object_or_404(
@@ -753,6 +775,7 @@ def material_analyze(request, material_id):
 # AI 분석 재시도 (exams:material_retry_analyze) - E-AI-03
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_material_id
 @require_http_methods(["POST"])
 def material_retry_analyze(request, material_id):
     material = get_object_or_404(
