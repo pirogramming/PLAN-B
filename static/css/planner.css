@@ -275,7 +275,7 @@
 
 /* ===== 반응형 ===== */
 @media (max-width:1024px){
-  .grid-3,.grid-4{grid-template-columns:repeat(2,1fr)}
+  .grid-3{grid-template-columns:repeat(2,1fr)}
   .content{padding:28px 20px 40px}
 }
 
@@ -296,19 +296,29 @@
   .nav-i .count{display:none}
 
   .content{padding:20px 16px 96px}
-  .grid-3,.grid-4{grid-template-columns:1fr}
+  .grid-3{grid-template-columns:1fr}
   .page-head{flex-direction:column;align-items:flex-start;gap:16px}
   .page-head h1{font-size:23px}
   .page-head .ml-auto{margin-left:0;width:100%}
   .page-head .btn{width:100%}
+
+  /* 대시보드 "오늘의 공부 시작" : 날짜 아래로 내려가지 않고 항상
+     날짜(00월 00일 0요일) 오른쪽에 붙어있게 한다 */
+  .page-head.today-cta-head{flex-direction:row;align-items:center;flex-wrap:wrap}
+  .page-head.today-cta-head .btn{width:auto;margin-left:auto}
+
   .topbar{padding:0 16px}
   .steps{flex-direction:column}
   .step{border-right:0}
 
-  /* 배너(복구안 대기 등) : 아이콘+본문+버튼이 한 줄에 다 들어가면
-     좁은 화면에서 버튼이 찌그러지니 세로로 쌓는다 */
-  .banner{flex-wrap:wrap}
-  .banner .actions{align-self:stretch;width:100%;margin-top:4px}
+  /* 배너(복구안 대기 등) : 버튼(action)이 있는 배너는 좁은 화면에서
+     아이콘+본문 텍스트를 다 보여줄 자리가 없어서, 버튼만 남긴다.
+     (액션 버튼이 없는 안내용 배너는 텍스트가 유일한 정보라 그대로 둔다) */
+  .banner:has(.actions){
+    flex-wrap:wrap;background:none;border:0;padding:0;box-shadow:none;
+  }
+  .banner:has(.actions) .ico,.banner:has(.actions) .body{display:none}
+  .banner .actions{align-self:stretch;width:100%;margin-top:0}
   .banner .actions .btn{width:100%;min-width:0}
 
   /* 과목 카드 : D-day + 과목명 한 줄, 숫자는 아랫줄로 */
@@ -639,6 +649,13 @@
   .task-time{flex:1 1 auto;text-align:left;padding-top:12px;
              border-top:1px solid var(--neutral4)}
   .task .btn{align-self:flex-end;margin-top:12px}
+
+  /* 전체 계획 날짜 상세 목록은 수정 버튼이 없어서(읽기 전용), 위의
+     세로 쌓기(제목 줄바꿈 + 분 아래로)가 필요 없다 — 학습 작업 제목과
+     분이 한 줄에 나란히 보이게 되돌린다 */
+  .cal-pane .task{flex-wrap:nowrap}
+  .cal-pane .task-main{flex:1;min-width:0}
+  .cal-pane .task-time{flex:none;text-align:right;padding-top:0;border-top:0}
 
   .bottom-bar{flex-direction:column;align-items:stretch;padding:14px 16px;bottom:76px}
   .bottom-bar .row{flex-direction:column;align-items:stretch;margin-left:0;width:100%}
