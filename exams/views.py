@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 def check_exam_period_locked_by_period_id(view_func):
-    """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
+    """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후
+    계획 존재 여부 검증 + view_func 실행까지 동일 트랜잭션/락 스코프 안에서 수행"""
     @wraps(view_func)
     def wrapped_view(request, period_id, *args, **kwargs):
         if request.method == 'POST':
@@ -53,12 +54,12 @@ def check_exam_period_locked_by_period_id(view_func):
                 if DailyPlan.objects.filter(exam_period=period).exists():
                     messages.error(request, "이미 계획이 생성된 시험기간은 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
+                return view_func(request, period_id, *args, **kwargs)
         return view_func(request, period_id, *args, **kwargs)
     return wrapped_view
 
 
 def check_exam_period_locked_by_exam_id(view_func):
-    """exam_id 기준: POST 요청 시 소속 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
     @wraps(view_func)
     def wrapped_view(request, exam_id, *args, **kwargs):
         if request.method == 'POST':
@@ -72,12 +73,12 @@ def check_exam_period_locked_by_exam_id(view_func):
                 if DailyPlan.objects.filter(exam_period=period).exists():
                     messages.error(request, "이미 계획이 생성된 시험기간의 과목은 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
+                return view_func(request, exam_id, *args, **kwargs)
         return view_func(request, exam_id, *args, **kwargs)
     return wrapped_view
 
 
 def check_exam_period_locked_by_material_id(view_func):
-    """material_id 기준: POST 요청 시 소속 ExamPeriod를 Row Lock(select_for_update) 처리 후 계획 존재 여부 검증"""
     @wraps(view_func)
     def wrapped_view(request, material_id, *args, **kwargs):
         if request.method == 'POST':
@@ -91,9 +92,9 @@ def check_exam_period_locked_by_material_id(view_func):
                 if DailyPlan.objects.filter(exam_period=period).exists():
                     messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
+                return view_func(request, material_id, *args, **kwargs)
         return view_func(request, material_id, *args, **kwargs)
     return wrapped_view
-
 
 # =====================================================================
 # 시험기간 목록 (exams:period_list) 
