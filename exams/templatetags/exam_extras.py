@@ -25,6 +25,32 @@ def get_period_exams(period_id):
 
 
 @register.simple_tag
+def get_wizard_context(period=None, exam=None):
+    """
+    사이드바 '시험 준비 단계(1~6단계)' 내비게이션용 컨텍스트.
+
+    각 화면이 'period'만 갖고 있거나(시험기간/과목/가용시간 화면),
+    'exam'만 갖고 있거나(시험범위/학습작업 화면) 둘 다 다르게 내려주고 있어서,
+    사이드바 하나에서 두 경우 다 링크를 만들 수 있도록 period_id / first_exam_id로
+    정리해서 내려준다. 읽기 전용 조회만 함.
+    """
+    if exam:
+        period_id = exam.exam_period_id
+        first_exam_id = exam.id
+    elif period:
+        period_id = period.id
+        first_exam = Exam.objects.filter(
+            exam_period_id=period_id
+        ).order_by('exam_date').first()
+        first_exam_id = first_exam.id if first_exam else None
+    else:
+        period_id = None
+        first_exam_id = None
+
+    return {'period_id': period_id, 'first_exam_id': first_exam_id}
+
+
+@register.simple_tag
 def get_calendar_grid(period_id):
     """
     가용시간 입력 화면의 캘린더 그리드용 데이터.

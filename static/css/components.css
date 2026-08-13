@@ -67,6 +67,15 @@
 .priority-dot.priority-medium{ background:var(--brand3); color:var(--neutral10); }
 .priority-dot.priority-low{ background:var(--brand2); color:var(--neutral9); }
 
+/* 사이드바 '시험기간 홈' 아래 1~6단계 내비게이션 (exams/_sidebar.html) */
+.nav-steps{ display:flex; flex-direction:column; gap:2px; }
+.nav-step .step-num{
+  width:18px; height:18px; border-radius:50%; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:800; background:var(--neutral4); color:var(--neutral8);
+}
+.nav-step.on .step-num{ background:var(--neutral1); color:var(--neutral11); }
+
 /* 탭바 — 실제로는 페이지 이동 링크(<a>)지만 시각적으로는 탭처럼 보이게 */
 .tabbar{ display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
 .tabbar a.tab{
@@ -422,11 +431,11 @@
   cursor: pointer;
   position: relative;
 }
+
 .avail-day.exam-day {
-  background: var(--neutral3);
-  color: var(--neutral6);
-  cursor: not-allowed;
+  border: 1.5px solid var(--judge3);
 }
+
 .avail-day.has-value::after {
   content: "";
   position: absolute;
@@ -467,6 +476,9 @@
 }
 .avail-save-btn {
   margin-top: 14px;
+}
+.avail-side-input::placeholder {
+  color: var(--neutral6);
 }
 .avail-next-btn {
   margin-top: 18px;
@@ -823,32 +835,4 @@
   font-size: 11.5px;
   color: var(--neutral7);
   margin-top: 4px;
-}
-
-/* 가용시간 입력 - 시험일 잠금 해제 + 표시만 남김 */
-.exam-day-marker {
-  border: 1.5px solid var(--judge3);
-}
-.exam-day-dot {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--judge3);
-  margin-left: 2px;
-  vertical-align: super;
-}
-.avail-legend {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--neutral7);
-  margin-top: 12px;
-}
-
-/* placeholder를 연하게 (예시 텍스트임을 명확히) */
-#side-panel-minutes::placeholder {
-  color: var(--neutral6);
-  opacity: 1;
 }
