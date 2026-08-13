@@ -240,26 +240,46 @@ def _calculate_feasibility_for_period(exam_period):
 
 def _build_subject_results(exam_period, tasks):
     """
-    과목별 카드 표시용 데이터. 가용시간은 시험기간 전체가 공유하는 구조라
-    과목별 possible/risky/impossible 판정은 여기서 만들지 않는다.
+    과목별 카드 표시용 데이터 + 시험일 순서 누적 검증 기반 실현가능성 판정.
+
+    실제 스케줄러가 "시험일 빠른 과목 우선 배치" 정책을 쓰는 것과 같은 원리로,
+    각 과목 시험일 이전까지의 가용시간에서 앞선 과목들이 이미 쓴 만큼을 뺀
+    나머지를 그 과목의 가용시간으로 보고 판정한다. 완벽한 정답(실제 빈 패킹
+    시뮬레이션)은 아니지만, 합계만 보던 기존 방식보다 훨씬 정확하다.
     """
+    status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+    available_times = list(_available_times(exam_period))
     subject_results = []
+    consumed = 0
 
     for exam in exam_period.exams.all().order_by('exam_date'):
         subject_tasks = [task for task in tasks if task.exam_id == exam.id]
+
+        required_min = sum(task.estimated_min_minutes for task in subject_tasks)
+        required_max = sum(task.estimated_max_minutes for task in subject_tasks)
+
+        capacity_until_exam = sum(
+            at.available_minutes for at in available_times
+            if at.date < exam.exam_date
+        )
+        available_for_subject = max(capacity_until_exam - consumed, 0)
+
+        feasibility_result = calculate_feasibility(
+            required_min, required_max, available_for_subject
+        )
 
         subject_results.append({
             'exam_id': exam.id,
             'subject_name': exam.subject_name,
             'exam_date': exam.exam_date,
             'task_count': len(subject_tasks),
-            'required_min_minutes': sum(
-                task.estimated_min_minutes for task in subject_tasks
-            ),
-            'required_recommended_minutes': sum(
-                task.estimated_max_minutes for task in subject_tasks
-            ),
+            'required_min_minutes': required_min,
+            'required_recommended_minutes': required_max,
+            'status': feasibility_result['status'],
+            'status_label': status_label_map[feasibility_result['status']],
         })
+
+        consumed += required_max
 
     return subject_results
 

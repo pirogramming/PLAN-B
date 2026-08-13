@@ -1862,6 +1862,52 @@ class PlanGenerateFlowTests(TestCase):
         )
         self.assertEqual(response.context['available_time_edit_url'], expected)
 
+    def test_subject_result_status_reflects_exam_date_order(self):
+        """
+        시험일이 빠른 과목이 가용시간을 먼저 차지하고, 뒤 과목은 남은 시간
+        기준으로 판정돼야 한다.
+        """
+        from exams.models import Exam, StudyTask
+
+        near_exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="임박 과목",
+            exam_date=self.today + timedelta(days=2),
+        )
+        StudyTask.objects.create(
+            exam=near_exam, title="임박 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=50, estimated_max_minutes=50, is_confirmed=True,
+        )
+        far_exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="여유 과목",
+            exam_date=self.today + timedelta(days=8),
+        )
+        StudyTask.objects.create(
+            exam=far_exam, title="여유 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=10, estimated_max_minutes=10, is_confirmed=True,
+        )
+        # 임박 과목 시험일(오늘+2) 전까지는 하루치(오늘)만 있고 가용시간이 부족함
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=10,
+        )
+        # 시험일 이후엔 넉넉하지만 임박 과목엔 못 씀
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=5),
+            available_minutes=100,
+        )
+
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        results = {s['subject_name']: s for s in response.context['subject_results']}
+
+        # 임박 과목: 시험일 전 가용시간 10분 < 필요 50분 -> impossible
+        self.assertEqual(results['임박 과목']['status'], IMPOSSIBLE)
+        # 여유 과목: 남은 가용시간 넉넉함 -> possible
+        self.assertEqual(results['여유 과목']['status'], POSSIBLE)
+
+        
 class FeasibilitySubjectResultsTests(TestCase):
     """
     #90 feasibility() subject_results context 테스트.
