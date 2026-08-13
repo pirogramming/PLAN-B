@@ -223,16 +223,16 @@
 .empty h3{font-size:19px;font-weight:750;color:var(--neutral11);margin-bottom:10px}
 .empty p{font-size:14px;color:var(--neutral8);line-height:1.7;max-width:420px;margin-bottom:26px}
 
-/* 비로그인 안내(login_prompt.html) 버튼 — 새 방문자가 처음 만나는 핵심 CTA라
-   .btn-primary 크기는 유지하면서 브랜드 컬러 그림자를 얹어 한 번 더 강조한다.
+/* 온보딩 안내(login_prompt.html/exam_period_prompt.html) 버튼 — 아직 뭘 할 수
+   없는 상태에서 다음 할 일로 보내는 핵심 CTA라 브랜드 컬러 그림자로 강조한다.
    .btn-accent는 복구안 적용 전용이라 색은 그대로 두고 그림자로만 차별화 */
-.login-cta{
+.onboarding-cta{
   background:var(--neutral3);color:var(--neutral10);border-radius:6px;
   height:56px;padding:0 30px;font-size:16px;
   box-shadow:0 10px 24px rgba(59,91,219,.28);
   transition:transform .16s ease,box-shadow .16s ease,background .16s ease;
 }
-.login-cta:hover{background:var(--neutral4);transform:translateY(-1px);box-shadow:0 14px 28px rgba(59,91,219,.34)}
+.onboarding-cta:hover{background:var(--neutral4);transform:translateY(-1px);box-shadow:0 14px 28px rgba(59,91,219,.34)}
 
 .steps{display:flex;margin-top:36px;width:100%;max-width:720px}
 .step{flex:1;text-align:left;padding:0 18px;border-right:1px solid var(--neutral4)}

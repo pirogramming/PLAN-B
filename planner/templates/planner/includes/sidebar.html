@@ -46,10 +46,14 @@
 
   <div class="side-foot">
     {% if user.is_authenticated %}
-      <div class="nav-i" style="pointer-events:none">
+      {% comment %}
+      TODO: 계획이 완성된 상태에서는 복구안 생성 허브로 보내야 함 (지금은
+      시험기간 등록만 있어서 그리로 보냄)
+      {% endcomment %}
+      <a class="nav-i" href="{% url 'exams:period_create' %}">
         <svg class="ico"><use href="#i-user"/></svg>
-        {{ user.username }}
-      </div>
+        {{ user.nickname|default:user.username }}
+      </a>
       <form method="post" action="{% url 'accounts:logout' %}">
         {% csrf_token %}
         <button class="nav-i" type="submit" style="width:100%;text-align:left">

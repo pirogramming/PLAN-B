@@ -477,10 +477,8 @@ def today(request):
     }
 
     if exam_period is None:
-        context.update({
-            'empty_title': "등록된 시험기간이 없습니다",
-            'empty_desc': "먼저 시험기간을 등록해주세요.",
-        })
+        # exam_period_prompt.html이 이 경우를 처리하므로(today.html의
+        # {% elif not exam_period %}) 여기서는 추가 컨텍스트가 필요 없다.
         return render(request, 'planner/today.html', context)
 
     pending_recovery = _get_pending_recovery(exam_period)
@@ -586,6 +584,15 @@ def calendar(request):
         .order_by('-created_at')
         .first()
     )
+
+    if exam_period is None:
+        # 예전엔 calendar.html 안에 고정 배너로 떠 있었는데, 다른 화면들처럼
+        # base.html의 전역 토스트(messages)로 통일한다 — 리다이렉트 없이 같은
+        # 요청 안에서 render()해도 messages 컨텍스트 프로세서가 그대로 잡아준다.
+        messages.warning(
+            request,
+            "아직 등록된 시험기간이 없습니다. 시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다.",
+        )
 
     today_date = timezone.localdate()
     try:

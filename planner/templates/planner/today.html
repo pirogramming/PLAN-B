@@ -28,6 +28,9 @@
     {% if not user.is_authenticated %}
       {% include "planner/includes/login_prompt.html" %}
 
+    {% elif not exam_period %}
+      {% include "planner/includes/exam_period_prompt.html" %}
+
     {% elif not tasks %}
       <div class="card">
         {% include "planner/includes/empty_state.html" with icon="i-calendar" title=empty_title|default:"오늘 배정된 학습 작업이 없습니다" desc=empty_desc btn_label="전체 계획 보기" btn_url=calendar_url %}
