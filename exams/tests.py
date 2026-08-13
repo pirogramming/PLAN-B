@@ -1710,12 +1710,13 @@ class AvailableTimeUpdateRedirectTests(TestCase):
         return data
 
     def _invalid_formset_data(self):
-        # date 없이 보내서 formset invalid 유도
+    # date는 disabled 필드이므로 date 누락이 아니라
+    # hours 값을 잘못 보내서 formset invalid 유도
         data = self._management_form_data()
         data.update({
             'form-0-id': str(self.available_time.id),
-            'form-0-date': '',
-            'form-0-hours': '2',
+            'form-0-date': '2026-09-01',
+            'form-0-hours': '-1',
             'form-0-minutes': '30',
         })
         return data
@@ -2373,9 +2374,7 @@ class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
             data[f"form-{i}-hours"] = str(hours)
             data[f"form-{i}-minutes"] = str(minutes)
         
-        # ⚠️ 디버깅: 실제 생성된 폼 데이터 출력
-        print(f"\n=== _build_data 생성 결과 ===")
-        print(f"TOTAL_FORMS: {data['form-TOTAL_FORMS']}")
+        
         for i in range(queryset.count()):
             print(f"form-{i}: id={data.get(f'form-{i}-id')}, date={data.get(f'form-{i}-date')}, "
                 f"hours={data.get(f'form-{i}-hours')}, minutes={data.get(f'form-{i}-minutes')}")

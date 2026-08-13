@@ -363,9 +363,6 @@ def available_time_update(request, period_id):
                     ValidationError(msg)
                 )
 
-                print(
-                    formset.non_form_errors()
-                )
 
                 messages.error(request, msg)
 
