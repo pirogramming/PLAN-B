@@ -4028,6 +4028,35 @@ class DashboardContextTests(TestCase):
         # task_c(배치됨, 미착수) + 미배치 2개 = 총 3개
         self.assertEqual(progress["core_left"], 3)
 
+    # ── 9. 이미 배치된 미래 작업이 available_minutes를 이중 차감하지 않는지 ──
+    def test_overall_available_minutes_not_double_counted_by_scheduled_items(self):
+        from exams.models import StudyTask
+
+        future_task = StudyTask.objects.create(
+            exam=self.exam, title="이미 배치된 작업", importance="high", depth="basic",
+            task_type="concept", difficulty="normal", order=10,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        tomorrow = self.today + timedelta(days=1)
+        future_plan = DailyPlan.objects.filter(
+            exam_period=self.exam_period, date=tomorrow
+        ).first()
+        if future_plan is None:
+            future_plan = DailyPlan.objects.create(
+                exam_period=self.exam_period, date=tomorrow,
+                available_minutes=60, planned_minutes=0,
+            )
+        DailyPlanItem.objects.create(
+            daily_plan=future_plan, study_task=future_task,
+            planned_minutes=60, order=99,
+        )
+
+        response = self._get_dashboard()
+        overall = response.context["overall"]
+
+        # available_minutes는 occupied 차감 없이 AvailableTime 원본 총량(180)이어야 한다
+        self.assertEqual(overall["available_minutes"], 180)
+
 
 class CalendarServiceYearMonthValidationTests(TestCase):
     """

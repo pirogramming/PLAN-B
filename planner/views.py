@@ -110,8 +110,16 @@ def _build_overall(exam_period, remaining_days):
         required_min += mn
         required_max += mx
 
-    future_capacity = get_future_available_capacity(exam_period, timezone.localdate())
-    available_minutes = sum(item.available_minutes for item in future_capacity)
+    # 주의: get_future_available_capacity()는 이미 배치된 DailyPlanItem만큼
+    # 뺀 "순수 잔여" 값이라 여기서 쓰면 안 된다. required_min/max가 이미
+    # 배치된 미완료 작업의 남은 시간을 포함하고 있어서, 그걸 또 available에서
+    # 빼면 같은 시간이 이중으로 깎인다 (recovery.py는 "새 작업을 끼워넣을
+    # 자리"를 찾는 거라 순수 잔여가 맞지만, 여기는 "필요 vs 원래 가진 시간"
+    # 비교라 원본 AvailableTime 총량을 써야 한다).
+    tomorrow = timezone.localdate() + timedelta(days=1)
+    available_minutes = AvailableTime.objects.filter(
+        exam_period=exam_period, date__gte=tomorrow
+    ).aggregate(total=Sum('available_minutes'))['total'] or 0
 
     result = calculate_feasibility(required_min, required_max, available_minutes)
     status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
