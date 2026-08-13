@@ -115,6 +115,10 @@ def _build_overall(exam_period, remaining_days):
 
     result = calculate_feasibility(required_min, required_max, available_minutes)
     status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+    # fit_bar.html/배지 CSS(.fit-band.ok 등)는 ok/warn/bad 클래스만 알고 있고
+    # calculate_feasibility()의 possible/risky/impossible과 이름이 달라서,
+    # status 원본 값은 그대로 두고 CSS용 값만 따로 매핑해서 내려준다.
+    status_class_map = {POSSIBLE: "ok", RISKY: "warn", IMPOSSIBLE: "bad"}
 
     axis_max = max(available_minutes, required_max, 1) * 1.15
     min_pct = round(required_min / axis_max * 100, 1)
@@ -127,6 +131,7 @@ def _build_overall(exam_period, remaining_days):
 
     return {
         "status": result["status"],
+        "status_class": status_class_map[result["status"]],
         "status_label": status_label_map[result["status"]],
         "viewed_at": timezone.now(),
         "min_minutes": required_min,

@@ -77,8 +77,8 @@
           <div class="row" style="justify-content:space-between;margin-bottom:24px">
             <div class="row">
               <b style="font-size:15px;color:var(--neutral10)">시험기간 전체 판정</b>
-              <span class="badge badge-{{ overall.status }}">
-                <i class="dot dot-{{ overall.status }}"></i>{{ overall.status_label }}
+              <span class="badge badge-{{ overall.status_class }}">
+                <i class="dot dot-{{ overall.status_class }}"></i>{{ overall.status_label }}
               </span>
             </div>
             <span class="num" style="font-size:11.5px;color:var(--neutral7)">
@@ -86,7 +86,7 @@
             </span>
           </div>
 
-          {% include "planner/includes/fit_bar.html" with status=overall.status min_pct=overall.min_pct band_pct=overall.band_pct mark_pct=overall.mark_pct need_label_pct=overall.need_label_pct min_minutes=overall.min_minutes max_minutes=overall.max_minutes available_minutes=overall.available_minutes axis_max=overall.axis_max %}
+          {% include "planner/includes/fit_bar.html" with status=overall.status_class min_pct=overall.min_pct band_pct=overall.band_pct mark_pct=overall.mark_pct need_label_pct=overall.need_label_pct min_minutes=overall.min_minutes max_minutes=overall.max_minutes available_minutes=overall.available_minutes axis_max=overall.axis_max %}
 
           <div class="grid-4" style="margin-top:26px;padding-top:24px;border-top:1px solid var(--neutral4)">
             <div>
