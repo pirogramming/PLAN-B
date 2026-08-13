@@ -30,6 +30,7 @@ from core.choices import (
     RecoveryActionType,
     RecoveryPlanStatus,
     RecoveryType,
+    DailyPlanStatus
 )
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
@@ -2444,3 +2445,330 @@ class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
 
         at_no_plan.refresh_from_db()
         self.assertEqual(at_no_plan.available_minutes, 45)
+
+
+class ExamPeriodLockValidationTests(TestCase):
+    """계획이 생성된 시험기간에 대한 서버단 수정/삭제 방어 락 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            email="test@example.com",
+            password="password123",
+        )
+
+        self.client.login(
+            email="test@example.com",
+            password="password123",
+        )
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            start_date=datetime.date(2026, 5, 1),
+            end_date=datetime.date(2026, 5, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="알고리즘",
+            exam_date=datetime.date(2026, 5, 5),
+            priority=PriorityLevel.HIGH,
+        )
+
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="1주차 자료",
+            material_type=MaterialType.TEXT,
+            extracted_text="테스트 내용",
+        )
+
+        # 계획이 이미 생성된 시험기간
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=datetime.date(2026, 5, 1),
+            available_minutes=120,
+            planned_minutes=120,
+            status=DailyPlanStatus.PLANNED,
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 시험기간
+    # ============================================================
+
+    def test_period_update_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간은 수정할 수 없다."""
+        url = reverse(
+            "exams:period_update",
+            args=[self.period.id],
+        )
+
+        response = self.client.post(
+            url,
+            {
+                "title": "수정된 중간고사",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-10",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.period.refresh_from_db()
+
+        # 실제 DB 값이 변경되지 않았는지 확인
+        self.assertEqual(
+            self.period.title,
+            "중간고사",
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 과목
+    # ============================================================
+
+    def test_subject_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 새로운 과목을 추가할 수 없다."""
+        url = reverse(
+            "exams:subject_create",
+            args=[self.period.id],
+        )
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "자료구조",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.assertFalse(
+            Exam.objects.filter(
+                exam_period=self.period,
+                subject_name="자료구조",
+            ).exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    def test_subject_update_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 과목은 수정할 수 없다."""
+        url = reverse(
+            "exams:subject_update",
+            args=[self.period.id, self.exam.id],
+        )
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "수정된 알고리즘",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.exam.refresh_from_db()
+
+        self.assertEqual(
+            self.exam.subject_name,
+            "알고리즘",
+        )
+        self.assertEqual(
+            self.exam.exam_date,
+            datetime.date(2026, 5, 5),
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    def test_subject_delete_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 과목은 삭제할 수 없다."""
+        url = reverse(
+            "exams:subject_delete",
+            args=[self.period.id, self.exam.id],
+        )
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+
+        # 삭제되지 않았는지 확인
+        self.assertTrue(
+            Exam.objects.filter(
+                id=self.exam.id,
+            ).exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 학습자료
+    # ============================================================
+
+    def test_material_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 학습자료를 추가할 수 없다."""
+        url = reverse(
+            "exams:material_create",
+            args=[self.exam.id],
+        )
+
+        response = self.client.post(
+            url,
+            {
+                "title": "새로운 자료",
+                "material_type": MaterialType.TEXT,
+                "extracted_text": "새로운 테스트 내용",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.assertFalse(
+            StudyMaterial.objects.filter(
+                exam=self.exam,
+                title="새로운 자료",
+            ).exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    def test_material_delete_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 학습자료는 삭제할 수 없다."""
+        url = reverse(
+            "exams:material_delete",
+            args=[self.material.id],
+        )
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+
+        # 삭제되지 않았는지 확인
+        self.assertTrue(
+            StudyMaterial.objects.filter(
+                id=self.material.id,
+            ).exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+
+        self.assertTrue(
+            any(
+                "수정하거나 삭제할 수 없습니다" in str(message)
+                for message in messages_list
+            )
+        )
+
+    # ============================================================
+    # 계획이 없는 경우 - 기존 동작 유지
+    # ============================================================
+
+    def test_subject_update_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 과목은 기존처럼 수정할 수 있다."""
+        self.daily_plan.delete()
+
+        url = reverse(
+            "exams:subject_update",
+            args=[self.period.id, self.exam.id],
+        )
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "수정된 알고리즘",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.exam.refresh_from_db()
+
+        self.assertEqual(
+            self.exam.subject_name,
+            "수정된 알고리즘",
+        )
+
+    def test_subject_delete_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 과목은 기존처럼 삭제할 수 있다."""
+        self.daily_plan.delete()
+
+        exam_id = self.exam.id
+
+        url = reverse(
+            "exams:subject_delete",
+            args=[self.period.id, exam_id],
+        )
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+
+        self.assertFalse(
+            Exam.objects.filter(
+                id=exam_id,
+            ).exists()
+        )
+
+    def test_material_delete_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 학습자료는 기존처럼 삭제할 수 있다."""
+        self.daily_plan.delete()
+
+        material_id = self.material.id
+
+        url = reverse(
+            "exams:material_delete",
+            args=[material_id],
+        )
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+
+        self.assertFalse(
+            StudyMaterial.objects.filter(
+                id=material_id,
+            ).exists()
+        )
