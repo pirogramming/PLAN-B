@@ -96,6 +96,33 @@ def check_exam_period_locked_by_material_id(view_func):
         return view_func(request, material_id, *args, **kwargs)
     return wrapped_view
 
+def check_exam_period_not_locked_by_material_id(view_func):
+    """material_id 기준: ExamPeriod row lock 안에서 계획 존재 여부만 짧게 검증하고,
+    view_func 자체는 트랜잭션/락 밖에서 실행한다.
+
+    PDF 추출, AI 분석처럼 장시간 걸리는 외부 호출(네트워크 I/O)을 포함하는 View 전용.
+    check_exam_period_locked_by_material_id와 달리 검증~실행 사이에 다른 요청이
+    끼어들 수 있는 race window가 남아있음을 감수하고 사용한다.
+    (해당 window에서 실제로 문제가 되는 건 '계획 생성된 시험기간의 자료를 건드리는 것'
+    뿐이고, extract/analyze는 material 자체 상태만 변경하므로 허용 가능한 트레이드오프로 판단)
+    """
+    @wraps(view_func)
+    def wrapped_view(request, material_id, *args, **kwargs):
+        if request.method == 'POST':
+            with transaction.atomic():
+                material = get_object_or_404(
+                    StudyMaterial.objects.select_related('exam__exam_period'),
+                    id=material_id,
+                    exam__exam_period__user=request.user
+                )
+                period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+            # atomic 블록 종료 → 락 해제. 이후 view_func는 트랜잭션/락 밖에서 실행
+        return view_func(request, material_id, *args, **kwargs)
+    return wrapped_view
+
 # =====================================================================
 # 시험기간 목록 (exams:period_list) 
 # =====================================================================
@@ -634,7 +661,7 @@ def material_detail(request, material_id):
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
 @login_required
-@check_exam_period_locked_by_material_id
+@check_exam_period_not_locked_by_material_id
 @require_http_methods(["POST"])
 def material_extract(request, material_id):
     material = get_object_or_404(
@@ -736,7 +763,7 @@ def material_delete(request, material_id):
 # AI 분석 실행 (exams:material_analyze) - E-AI-01
 # =====================================================================
 @login_required
-@check_exam_period_locked_by_material_id
+@check_exam_period_not_locked_by_material_id
 @require_http_methods(["POST"])
 def material_analyze(request, material_id):
     material = get_object_or_404(
@@ -776,7 +803,7 @@ def material_analyze(request, material_id):
 # AI 분석 재시도 (exams:material_retry_analyze) - E-AI-03
 # =====================================================================
 @login_required
-@check_exam_period_locked_by_material_id
+@check_exam_period_not_locked_by_material_id
 @require_http_methods(["POST"])
 def material_retry_analyze(request, material_id):
     material = get_object_or_404(
