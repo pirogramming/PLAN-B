@@ -2805,3 +2805,95 @@ class ExamPeriodLockValidationTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(StudyMaterial.objects.filter(id=material_id).exists())
+
+class ExamPeriodCompletionTests(TestCase):
+    """시험기간 수동/자동(Lazy Check) 종료 기능 검증"""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='tester@example.com', email='tester@example.com', password='pass1234!'
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+
+    def test_manual_period_complete_success(self):
+        """'시험기간 종료' POST 요청 시 status가 COMPLETED로 전환되는지 검증"""
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title='2026 1학기 중간고사',
+            start_date=self.today - datetime.timedelta(days=5),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_complete', args=[period.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_lazy_check_auto_completes_expired_period_on_detail_view(self):
+        """end_date가 지난 ACTIVE 시험기간을 조회하면 자동으로 COMPLETED 전환되는지 검증"""
+        expired_period = ExamPeriod.objects.create(
+            user=self.user,
+            title='지난 시험고사',
+            start_date=self.today - datetime.timedelta(days=10),
+            end_date=self.today - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_detail', args=[expired_period.id])
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        expired_period.refresh_from_db()
+        self.assertEqual(expired_period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_new_period_creation_allowed_after_previous_period_completed(self):
+        """기존 시험기간이 COMPLETED 상태가 되면 새로운 ACTIVE 시험기간을 생성할 수 있는지 검증"""
+        ExamPeriod.objects.create(
+            user=self.user,
+            title='이전 시험',
+            start_date=self.today - datetime.timedelta(days=20),
+            end_date=self.today - datetime.timedelta(days=10),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+
+        url = reverse('exams:period_create')
+        post_data = {
+            'title': '새 시험기간',
+            'start_date': str(self.today),
+            'end_date': str(self.today + datetime.timedelta(days=10)),
+        }
+        response = self.client.post(url, post_data)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            ExamPeriod.objects.filter(user=self.user, title='새 시험기간', status=ExamPeriodStatus.ACTIVE).exists()
+        )
+
+    def test_new_period_creation_rejected_when_active_period_exists(self):
+        ExamPeriod.objects.create(
+            user=self.user,
+            title='진행 중인 시험',
+            start_date=self.today,
+            end_date=self.today + datetime.timedelta(days=10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_create')
+        post_data = {
+            'title': '새 시험기간',
+            'start_date': str(self.today),
+            'end_date': str(self.today + datetime.timedelta(days=10)),
+        }
+
+        response = self.client.post(url, post_data)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            ExamPeriod.objects.filter(user=self.user, title='새 시험기간').exists()
+        )
