@@ -915,3 +915,22 @@
   color: var(--neutral7);
   margin-top: 4px;
 }
+
+/* ===== 반응형 =====
+   이 파일(exams 앱 공용 컴포넌트)에는 지금까지 @media 규칙이 하나도 없어서,
+   좁은 화면에서 2단 레이아웃(달력+사이드패널, 과목 목록+작업 목록)이
+   그대로 눌려서 옆으로 찌그러지는 문제가 있었다. planner.css와 같은
+   767px 기준을 맞춰서 세로로 쌓이게 한다. */
+@media (max-width: 767px) {
+  .card { padding: 20px; border-radius: 18px; }
+  .form-control, .form-select, .textarea-input { height: 48px; font-size: 14px; }
+
+  .avail-body { flex-direction: column; }
+  .avail-side-col { position: static; }
+
+  .task-review-body { flex-direction: column; }
+  .task-nav-col { flex: 1 1 auto; }
+
+  .task-select-row { flex-wrap: wrap; }
+  .task-select-item { flex: 1 1 calc(50% - 5px); }
+}

@@ -305,6 +305,12 @@
   .steps{flex-direction:column}
   .step{border-right:0}
 
+  /* 배너(복구안 대기 등) : 아이콘+본문+버튼이 한 줄에 다 들어가면
+     좁은 화면에서 버튼이 찌그러지니 세로로 쌓는다 */
+  .banner{flex-wrap:wrap}
+  .banner .actions{align-self:stretch;width:100%;margin-top:4px}
+  .banner .actions .btn{width:100%;min-width:0}
+
   /* 과목 카드 : D-day + 과목명 한 줄, 숫자는 아랫줄로 */
   .subject-card{flex-wrap:wrap;gap:12px;padding:16px}
   .subject-card .info{flex:1 1 calc(100% - 62px);min-width:0}
