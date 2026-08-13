@@ -161,8 +161,14 @@
 
 /* ===== 배너 ===== */
 .banner{display:flex;gap:14px;padding:18px 20px;border-radius:var(--r-md);
-        border:1px solid var(--judge2-line);background:var(--judge2-bg);color:var(--judge2)}
+        border:1px solid var(--judge2-line);background:var(--judge2-bg);color:var(--judge2);
+        animation:banner-in .7s cubic-bezier(.16,1,.3,1) both}
 .banner[hidden]{display:none}
+@keyframes banner-in{
+  from{opacity:0;transform:translateY(-6px) scale(.98);filter:blur(3px)}
+  to{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}
+}
+@media (prefers-reduced-motion:reduce){.banner{animation:none}}
 .banner .ico{width:19px;height:19px;margin-top:1px}
 .banner .body{flex:1}
 .banner h4{font-size:14.5px;font-weight:700;margin-bottom:5px}
@@ -170,6 +176,14 @@
 .banner .actions{display:flex;gap:8px;align-self:center}
 .banner.info{border-color:var(--brand2);background:var(--brand1);color:var(--brand5)}
 .banner.info p{color:var(--neutral9)}
+
+/* 배너 안의 CTA — .btn-accent(브랜드 블루, 복구안 "적용" 전용)를 그대로
+   쓰면 amber 톤 배너 안에서 색이 따로 놀아서, 배너와 같은 계열(judge2)로
+   맞춘 진한 노란색 필 버튼을 쓴다. */
+.banner-cta{background:var(--judge2-bg);color:var(--judge2);border:1.5px solid var(--judge2-line);
+            height:60px;padding:0 32px;min-width:220px;justify-content:center;
+            font-size:16px;font-weight:700}
+.banner-cta:hover{background:#F3E4C4}
 
 
 /* ===== 숫자 ===== */
@@ -440,8 +454,10 @@
 .steps-run li .ico{width:17px;height:17px}
 .steps-run li.doing{color:var(--neutral11);font-weight:650}
 .steps-run li.doing .ico{color:var(--brand4);animation:spin 1s linear infinite}
-.steps-run li.done{color:var(--neutral8)}
+.steps-run li.done{color:var(--neutral10);font-weight:650}
 .steps-run li.done .ico{color:var(--judge1)}
+.steps-run li.error{color:var(--judge3);font-weight:650}
+.steps-run li.error .ico{color:var(--judge3)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.steps-run li.doing .ico{animation:none}}
 

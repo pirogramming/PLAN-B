@@ -104,7 +104,9 @@ document.addEventListener('DOMContentLoaded', function () {
     const confirmView   = document.getElementById('eodConfirm');
     const progressView  = document.getElementById('eodProgress');
     const progressHint  = document.getElementById('eodProgressHint');
-    const progressDone  = document.getElementById('eodProgressDone');
+    const progressFoot  = document.getElementById('eodProgressFoot');
+    const stepIco       = document.getElementById('eodStepIco');
+    const stepLabel     = document.getElementById('eodStepLabel');
     const steps = eod.querySelectorAll('.steps-run li');
     let recalcDone = false;
     let finalizeResult = null;
@@ -113,11 +115,13 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.addEventListener('click', function () {
         confirmView.hidden = false;
         progressView.hidden = true;
-        progressDone.disabled = true;
+        progressFoot.hidden = true;
+        stepIco.innerHTML = '<use href="#i-loader"/>';
+        stepLabel.textContent = '오늘 기록을 확정하는 중';
         progressHint.textContent = '잠시만 기다려 주세요.';
         recalcDone = false;
         finalizeResult = null;
-        steps.forEach(s => s.classList.remove('doing', 'done'));
+        steps.forEach(s => s.classList.remove('doing', 'done', 'error'));
         eod.hidden = false;
         document.body.style.overflow = 'hidden';
       });
@@ -134,21 +138,14 @@ document.addEventListener('DOMContentLoaded', function () {
       if (e.key === 'Escape' && !eod.hidden) closeEod();
     });
 
-    if (progressDone) {
-      progressDone.addEventListener('click', function () {
-        if (progressDone.disabled) return;
-        closeEod();
-
-        if (!finalizeResult || finalizeResult.error) return;
-
-        if (finalizeResult.needs_recovery && finalizeResult.recovery_group_id) {
-          window.location.href = eod.dataset.recoveryUrlTemplate.replace(
-            '00000000-0000-0000-0000-000000000000', finalizeResult.recovery_group_id
-          );
-        } else {
-          window.location.href = eod.dataset.todayUrl;
-        }
-      });
+    function goToNextScreen() {
+      if (finalizeResult.needs_recovery && finalizeResult.recovery_group_id) {
+        window.location.href = eod.dataset.recoveryUrlTemplate.replace(
+          '00000000-0000-0000-0000-000000000000', finalizeResult.recovery_group_id
+        );
+      } else {
+        window.location.href = eod.dataset.todayUrl;
+      }
     }
 
     const eodSubmit = document.getElementById('eodSubmit');
@@ -173,23 +170,31 @@ document.addEventListener('DOMContentLoaded', function () {
         })
         .then(function (data) {
           finalizeResult = data;
+          recalcDone = true;
           steps.forEach(function (s) {
             s.classList.remove('doing');
             s.classList.add('done');
           });
+          stepIco.innerHTML = '<use href="#i-done"/>';
+          stepLabel.textContent = '오늘 기록이 확정됐습니다';
+          progressHint.textContent = '잠시 후 자동으로 이동합니다.';
+          // 완료 상태를 눈으로 확인할 시간을 잠깐 준 다음 자동으로 다음 화면으로
+          // 이동한다 — "확인" 버튼을 눌러야 하는지 애매했던 이전 UX를 없앤다.
+          setTimeout(goToNextScreen, 700);
         })
         .catch(function () {
           finalizeResult = { error: true };
-          progressHint.textContent = '오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+          recalcDone = true;
           // 실패 시에는 done 처리하지 않는다 (마감이 안 됐는데 단계가 끝난 것처럼
-          // 보이면 안 됨). 확인을 누르면 그냥 모달만 닫히고 새로고침/이동은 안 한다.
+          // 보이면 안 됨). 자동 이동도 하지 않고, 닫기 버튼만 보여준다.
           steps.forEach(function (s) {
             s.classList.remove('doing', 'done');
+            s.classList.add('error');
           });
-        })
-        .finally(function () {
-          recalcDone = true;
-          progressDone.disabled = false;
+          stepIco.innerHTML = '<use href="#i-alert"/>';
+          stepLabel.textContent = '확정에 실패했습니다';
+          progressHint.textContent = '오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+          progressFoot.hidden = false;
         });
     }
   }

@@ -627,6 +627,9 @@ def calendar(request):
 
     context = {
         'exam_period': exam_period,
+        'pending_recovery': (
+            _get_pending_recovery(exam_period) if exam_period else None
+        ),
         'year': year,
         'month': month,
         'prev_year': prev_year,
