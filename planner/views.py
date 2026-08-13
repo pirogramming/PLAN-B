@@ -385,12 +385,17 @@ def plan_complete(request, period_id):
     }
     return render(request, 'planner/plan_complete.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def dashboard(request):
     """
     시험기간/계획 존재 여부에 따라 온보딩 화면 또는 전체 대시보드를 보여준다.
+    로그인 안 한 사용자도 들어올 수 있게 @login_required를 빼고 여기서
+    직접 분기한다 (사이드바+메인 화면 틀 안에서 회원가입/로그인 안내를
+    보여주기 위함 — 다른 planner 화면들은 여전히 로그인이 필요하다).
     """
+    if not request.user.is_authenticated:
+        return render(request, 'planner/dashboard.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
@@ -445,9 +450,13 @@ def dashboard(request):
     }
     return render(request, 'planner/dashboard.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def today(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/today.html', {
+            'exam_period': None, 'today': timezone.localdate(),
+        })
+
     today_date = timezone.localdate()
 
     exam_period = (
@@ -566,9 +575,11 @@ def today(request):
     })
     return render(request, 'planner/today.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def calendar(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/calendar.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)

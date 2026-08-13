@@ -11,7 +11,7 @@
     <a class="nav-i {% if nav == 'dashboard' %}on{% endif %}" href="{% url 'planner:dashboard' %}">
       <svg class="ico"><use href="#i-dashboard"/></svg>대시보드
     </a>
-    <a class="nav-i {% if nav == 'today' %}on{% endif %} {% if not exam_period %}off{% endif %}" href="{% url 'planner:today' %}">
+    <a class="nav-i {% if nav == 'today' %}on{% endif %}" href="{% url 'planner:today' %}">
       <svg class="ico"><use href="#i-today"/></svg>오늘의 공부
       {% if today_count %}<span class="count" title="오늘 계획된 작업 {{ today_count }}개">{{ today_count }}</span>{% endif %}
     </a>
@@ -38,17 +38,18 @@
       </div>
     </div>
   {% else %}
-    <div class="side-box dashed">
+    <a class="side-box dashed"
+       href="{% if user.is_authenticated %}{% url 'exams:period_create' %}{% else %}{% url 'accounts:login' %}{% endif %}">
       <p>진행 중인<br>시험기간이 없습니다</p>
-    </div>
+    </a>
   {% endif %}
 
   <div class="side-foot">
-    <div class="nav-i" style="pointer-events:none">
-      <svg class="ico"><use href="#i-user"/></svg>
-      {% if user.is_authenticated %}{{ user.username }}{% else %}로그인{% endif %}
-    </div>
     {% if user.is_authenticated %}
+      <div class="nav-i" style="pointer-events:none">
+        <svg class="ico"><use href="#i-user"/></svg>
+        {{ user.username }}
+      </div>
       <form method="post" action="{% url 'accounts:logout' %}">
         {% csrf_token %}
         <button class="nav-i" type="submit" style="width:100%;text-align:left">
@@ -56,6 +57,11 @@
           로그아웃
         </button>
       </form>
+    {% else %}
+      <a class="nav-i" href="{% url 'accounts:login' %}">
+        <svg class="ico"><use href="#i-user"/></svg>
+        로그인
+      </a>
     {% endif %}
   </div>
 </aside>

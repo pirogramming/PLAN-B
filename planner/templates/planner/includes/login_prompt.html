@@ -1,0 +1,17 @@
+{% comment %}
+  비로그인 사용자가 planner 화면(대시보드/오늘의 공부/전체 계획)에 들어왔을 때
+  공통으로 보여주는 안내. 각 화면에서 {% if not user.is_authenticated %} 안에서
+  {% include "planner/includes/login_prompt.html" %}로 사용.
+{% endcomment %}
+<div class="card">
+  <div class="empty">
+    <div class="empty-icon" style="background:var(--brand1);border-color:var(--brand2)">
+      <svg class="ico" style="color:var(--brand4)"><use href="#i-user"/></svg>
+    </div>
+    <h3>회원가입/로그인을 해주세요</h3>
+    <p>회원가입하거나 로그인하면 시험기간을 만들고 PLAN B가 계산해주는 학습 계획을 확인할 수 있습니다.</p>
+    <a class="btn btn-lg login-cta" href="{% url 'accounts:login' %}">
+      회원가입/로그인 하러 가기<svg class="ico"><use href="#i-arrow-right"/></svg>
+    </a>
+  </div>
+</div>
