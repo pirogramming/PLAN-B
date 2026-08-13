@@ -24,6 +24,10 @@
       + 작업 추가하기
     </a>
   </div>
+  <div class="form-notice-box">
+    <svg class="ico"><use href="#i-alert"/></svg>
+    한 번 입력하면 이후에는 수정할 수 없어요. 신중하게 입력해주세요.
+  </div>
 
   <div class="task-review-body">
     <div class="task-nav-col">
@@ -139,10 +143,18 @@
           <button
             type="submit"
             name="action"
+            value="save_subject"
+            class="btn btn-secondary btn-lg task-primary-btn"
+          >
+            이 과목 저장
+          </button>
+          <button
+            type="submit"
+            name="action"
             value="confirm"
             class="btn btn-primary btn-lg task-primary-btn"
           >
-            저장하고 다음으로
+            모든 과목 저장하고 다음으로
           </button>
         </div>
         {% endif %}

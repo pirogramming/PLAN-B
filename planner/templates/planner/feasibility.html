@@ -90,8 +90,6 @@
     <a href="{% url 'exams:available_time_update' exam_period.id %}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가능시간 수정
     </a>
-    {# FE1(신예원): '학습작업 수정'은 이제 허브(시험기간 홈)가 아니라, 이 시험기간의
-       학습 작업 확인(5단계) 화면으로 바로 이어지게 한다 — 허브 화면은 FE2 담당으로 넘어감. #}
     {% if wiz.first_exam_id %}
     <a href="{% url 'exams:task_review' wiz.first_exam_id %}" class="btn btn-ghost">
       학습작업 수정

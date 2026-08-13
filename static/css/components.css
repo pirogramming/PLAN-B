@@ -43,6 +43,12 @@
   background:var(--judge3-bg); border:1px solid var(--judge3-line); color:var(--judge3);
   border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
 }
+.form-notice-box{
+  background:var(--brand1); border:1px solid var(--brand3); color:var(--neutral9);
+  border-radius:10px; padding:10px 14px; font-size:12.5px; margin-bottom:16px;
+  display:flex; align-items:center; gap:8px;
+}
+.form-notice-box .ico{ width:15px; height:15px; flex:none; color:var(--brand4); }
 
 .page-title{ font-size:34px; font-weight:700; color:var(--neutral11); margin-bottom:8px; }
 .page-sub{ font-size:14px; color:var(--neutral7); margin-bottom:22px; }
@@ -228,11 +234,12 @@
 }
 .task-action-row {
   display: flex;
+  flex-direction: column;
   gap: 10px;
   margin-top: 4px;
 }
 .task-action-row .btn {
-  flex: 1;
+  width: 100%;
 }
 .task-confirm-btn {
   background: var(--neutral11);
