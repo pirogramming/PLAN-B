@@ -1,12 +1,12 @@
 {% extends "exams/_exam_base.html" %}
 {% load exam_extras %}
 {% block title %}
-공부가능 시간 입력 - PLAN B
+공부 가능 시간 등록 - PLAN B
 {% endblock %}
-{% block page_heading %}공부가능 시간 입력하기{% endblock %}
+{% block page_heading %}공부 가능 시간 등록{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="available_time" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -15,7 +15,7 @@
 <div class="avail-wrap" style="max-width:960px; margin:0 auto;">
   <div class="page-head">
     <div>
-      <h1>공부가능 시간 입력하기</h1>
+      <h1>공부 가능 시간 등록</h1>
       <p class="sub">하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요</p>
     </div>
   </div>
@@ -29,6 +29,7 @@
   <form method="post" novalidate id="available-time-form">
     {% csrf_token %}
     {{ formset.management_form }}
+    <input type="hidden" name="next" value="{{ next }}">
 
     <div class="formset-hidden">
       {% for form in formset %}
@@ -58,28 +59,14 @@
           <div class="avail-weekday">일</div>
 
           {% for day in calendar_days %}
-            {% if forloop.first %}
             <button type="button"
-                    class="avail-day{% if day.has_value %} has-value{% endif %}{% if day.is_exam_day %} exam-day-marker{% endif %}"
+                    class="avail-day{% if day.is_exam_day %} exam-day{% endif %}{% if day.has_value %} has-value{% endif %}"
                     data-index="{{ day.formset_index }}"
                     data-date="{{ day.date|date:'Y-m-d' }}"
-                    style="grid-column-start:{{ day.weekday }};">
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
               {{ day.date|date:"j" }}
-              {% if day.is_exam_day %}<span class="exam-day-dot"></span>{% endif %}
             </button>
-            {% else %}
-            <button type="button"
-                    class="avail-day{% if day.has_value %} has-value{% endif %}{% if day.is_exam_day %} exam-day-marker{% endif %}"
-                    data-index="{{ day.formset_index }}"
-                    data-date="{{ day.date|date:'Y-m-d' }}">
-              {{ day.date|date:"j" }}
-              {% if day.is_exam_day %}<span class="exam-day-dot"></span>{% endif %}
-            </button>
-            {% endif %}
           {% endfor %}
-        </div>
-        <div class="avail-legend">
-          <span class="exam-day-dot"></span> 시험일
         </div>
       </div>
 
@@ -91,9 +78,9 @@
 
         <div class="field-label">전체 가용 시간</div>
         <input type="number" min="0" step="10"
-               class="form-control num"
+               class="form-control num avail-side-input"
                id="side-panel-minutes"
-               placeholder="예) 240분">
+               placeholder="예) 240">
         <div class="avail-side-hint">분 단위로 입력</div>
 
         <button type="button"
@@ -140,13 +127,16 @@
     minutesInput.value = total || '';
   }
 
-  document.querySelectorAll('.avail-day').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      selectDay(btn);
-    });
-  });
+  document.querySelectorAll('.avail-day').forEach(
+    function (btn) {
+      btn.addEventListener('click', function () {
+        selectDay(btn);
+      });
+    }
+  );
 
-  saveBtn.addEventListener('click', function () {
+  // 현재 선택된 날짜에 입력한 분을 저장한다. 입력값이 없으면(빈칸) 0분으로 저장.
+  function saveCurrentDay() {
     if (!currentDay) return;
     var total = parseInt(minutesInput.value || 0, 10);
     var row = document.querySelector(
@@ -155,6 +145,34 @@
     row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
     row.querySelector('input[name$="-minutes"]').value = total % 60;
     currentDay.classList.toggle('has-value', total > 0);
+  }
+
+  // 캘린더에서 currentDay 바로 다음 날짜 버튼을 찾아 선택 상태로 전환한다.
+  function goToNextDay() {
+    var days = Array.prototype.slice.call(document.querySelectorAll('.avail-day'));
+    var idx = days.indexOf(currentDay);
+    if (idx === -1 || idx === days.length - 1) return; // 마지막 날이면 그대로 둠
+    selectDay(days[idx + 1]);
+    minutesInput.focus();
+  }
+
+  // 저장하고 다음 날로 이동 (엔터, 저장 버튼 공통 동작)
+  function saveAndAdvance() {
+    saveCurrentDay();
+    goToNextDay();
+  }
+
+  saveBtn.addEventListener('click', function () {
+    saveAndAdvance();
+  });
+
+  minutesInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      // 폼 전체 제출(시험범위 등록 페이지로 바로 넘어가는 것) 막고,
+      // 이 페이지에서 다음 날짜로만 이동시킨다.
+      e.preventDefault();
+      saveAndAdvance();
+    }
   });
 })();
 </script>
