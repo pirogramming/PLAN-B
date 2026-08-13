@@ -2349,36 +2349,33 @@ class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
         )
     def _build_data(self, overrides=None):
         overrides = overrides or {}
-        queryset = AvailableTime.objects.filter(exam_period=self.period).order_by("date")
-        
-        at_by_id = {obj.id: obj for obj in queryset}
-        
+        queryset = AvailableTime.objects.filter(
+            exam_period=self.period
+        ).order_by("date")
+
         overrides_by_id = {}
         for at_obj, new_minutes in overrides.items():
             at_obj.refresh_from_db()
             overrides_by_id[at_obj.id] = new_minutes
-        
+
         data = {
             "form-TOTAL_FORMS": str(queryset.count()),
             "form-INITIAL_FORMS": str(queryset.count()),
             "form-MIN_NUM_FORMS": "0",
             "form-MAX_NUM_FORMS": "1000",
         }
-        
+
         for i, obj in enumerate(queryset):
-            target_minutes = overrides_by_id.get(obj.id, obj.available_minutes)
+            target_minutes = overrides_by_id.get(
+                obj.id, obj.available_minutes
+            )
             hours, minutes = _minutes_to_hm(target_minutes)
-            
+
             data[f"form-{i}-id"] = str(obj.id)
             data[f"form-{i}-date"] = obj.date.isoformat()
             data[f"form-{i}-hours"] = str(hours)
             data[f"form-{i}-minutes"] = str(minutes)
-        
-        
-        for i in range(queryset.count()):
-            print(f"form-{i}: id={data.get(f'form-{i}-id')}, date={data.get(f'form-{i}-date')}, "
-                f"hours={data.get(f'form-{i}-hours')}, minutes={data.get(f'form-{i}-minutes')}")
-        
+
         return data
 
 
