@@ -41,30 +41,42 @@ document.addEventListener('DOMContentLoaded', function () {
     const sumEl   = document.getElementById('calDetailSum');
     const emptyEl = document.getElementById('calDetailEmpty');
     const panes   = calDetail.querySelectorAll('.cal-pane');
- 
+
+    function selectDay(btn) {
+      const key = btn.dataset.date;
+
+      document.querySelectorAll('.js-day').forEach(d => d.classList.remove('on'));
+      btn.classList.add('on');
+
+      let found = null;
+      panes.forEach(function (pane) {
+        const match = pane.dataset.date === key;
+        pane.hidden = !match;
+        if (match) found = pane;
+      });
+
+      const [, m, dd] = key.split('-').map(Number);
+      dateEl.textContent = m + '월 ' + dd + '일';
+      sumEl.textContent = '계획 ' + (btn.dataset.planned || 0) + '분 · 가능 ' + (btn.dataset.available || 0) + '분';
+      emptyEl.hidden = !!found;
+      if (!found) emptyEl.textContent = calDetail.dataset.emptyMsg;
+    }
+
     document.querySelectorAll('.js-day').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        const key = btn.dataset.date;
- 
-        document.querySelectorAll('.js-day').forEach(d => d.classList.remove('on'));
-        btn.classList.add('on');
- 
-        let found = null;
-        panes.forEach(function (pane) {
-          const match = pane.dataset.date === key;
-          pane.hidden = !match;
-          if (match) found = pane;
-        });
- 
-        const [, m, dd] = key.split('-').map(Number);
-        dateEl.textContent = m + '월 ' + dd + '일';
-        sumEl.textContent = '계획 ' + (btn.dataset.planned || 0) + '분 · 가능 ' + (btn.dataset.available || 0) + '분';
-        emptyEl.hidden = !!found;
-        if (!found) emptyEl.textContent = calDetail.dataset.emptyMsg;
- 
+        selectDay(btn);
         calDetail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
     });
+
+    // 오늘 날짜 칸은 이미 시각적으로 "오늘"로 표시돼 있어서, 페이지를 열자마자
+    // 그 날짜가 이미 선택된 것처럼 보인다 — 아래 상세 패널도 처음부터 오늘
+    // 학습 작업을 보여줘야 "날짜를 선택해주세요"라는 안내가 어색해지지 않는다.
+    // (scrollIntoView는 안 부른다 — 페이지 진입하자마자 아래로 스크롤되면 안 됨)
+    const todayBtn = document.querySelector('.js-day.today');
+    if (todayBtn) {
+      selectDay(todayBtn);
+    }
   }
  
   
