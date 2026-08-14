@@ -58,16 +58,16 @@
           <div class="avail-weekday">일</div>
 
           {% for day in calendar_days %}
-            {% if day.is_exam_day or day.is_past %}
+            {% if day.is_past %}
             <button type="button"
-                    class="avail-day {% if day.is_exam_day %}exam-day{% else %}past-day{% endif %}" disabled
+                    class="avail-day past-day" disabled
                     data-date="{{ day.date|date:'Y-m-d' }}"
                     {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
               {{ day.date|date:"j" }}
             </button>
             {% else %}
             <button type="button"
-                    class="avail-day{% if day.has_value %} value-set{% endif %}"
+                    class="avail-day{% if day.is_exam_day %} exam-day{% endif %}{% if day.has_value %} value-set{% endif %}"
                     data-index="{{ day.formset_index }}"
                     data-date="{{ day.date|date:'Y-m-d' }}"
                     {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
@@ -120,10 +120,11 @@
   var saveBtn = document.getElementById('side-panel-save');
   var currentDay = null;
 
-  // "수정" 버튼으로 확정한 날짜만 선택 가능 (시험일/과거 날짜는 disabled라
-  // 애초에 여기 안 들어옴) — Enter로 다음 칸 넘어갈 때 이 순서를 따라간다.
+  // 과거 날짜만 disabled라 애초에 여기 안 들어옴 (시험일은 다른 과목
+  // 공부에 쓸 수 있어서 입력 가능하게 열어둔다) — Enter로 다음 칸 넘어갈
+  // 때 이 순서를 따라간다.
   var selectableDays = Array.prototype.slice.call(
-    document.querySelectorAll('.avail-day:not(.exam-day):not(.past-day)')
+    document.querySelectorAll('.avail-day:not(.past-day)')
   );
 
   function selectDay(dayBtn) {

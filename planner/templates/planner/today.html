@@ -33,12 +33,12 @@
 
     {% elif not tasks %}
       <div class="card">
-        {% include "planner/includes/empty_state.html" with icon="i-calendar" title=empty_title|default:"오늘 배정된 학습 작업이 없습니다" desc=empty_desc btn_label="전체 계획 보기" btn_url=calendar_url %}
+        {% include "planner/includes/empty_state.html" with icon="i-calendar" title=empty_title|default:"오늘 배정된 학습 작업이 없습니다" desc=empty_desc btn_label="전체 계획 보기" btn_url=calendar_url btn_class="btn-ghost btn-sm" btn_icon="i-chevron-right" %}
       </div>
 
     {% elif is_finalized %}
       <div class="card">
-        {% include "planner/includes/empty_state.html" with icon="i-done" title="오늘 공부를 마쳤습니다" desc="내일 계획은 전체 계획에서 확인하실 수 있습니다." btn_label="전체 계획 보기" btn_url=calendar_url %}
+        {% include "planner/includes/empty_state.html" with icon="i-done" title="오늘 공부를 마쳤습니다" desc="내일 계획은 전체 계획에서 확인하실 수 있습니다." btn_label="전체 계획 보기" btn_url=calendar_url btn_class="btn-ghost btn-sm" btn_icon="i-chevron-right" %}
       </div>
 
     {% else %}

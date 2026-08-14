@@ -29,7 +29,8 @@
 
   <div class="side-label">시험기간</div>
   {% if exam_period %}
-    <a class="side-box" href="{% url 'exams:period_manage' exam_period.id %}">
+    <a class="side-box"
+       href="{% if has_plan %}{% url 'exams:period_manage' exam_period.id %}{% else %}{% url 'exams:period_detail' exam_period.id %}{% endif %}">
       <h4>{{ exam_period.title }}</h4>
       <p class="num">{{ exam_period.start_date|date:"m.d" }} ~ {{ exam_period.end_date|date:"m.d" }}</p>
       <div class="meter" style="margin-top:12px">
@@ -46,7 +47,7 @@
   <div class="side-foot">
     {% if user.is_authenticated %}
       <a class="nav-i"
-         href="{% if exam_period %}{% url 'exams:period_manage' exam_period.id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
+         href="{% if exam_period and has_plan %}{% url 'exams:period_manage' exam_period.id %}{% elif exam_period %}{% url 'exams:period_detail' exam_period.id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
         <svg class="ico"><use href="#i-user"/></svg>
         {{ user.nickname|default:user.username }}
       </a>

@@ -21,6 +21,11 @@ from .forms import (
     StudyTaskFormSet,
 )
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from .services.available_time_updater import (
+    save_available_time_formset,
+    AvailableTimeEditRejected,
+)
+from planner.models import DailyPlan
 from .services.analysis_orchestrator import (
     analyze_and_estimate,
     retry_analysis,
@@ -168,6 +173,8 @@ def period_detail(request, period_id):
 @require_http_methods(["GET"])
 def period_manage(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    if not DailyPlan.objects.filter(exam_period=period).exists():
+        return redirect('exams:period_detail', period_id=period.id)
     exams = period.exams.all()
     available_times = period.available_times.all()
     context = {'period': period, 'exams': exams, 'available_times': available_times}
@@ -184,16 +191,24 @@ def period_manage(request, period_id):
 @require_http_methods(["GET", "POST"])
 def period_manage_available_time(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    if not DailyPlan.objects.filter(exam_period=period).exists():
+        return redirect('exams:period_detail', period_id=period.id)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
 
     if request.method == 'POST':
         formset = AvailableTimeFormSet(request.POST, queryset=queryset)
         if formset.is_valid():
-            instances = formset.save(commit=False)
-            for instance in instances:
-                instance.exam_period = period
-                instance.save()
-            return redirect('exams:period_manage', period_id=period.id)
+            try:
+                save_available_time_formset(formset, exam_period=period)
+            except AvailableTimeEditRejected:
+                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                formset._non_form_errors.append(
+                    "과거 날짜이거나 이미 마감된 날짜는 수정할 수 없습니다."
+                )
+            else:
+                return redirect('exams:period_manage', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
 
@@ -212,6 +227,8 @@ def period_manage_available_time(request, period_id):
 @require_http_methods(["GET"])
 def period_manage_task_view(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    if not DailyPlan.objects.filter(exam_period=exam.exam_period_id).exists():
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
     tasks = StudyTask.objects.filter(exam=exam).order_by('order', 'id')
     return render(request, 'exams/period_manage_task_view.html', {
         'exam': exam,
@@ -288,18 +305,23 @@ def available_time_update(request, period_id):
 
         formset = AvailableTimeFormSet(request.POST, queryset=queryset)
         if formset.is_valid():
-            instances = formset.save(commit=False)
-            for instance in instances:
-                instance.exam_period = period
-                instance.save()
-
-            if next_url and url_has_allowed_host_and_scheme(
-                next_url,
-                allowed_hosts={request.get_host()},
-                require_https=request.is_secure(),
-            ):
-                return redirect(next_url)
-            return redirect('exams:period_detail', period_id=period.id)
+            try:
+                save_available_time_formset(formset, exam_period=period)
+            except AvailableTimeEditRejected:
+                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                formset._non_form_errors.append(
+                    "과거 날짜이거나 이미 마감된 날짜는 수정할 수 없습니다."
+                )
+            else:
+                if next_url and url_has_allowed_host_and_scheme(
+                    next_url,
+                    allowed_hosts={request.get_host()},
+                    require_https=request.is_secure(),
+                ):
+                    return redirect(next_url)
+                return redirect('exams:period_detail', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
         next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')

@@ -474,6 +474,7 @@ def today(request):
     context = {
         'today': today_date,
         'exam_period': exam_period,
+        'has_plan': DailyPlan.objects.filter(exam_period=exam_period).exists(),
         'today_count': 0,
         'tasks': [],
         'is_finalized': False,
@@ -629,6 +630,10 @@ def calendar(request):
         'exam_period': exam_period,
         'pending_recovery': (
             _get_pending_recovery(exam_period) if exam_period else None
+        ),
+        'has_plan': (
+            DailyPlan.objects.filter(exam_period=exam_period).exists()
+            if exam_period else False
         ),
         'year': year,
         'month': month,

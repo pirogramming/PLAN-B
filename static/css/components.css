@@ -430,10 +430,13 @@
   cursor: pointer;
   position: relative;
 }
+/* 시험일도 다른 과목 공부에는 쓸 수 있어서(스케줄러는 "그 과목 자신의
+   시험일"만 배치 금지) 입력을 막지 않는다 — 시험일이라는 표시만 옅은
+   빨간 톤으로 남기고, 값이 있으면 .has-value/.value-set이 덮어써서
+   보인다 (스타일시트에서 이 규칙 다음에 오므로). */
 .avail-day.exam-day {
-  background: var(--neutral3);
-  color: var(--neutral6);
-  cursor: not-allowed;
+  background: var(--judge3-bg);
+  color: var(--judge3);
 }
 .avail-day.past-day {
   background: var(--neutral2);

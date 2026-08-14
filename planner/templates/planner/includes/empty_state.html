@@ -5,7 +5,9 @@
   {% if desc %}<p>{{ desc }}</p>{% endif %}
 
   {% if btn_label %}
-    <a class="btn btn-primary" href="{{ btn_url|default:'#' }}">{{ btn_label }}</a>
+    <a class="btn {{ btn_class|default:'btn-primary' }}" href="{{ btn_url|default:'#' }}">
+      {{ btn_label }}{% if btn_icon %}<svg class="ico"><use href="#{{ btn_icon }}"/></svg>{% endif %}
+    </a>
   {% endif %}
 
   {% if show_steps %}

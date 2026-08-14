@@ -59,38 +59,21 @@
           <div class="avail-weekday">일</div>
 
           {% for day in calendar_days %}
-            {% if forloop.first %}
-              {% if day.is_exam_day or day.is_past %}
-              <button type="button"
-                      class="avail-day {% if day.is_exam_day %}exam-day{% else %}past-day{% endif %}" disabled
-                      data-date="{{ day.date|date:'Y-m-d' }}"
-                      style="grid-column-start:{{ day.weekday }};">
-                {{ day.date|date:"j" }}
-              </button>
-              {% else %}
-              <button type="button"
-                      class="avail-day{% if day.has_value %} has-value{% endif %}"
-                      data-index="{{ day.formset_index }}"
-                      data-date="{{ day.date|date:'Y-m-d' }}"
-                      style="grid-column-start:{{ day.weekday }};">
-                {{ day.date|date:"j" }}
-              </button>
-              {% endif %}
+            {% if day.is_past %}
+            <button type="button"
+                    class="avail-day past-day" disabled
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
+              {{ day.date|date:"j" }}
+            </button>
             {% else %}
-              {% if day.is_exam_day or day.is_past %}
-              <button type="button"
-                      class="avail-day {% if day.is_exam_day %}exam-day{% else %}past-day{% endif %}" disabled
-                      data-date="{{ day.date|date:'Y-m-d' }}">
-                {{ day.date|date:"j" }}
-              </button>
-              {% else %}
-              <button type="button"
-                      class="avail-day{% if day.has_value %} has-value{% endif %}"
-                      data-index="{{ day.formset_index }}"
-                      data-date="{{ day.date|date:'Y-m-d' }}">
-                {{ day.date|date:"j" }}
-              </button>
-              {% endif %}
+            <button type="button"
+                    class="avail-day{% if day.is_exam_day %} exam-day{% endif %}{% if day.has_value %} has-value{% endif %}"
+                    data-index="{{ day.formset_index }}"
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
+              {{ day.date|date:"j" }}
+            </button>
             {% endif %}
           {% endfor %}
         </div>
@@ -153,7 +136,7 @@
     minutesInput.value = total || '';
   }
 
-  document.querySelectorAll('.avail-day:not(.exam-day)').forEach(
+  document.querySelectorAll('.avail-day:not(.past-day)').forEach(
     function (btn) {
       btn.addEventListener('click', function () {
         selectDay(btn);
