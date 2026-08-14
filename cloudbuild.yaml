@@ -1,0 +1,36 @@
+steps:
+  # 1. Docker 이미지 빌드
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "asia-northeast3-docker.pkg.dev/$PROJECT_ID/plan-b-repo/plan-b:$SHORT_SHA"
+      - "."
+
+  # 2. Artifact Registry에 푸시
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "asia-northeast3-docker.pkg.dev/$PROJECT_ID/plan-b-repo/plan-b:$SHORT_SHA"
+
+  # 3. Cloud Run 배포
+  - name: "gcr.io/google-cloud-sdk/slim"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "planb"
+      - "--image=asia-northeast3-docker.pkg.dev/$PROJECT_ID/plan-b-repo/plan-b:$SHORT_SHA"
+      - "--region=asia-northeast3"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=3"
+      - "--set-env-vars=DEBUG=False,AI_MODEL_NAME=gemini-3.1-flash-lite,AI_MOCK_MODE=False,USE_GCS=True,GS_BUCKET_NAME=planb-media,SECURE_SSL_REDIRECT=True,ALLOWED_HOSTS=planb-729189969182.asia-northeast3.run.app,CSRF_TRUSTED_ORIGINS=https://planb-729189969182.asia-northeast3.run.app"
+      - "--set-secrets=SECRET_KEY=django-secret-key:latest,DATABASE_URL=database-url:latest,GOOGLE_API_KEY=google-api-key:latest,GOOGLE_CLIENT_ID=google-client-id:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,NAVER_CLIENT_ID=naver-client-id:latest,NAVER_CLIENT_SECRET=naver-client-secret:latest"
+
+images:
+  - "asia-northeast3-docker.pkg.dev/$PROJECT_ID/plan-b-repo/plan-b:$SHORT_SHA"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
