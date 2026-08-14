@@ -2805,3 +2805,73 @@ class ExamPeriodLockValidationTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(StudyMaterial.objects.filter(id=material_id).exists())
+
+
+class ConcurrencyDefenseAndRaceConditionTests(TestCase):
+    """AI 분석/추출 간 경쟁 상태 및 처리 중 자료 삭제 방어 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="concurrency_tester@example.com",
+            email="concurrency_tester@example.com",
+            password="pass1234!",
+        )
+        self.client.force_login(self.user)
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="동시성 테스트 기간",
+            start_date=datetime.date(2026, 8, 1),
+            end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="운영체제",
+            exam_date=datetime.date(2026, 8, 15),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="동시성 테스트 자료",
+            material_type=MaterialType.TEXT,
+            extracted_text="프로세스 스케줄링 내용",
+            status=MaterialStatus.COMPLETED,
+            analysis_status=MaterialStatus.PENDING,
+        )
+
+    def test_material_delete_blocked_when_processing(self):
+        """처리 중인 학습자료는 삭제할 수 없다."""
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        url = reverse("exams:material_delete", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(StudyMaterial.objects.filter(id=self.material.id).exists())
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("현재 처리 중인" in str(m) for m in messages_list))
+
+    def test_material_delete_blocked_when_analysis_processing(self):
+        """AI 분석 중인 학습자료는 삭제할 수 없다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["analysis_status"])
+
+        url = reverse("exams:material_delete", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(StudyMaterial.objects.filter(id=self.material.id).exists())
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("현재 처리 중인" in str(m) for m in messages_list))
+
+    def test_material_analyze_blocked_when_extraction_not_completed(self):
+        """추출이 완료되지 않은 상태에서는 AI 분석을 시작할 수 없다."""
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        url = reverse("exams:material_analyze", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.material.refresh_from_db()
+        self.assertNotEqual(self.material.analysis_status, MaterialStatus.PROCESSING)
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("텍스트 추출이 완료된 자료만" in str(m) or "추출이 진행 중" in str(m) for m in messages_list))

@@ -24,8 +24,10 @@ from .forms import (
 )
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 from .services.analysis_orchestrator import (
-    analyze_and_estimate,
+    analyze_and_estimate,   # 더 이상 view에서 직접 쓰지 않지만, 다른 곳에서 참조할 수 있어 import 유지 여부는 검토
     retry_analysis,
+    claim_analysis_run,
+    run_claimed_analysis,
     get_analysis_status,
     MAX_RETRY_COUNT,
     DuplicateAnalysisRequestError,
@@ -34,6 +36,7 @@ from .services.analysis_orchestrator import (
     AnalysisPipelineError,
     StaleAnalysisRunError,
 )
+
 from functools import wraps
 
 logger = logging.getLogger(__name__)
@@ -89,39 +92,67 @@ def check_exam_period_locked_by_material_id(view_func):
                     exam__exam_period__user=request.user
                 )
                 period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
+                
                 if DailyPlan.objects.filter(exam_period=period).exists():
                     messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
+
+                # 💡 현재 처리 중인 자료(텍스트 추출 중 또는 AI 분석 중)인 경우 삭제/수정 차단
+                if (
+                    material.status == MaterialStatus.PROCESSING
+                    or material.analysis_status == MaterialStatus.PROCESSING
+                ):
+                    messages.error(request, "현재 처리 중인 학습자료는 삭제하거나 수정할 수 없습니다.")
+                    return redirect('exams:material_detail', material_id=material_id)
+
                 return view_func(request, material_id, *args, **kwargs)
         return view_func(request, material_id, *args, **kwargs)
     return wrapped_view
 
-def check_exam_period_not_locked_by_material_id(view_func):
-    """material_id 기준: ExamPeriod row lock 안에서 계획 존재 여부만 짧게 검증하고,
-    view_func 자체는 트랜잭션/락 밖에서 실행한다.
+def check_exam_period_not_locked_by_material_id(claim_func=None):
+    """material_id 기준: ExamPeriod row lock 안에서
+      1) 계획 존재 여부 검증
+      2) (claim_func가 주어지면) material을 PROCESSING 등으로 원자적 선점
+    까지 마친 뒤 락을 해제하고, view_func 자체(PDF 추출/AI 분석 같은
+    장시간 외부 호출)는 트랜잭션·락 밖에서 실행한다.
 
-    PDF 추출, AI 분석처럼 장시간 걸리는 외부 호출(네트워크 I/O)을 포함하는 View 전용.
-    check_exam_period_locked_by_material_id와 달리 검증~실행 사이에 다른 요청이
-    끼어들 수 있는 race window가 남아있음을 감수하고 사용한다.
-    (해당 window에서 실제로 문제가 되는 건 '계획 생성된 시험기간의 자료를 건드리는 것'
-    뿐이고, extract/analyze는 material 자체 상태만 변경하므로 허용 가능한 트레이드오프로 판단)
+    claim_func(material) -> (claimed, message, level, extra)
+        claimed=False면 message/level(예: 'error'|'info')로 안내하고
+        view_func를 호출하지 않은 채 material_detail로 리다이렉트한다.
+        claimed=True면 extra는 view_func에 claim_extra 키워드 인자로
+        그대로 전달된다 (예: 분석 run_id).
+
+    이렇게 하면 planner.plan_generate()가 이후 같은 ExamPeriod를 잠갔을 때
+    '이 material은 이미 PROCESSING 상태다'를 보고 계획 생성을 막을 수 있어,
+    'AI 요청 → 락 해제 → 계획 생성 → 뒤늦게 선점/결과 반영'같은 역전이 불가능해진다.
     """
-    @wraps(view_func)
-    def wrapped_view(request, material_id, *args, **kwargs):
-        if request.method == 'POST':
-            with transaction.atomic():
-                material = get_object_or_404(
-                    StudyMaterial.objects.select_related('exam__exam_period'),
-                    id=material_id,
-                    exam__exam_period__user=request.user
-                )
-                period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
-                if DailyPlan.objects.filter(exam_period=period).exists():
-                    messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
-                    return redirect('exams:period_detail', period_id=period.id)
-            # atomic 블록 종료 → 락 해제. 이후 view_func는 트랜잭션/락 밖에서 실행
-        return view_func(request, material_id, *args, **kwargs)
-    return wrapped_view
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapped_view(request, material_id, *args, **kwargs):
+            if request.method == 'POST':
+                with transaction.atomic():
+                    material = get_object_or_404(
+                        StudyMaterial.objects.select_related('exam__exam_period'),
+                        id=material_id,
+                        exam__exam_period__user=request.user
+                    )
+                    period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
+                    if DailyPlan.objects.filter(exam_period=period).exists():
+                        messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                        return redirect('exams:period_detail', period_id=period.id)
+
+                    if claim_func is not None:
+                        claimed, message, level, extra = claim_func(material)
+                        if not claimed:
+                            getattr(messages, level)(request, message)
+                            return redirect('exams:material_detail', material_id=material.id)
+                        kwargs['claim_extra'] = extra
+                # atomic 블록 종료 → ExamPeriod 락 해제.
+                # 이 시점에 이미 material은 선점되어 있으므로 이후 시작되는
+                # plan_generate()와 안전하게 직렬화된다.
+            return view_func(request, material_id, *args, **kwargs)
+        return wrapped_view
+    return decorator
 
 # =====================================================================
 # 시험기간 목록 (exams:period_list) 
@@ -660,43 +691,39 @@ def material_detail(request, material_id):
 # =====================================================================
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
-@login_required
-@check_exam_period_not_locked_by_material_id
-@require_http_methods(["POST"])
-def material_extract(request, material_id):
-    material = get_object_or_404(
-        StudyMaterial, id=material_id, exam__exam_period__user=request.user
-    )
-    previous_extracted_text = material.extracted_text
-
+def _claim_material_for_extraction(material):
     if material.material_type != MaterialType.PDF:
-        messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
-        return redirect('exams:material_detail', material_id=material.id)
-
+        return False, "PDF 자료만 텍스트 추출이 가능합니다.", "error", None
     if not material.file:
-        messages.error(request, "첨부된 PDF 파일이 없습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
+        return False, "첨부된 PDF 파일이 없습니다.", "error", None
 
-    updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
+    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(
         status=MaterialStatus.PROCESSING
     ).exclude(
         analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
     ).update(status=MaterialStatus.PROCESSING, error_message=None)
 
-    if not updated_count:
+    if not updated:
         material.refresh_from_db(fields=['status', 'analysis_status'])
         if material.status == MaterialStatus.PROCESSING:
-            messages.info(request, "이미 PDF 텍스트를 추출 중인 자료입니다.")
-        elif material.analysis_status == MaterialStatus.PROCESSING:
-            messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
-        else:
-            messages.error(
-                request,
-                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.",
-            )
-        return redirect('exams:material_detail', material_id=material.id)
+            return False, "이미 PDF 텍스트를 추출 중인 자료입니다.", "info", None
+        if material.analysis_status == MaterialStatus.PROCESSING:
+            return False, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.", "error", None
+        return False, "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.", "error", None
 
-    material.refresh_from_db(fields=['status', 'error_message'])
+    return True, None, None, None
+
+
+@login_required
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
+@require_http_methods(["POST"])
+def material_extract(request, material_id, claim_extra=None):
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+    previous_extracted_text = material.extracted_text
+    # material_type / file / status 선점은 claim_func가 락 안에서 이미 끝냈으므로
+    # 여기서는 바로 추출을 진행한다.
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -762,29 +789,28 @@ def material_delete(request, material_id):
 # =====================================================================
 # AI 분석 실행 (exams:material_analyze) - E-AI-01
 # =====================================================================
+def _claim_material_for_analysis(material):
+    if material.status != MaterialStatus.COMPLETED:
+        return False, "텍스트 추출이 완료된 자료만 AI 분석을 시작할 수 있습니다.", "error", None
+    try:
+        run_id = claim_analysis_run(material, is_retry=False)
+    except DuplicateAnalysisRequestError:
+        return False, "이미 분석 중이거나 처리된 자료입니다.", "info", None
+    return True, None, None, run_id
+
+
 @login_required
-@check_exam_period_not_locked_by_material_id
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_analysis)
 @require_http_methods(["POST"])
-def material_analyze(request, material_id):
+def material_analyze(request, material_id, claim_extra=None):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    if material.status != MaterialStatus.COMPLETED:
-        messages.error(request, "텍스트 추출이 완료된 자료만 AI 분석을 시작할 수 있습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
-
     try:
-        analyze_and_estimate(material)
-        # 피드백 3번 반영: 동기식이므로 "시작되었습니다" 메시지 제거하고 완료 메시지만 노출
+        run_claimed_analysis(material, claim_extra)
         messages.success(request, "AI 분석이 완료되었습니다.")
-    except DuplicateAnalysisRequestError:
-        messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
-        return redirect('exams:material_detail', material_id=material.id)
     except StaleAnalysisRunError:
-        # 리뷰 반영(#84): 이 실행이 시작은 했지만, 완료 처리 직전에 다른(더 최신)
-        # 실행에게 선점당한 경우다. 진짜 시스템 오류가 아니라 정상적인 동시성
-        # 상황이므로, DuplicateAnalysisRequestError와 같은 계열의 안내로 처리한다.
         logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
         messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -799,33 +825,35 @@ def material_analyze(request, material_id):
     return redirect('exams:task_review', exam_id=material.exam_id)
 
 
+
 # =====================================================================
 # AI 분석 재시도 (exams:material_retry_analyze) - E-AI-03
 # =====================================================================
+def _claim_material_for_retry(material):
+    try:
+        run_id = claim_analysis_run(material, is_retry=True)
+    except DuplicateAnalysisRequestError:
+        return False, "이미 분석 중인 자료입니다.", "info", None
+    except AnalysisNotSupportedError as e:
+        return False, str(e), "error", None
+    except RetryLimitExceededError as e:
+        return False, str(e), "error", None
+    return True, None, None, run_id
+
+
 @login_required
-@check_exam_period_not_locked_by_material_id
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_retry)
 @require_http_methods(["POST"])
-def material_retry_analyze(request, material_id):
+def material_retry_analyze(request, material_id, claim_extra=None):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
     try:
-        retry_analysis(material)
-    except DuplicateAnalysisRequestError:
-        messages.info(request, "이미 분석 중인 자료입니다.")
-        return redirect('exams:material_detail', material_id=material.id)
+        run_claimed_analysis(material, claim_extra)
     except StaleAnalysisRunError:
-        # material_analyze()와 동일한 이유 - 완료 처리 직전에 다른 실행에게
-        # 선점당한 정상적인 동시성 상황이다.
         logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
         messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except AnalysisNotSupportedError as e:
-        messages.error(request, str(e))
-        return redirect('exams:material_detail', material_id=material.id)
-    except RetryLimitExceededError as e:
-        messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
     except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
@@ -837,7 +865,6 @@ def material_retry_analyze(request, material_id):
 
     messages.success(request, "AI 분석이 완료되었습니다.")
     return redirect('exams:task_review', exam_id=material.exam_id)
-
 
 # =====================================================================
 # AI 분석 상태 조회 (exams:material_analysis_status) - E-AI-02
