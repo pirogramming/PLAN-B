@@ -86,7 +86,7 @@
     {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
   </div>
   <div class="feasibility-action-row">
-    <a href="{{ available_time_edit_url }}" class="btn btn-ghost">
+    <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가능시간 수정
     </a>
     <a href="{% url 'exams:period_detail' exam_period.id %}" class="btn btn-ghost">
@@ -100,7 +100,7 @@
      에러 신호 없이도 항상 접근 가능하게 ghost 버튼 하나만 조용히 둔다
      (.feasibility-action-row는 버튼에 flex:1을 줘서 꽉 차 보이므로 여기선 안 씀). #}
   <div style="margin-top:14px; text-align:right;">
-    <a href="{{ available_time_edit_url }}" class="btn btn-ghost">
+    <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가용시간 수정하기
     </a>
   </div>
