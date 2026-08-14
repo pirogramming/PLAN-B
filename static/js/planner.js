@@ -105,6 +105,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const progressView  = document.getElementById('eodProgress');
     const progressHint  = document.getElementById('eodProgressHint');
     const progressFoot  = document.getElementById('eodProgressFoot');
+    const availTimeBtn  = document.getElementById('eodAvailTimeBtn');
     const stepIco       = document.getElementById('eodStepIco');
     const stepLabel     = document.getElementById('eodStepLabel');
     const steps = eod.querySelectorAll('.steps-run li');
@@ -116,6 +117,7 @@ document.addEventListener('DOMContentLoaded', function () {
         confirmView.hidden = false;
         progressView.hidden = true;
         progressFoot.hidden = true;
+        availTimeBtn.hidden = true;
         stepIco.innerHTML = '<use href="#i-loader"/>';
         stepLabel.textContent = '오늘 기록을 확정하는 중';
         progressHint.textContent = '잠시만 기다려 주세요.';
@@ -171,6 +173,27 @@ document.addEventListener('DOMContentLoaded', function () {
         .then(function (data) {
           finalizeResult = data;
           recalcDone = true;
+
+          // needs_recovery=true인데 recovery_group_id가 없으면(=recovery_available
+          // false) 지금 가용시간으로는 복구안 자체를 만들 수 없다는 뜻이다. 이때
+          // goToNextScreen()의 두 분기(복구 화면 / 오늘 화면) 중 어디에도 안
+          // 걸려서 조용히 오늘 화면으로 돌아가버리던 게 원래 버그 — 여기서
+          // 따로 잡아서 안내하고, 자동 이동도 하지 않는다 (사용자가 가용시간을
+          // 고치기 전까진 오늘 화면으로 가봤자 똑같은 상황이 반복되므로).
+          if (finalizeResult.needs_recovery && !finalizeResult.recovery_group_id) {
+            steps.forEach(function (s) {
+              s.classList.remove('doing');
+              s.classList.add('error');
+            });
+            stepIco.innerHTML = '<use href="#i-alert"/>';
+            stepLabel.textContent = '지금은 복구안을 만들 수 없어요';
+            progressHint.textContent =
+              '현재 가용시간으로 남은 작업을 재배치할 수 없습니다. 가용시간을 늘려주세요.';
+            progressFoot.hidden = false;
+            availTimeBtn.hidden = false;
+            return;
+          }
+
           steps.forEach(function (s) {
             s.classList.remove('doing');
             s.classList.add('done');

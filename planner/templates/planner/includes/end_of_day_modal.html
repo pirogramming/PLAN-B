@@ -71,7 +71,11 @@
         </p>
       </div>
       <div class="modal-foot" id="eodProgressFoot" hidden>
-        <button class="btn btn-secondary ml-auto js-close" type="button">닫기</button>
+        <button class="btn btn-secondary js-close" type="button">닫기</button>
+        <a class="btn btn-primary ml-auto" id="eodAvailTimeBtn"
+           href="{% url 'exams:period_manage_available_time' exam_period.id %}" hidden>
+          가용시간 수정
+        </a>
       </div>
     </div>
 

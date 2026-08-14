@@ -2146,6 +2146,41 @@ class DashboardViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.context['pending_recovery'])
 
+    def test_dashboard_shows_recovery_retry_banner_when_generation_failed(self):
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        # importance=high, depth=core -> 핵심집중형에서도 제외 대상이 안 됨
+        task = StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        item = DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+        # 미래 가용시간을 일부러 안 만듦 -> 두 복구 전략 다 실패 -> RecoveryPlan 없음
+        finalize_daily_plan(daily_plan)
+
+        response = self.client.get(reverse('planner:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context['pending_recovery'])
+        self.assertEqual(response.context['retry_daily_plan_id'], daily_plan.id)
+        self.assertContains(response, "복구안 다시 생성")
+
     def test_dashboard_does_not_show_other_user_exam_period(self):
         from django.contrib.auth import get_user_model
         from exams.models import ExamPeriod
