@@ -303,25 +303,35 @@ def retry_recovery_generation(daily_plan) -> dict:
     생성을 다시 시도한다. 마감 상태(finalized_at)와 NOT_DONE/PARTIAL 기록은
     건드리지 않는다 - 그날의 실제 기록은 그대로 두고 복구안만 새로 계산한다.
 
+    동시 요청 방어: DailyPlan row를 잠근 뒤 필요 여부를 다시 확인한다.
+    두 요청이 거의 동시에 들어와도, 먼저 잠금을 획득한 쪽이 RecoveryPlan을
+    만들고 커밋하면, 뒤이어 잠금을 획득한 쪽은 재확인 시점에 이미 RecoveryPlan이
+    생겨있는 걸 보고 RecoveryRetryNotNeededError로 빠진다 (중복 생성 방지).
+
     Raises:
         RecoveryRetryNotNeededError: 재생성이 필요한 상태가 아닌 경우
             (아직 미마감, 미완료 항목 없음, 또는 이미 RecoveryPlan이 있음)
     """
-    if not needs_recovery_retry(daily_plan):
-        raise RecoveryRetryNotNeededError(
-            f"{daily_plan}는 복구안 재생성이 필요한 상태가 아닙니다."
+    with transaction.atomic():
+        locked_plan = (
+            DailyPlan.objects.select_for_update().get(pk=daily_plan.pk)
         )
 
-    unfinished_items = list(
-        DailyPlanItem.objects.filter(
-            daily_plan=daily_plan,
-            progress_log__progress_status__in=(
-                ProgressStatus.PARTIAL, ProgressStatus.NOT_DONE
-            ),
-        ).select_related('progress_log', 'study_task__exam')
-    )
+        if not needs_recovery_retry(locked_plan):
+            raise RecoveryRetryNotNeededError(
+                f"{locked_plan}는 복구안 재생성이 필요한 상태가 아닙니다."
+            )
 
-    return generate_recovery_options(daily_plan, unfinished_items)
+        unfinished_items = list(
+            DailyPlanItem.objects.filter(
+                daily_plan=locked_plan,
+                progress_log__progress_status__in=(
+                    ProgressStatus.PARTIAL, ProgressStatus.NOT_DONE
+                ),
+            ).select_related('progress_log', 'study_task__exam')
+        )
+
+        return generate_recovery_options(locked_plan, unfinished_items)
 
 
 class RecoveryRetryNotNeededError(Exception):

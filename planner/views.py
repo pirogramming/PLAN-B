@@ -1179,15 +1179,23 @@ def recovery_apply(request, plan_id):
 
 @login_required
 @require_http_methods(["POST"])
-def recovery_retry(request, plan_id):
+def recovery_retry(request, daily_plan_id):
     daily_plan = get_object_or_404(
-        DailyPlan, id=plan_id, exam_period__user=request.user,
+        DailyPlan, id=daily_plan_id, exam_period__user=request.user,
     )
 
     try:
         result = retry_recovery_generation(daily_plan)
     except RecoveryRetryNotNeededError:
         messages.info(request, "복구안 재생성이 필요한 상태가 아닙니다.")
+        return redirect('planner:dashboard')
+    except Exception:
+        logger.exception(
+            "복구안 재생성 중 예상치 못한 오류 (daily_plan_id=%s)", daily_plan_id
+        )
+        messages.error(
+            request, "복구안 재생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
         return redirect('planner:dashboard')
 
     maintain_volume = result['maintain_volume']

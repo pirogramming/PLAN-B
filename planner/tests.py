@@ -4214,7 +4214,7 @@ class RecoveryRetryTests(TestCase):
 
     def _retry(self):
         return self.client.post(
-            reverse("planner:recovery_retry", kwargs={"plan_id": self.daily_plan.id})
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
         )
 
     # ── 1. needs_recovery_retry 판별 ──────────────────
@@ -4314,6 +4314,23 @@ class RecoveryRetryTests(TestCase):
 
     def test_view_requires_post(self):
         response = self.client.get(
-            reverse("planner:recovery_retry", kwargs={"plan_id": self.daily_plan.id})
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
         )
         self.assertEqual(response.status_code, 405)
+
+    def test_concurrent_retry_does_not_create_duplicate_recovery_plans(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        retry_recovery_generation(self.daily_plan)
+        with self.assertRaises(RecoveryRetryNotNeededError):
+            retry_recovery_generation(self.daily_plan)
+
+        self.assertEqual(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan)
+            .values('recovery_group_id').distinct().count(),
+            1,
+        )
