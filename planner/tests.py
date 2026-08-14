@@ -1907,6 +1907,26 @@ class PlanGenerateFlowTests(TestCase):
         # 여유 과목: 남은 가용시간 넉넉함 -> possible
         self.assertEqual(results['여유 과목']['status'], POSSIBLE)
 
+    def test_plan_generate_blocked_while_material_processing(self):
+        from exams.models import StudyMaterial
+        from core.choices import MaterialStatus
+
+        StudyMaterial.objects.create(
+            exam=self.exam, material_type='text',
+            status=MaterialStatus.PROCESSING,
+        )
+
+        response = self.client.post(
+            reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
+        )
+
+        self.assertRedirects(
+            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        self.assertFalse(
+            DailyPlan.objects.filter(exam_period=self.exam_period).exists()
+        )
+
         
 class FeasibilitySubjectResultsTests(TestCase):
     """
