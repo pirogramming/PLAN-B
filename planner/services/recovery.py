@@ -275,6 +275,58 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
         'core_focus_failure_reason': core_focus_failure_reason,
     }
 
+def needs_recovery_retry(daily_plan) -> bool:
+    """
+    마감됐고, 미완료(PARTIAL/NOT_DONE) 항목이 있는데, RecoveryPlan이 하나도
+    생성되지 않은(=마감 시점에 복구안 생성이 두 안 다 실패했던) 상태인지 판별한다.
+    새 필드 없이, generate_recovery_options()가 실패 시 RecoveryPlan을 아예
+    만들지 않는다는 사실을 이용한다.
+    """
+    if daily_plan.finalized_at is None:
+        return False
+
+    has_unfinished = DailyPlanItem.objects.filter(
+        daily_plan=daily_plan,
+        progress_log__progress_status__in=(
+            ProgressStatus.PARTIAL, ProgressStatus.NOT_DONE
+        ),
+    ).exists()
+    if not has_unfinished:
+        return False
+
+    return not RecoveryPlan.objects.filter(source_daily_plan=daily_plan).exists()
+
+
+def retry_recovery_generation(daily_plan) -> dict:
+    """
+    마감된 daily_plan을 source로, 현재 최신 AvailableTime 기준으로 복구안
+    생성을 다시 시도한다. 마감 상태(finalized_at)와 NOT_DONE/PARTIAL 기록은
+    건드리지 않는다 - 그날의 실제 기록은 그대로 두고 복구안만 새로 계산한다.
+
+    Raises:
+        RecoveryRetryNotNeededError: 재생성이 필요한 상태가 아닌 경우
+            (아직 미마감, 미완료 항목 없음, 또는 이미 RecoveryPlan이 있음)
+    """
+    if not needs_recovery_retry(daily_plan):
+        raise RecoveryRetryNotNeededError(
+            f"{daily_plan}는 복구안 재생성이 필요한 상태가 아닙니다."
+        )
+
+    unfinished_items = list(
+        DailyPlanItem.objects.filter(
+            daily_plan=daily_plan,
+            progress_log__progress_status__in=(
+                ProgressStatus.PARTIAL, ProgressStatus.NOT_DONE
+            ),
+        ).select_related('progress_log', 'study_task__exam')
+    )
+
+    return generate_recovery_options(daily_plan, unfinished_items)
+
+
+class RecoveryRetryNotNeededError(Exception):
+    """재생성이 필요한 상태가 아닐 때 발생한다."""
+
 class RecoveryPlanAlreadyProcessedError(Exception):
     pass
 
