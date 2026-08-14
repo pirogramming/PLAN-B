@@ -25,7 +25,7 @@ from exams.models import AvailableTime, Exam
 from planner.models import DailyPlan, DailyPlanItem
 
 # 달력 미리보기 칸에 보여줄 작업 개수 (그 이상은 "+N개"로 뭉침)
-PREVIEW_TASK_LIMIT = 3
+PREVIEW_TASK_LIMIT = 2
 
 
 def build_calendar_context(exam_period, year: int, month: int) -> dict:  # exam_period may be None
@@ -240,7 +240,11 @@ def _task_row_fields(item: DailyPlanItem) -> dict:
         "subject_name": item.study_task.exam.subject_name,
         "depth": item.study_task.depth,
         "planned_minutes": item.planned_minutes,
-        "status": item.status,
+        # item.status는 DailyPlanStatus(planned/in_progress/completed/at_risk)라
+        # task_row.html이 기대하는 ProgressStatus(done/partial/not_done)와 다른
+        # enum이다 — 여기서 잘못 item.status를 넣으면 항상 else 분기(빈 동그라미)로
+        # 빠져서, 오늘의 공부에서 기록한 진행 상태가 캘린더에는 하나도 안 보인다.
+        "status": log.progress_status if log else None,
         "actual_minutes": log.actual_minutes if log else None,
         "completion_percent": log.completion_percent if log else None,
     }

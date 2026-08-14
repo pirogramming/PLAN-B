@@ -60,7 +60,7 @@ class LoginRedirectTests(TestCase):
             'username': 'redirect@example.com',
             'password': 'StrongPass123!',
         })
-        self.assertRedirects(response, reverse('exams:period_list'))
+        self.assertRedirects(response, reverse('planner:dashboard'))
 
     def test_login_redirects_to_safe_next(self):
         next_url = reverse('exams:period_list')
@@ -81,12 +81,12 @@ class LoginRedirectTests(TestCase):
             },
         )
         # 외부 도메인은 차단되고 기본 리다이렉트로 fallback 되어야 함
-        self.assertRedirects(response, reverse('exams:period_list'))
+        self.assertRedirects(response, reverse('planner:dashboard'))
 
     def test_authenticated_user_redirected_from_login_page(self):
         self.client.force_login(self.user)
         response = self.client.get(reverse('accounts:login'))
-        self.assertRedirects(response, reverse('exams:period_list'))
+        self.assertRedirects(response, reverse('planner:dashboard'))
 
 
 class SocialAccountAdapterTests(TestCase):

@@ -25,7 +25,11 @@ from planner.services.recovery import (
     RecoveryPlanAlreadyProcessedError,
     RecoveryPlanStaleError,
 )
-
+from planner.services.recovery import (
+    needs_recovery_retry,
+    retry_recovery_generation,
+    RecoveryRetryNotNeededError,
+)
 # Create your tests here.
 from planner.services.feasibility_checker import (
     calculate_feasibility,
@@ -1823,14 +1827,12 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 2
         )
 
-    def test_plan_generate_twice_redirects_to_complete(self):
+    def test_plan_generate_twice_redirects_to_dashboard(self):
         self._make_confirmed_task(order=1, min_m=20, max_m=40)
         AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
 
@@ -1838,9 +1840,7 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 1
         )
@@ -2145,6 +2145,41 @@ class DashboardViewTests(TestCase):
         response = self.client.get(reverse('planner:dashboard'))
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.context['pending_recovery'])
+
+    def test_dashboard_shows_recovery_retry_banner_when_generation_failed(self):
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        # importance=high, depth=core -> 핵심집중형에서도 제외 대상이 안 됨
+        task = StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        item = DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+        # 미래 가용시간을 일부러 안 만듦 -> 두 복구 전략 다 실패 -> RecoveryPlan 없음
+        finalize_daily_plan(daily_plan)
+
+        response = self.client.get(reverse('planner:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context['pending_recovery'])
+        self.assertEqual(response.context['retry_daily_plan_id'], daily_plan.id)
+        self.assertContains(response, "복구안 다시 생성")
 
     def test_dashboard_does_not_show_other_user_exam_period(self):
         from django.contrib.auth import get_user_model
@@ -4154,3 +4189,183 @@ class CalendarServiceYearMonthValidationTests(TestCase):
 
         self.assertEqual(data["year"], 2026)
         self.assertEqual(data["month"], 8)
+
+class RecoveryRetryTests(TestCase):
+    """
+    #141 복구안 재생성(needs_recovery_retry / retry_recovery_generation / recovery_retry View) 테스트.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="recovery_retry_tester",
+            email="recovery_retry@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="recovery_retry_other",
+            email="recovery_retry_other@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="recovery_retry@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구 재생성 테스트용 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=7),
+        )
+        # importance=high, depth=core -> 핵심집중형에서도 제외 대상이 안 됨
+        # -> 가용시간이 없으면 두 안 다 실패하기 딱 좋은 조건
+        self.task = StudyTask.objects.create(
+            exam=self.exam, title="미완료 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        self.item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.task,
+            planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=self.item, status="not_done", actual_minutes=0)
+
+        self.daily_plan.finalized_at = django_timezone.now()
+        self.daily_plan.save(update_fields=["finalized_at"])
+        # 미래 가용시간을 일부러 안 만듦 -> 복구안 생성 실패 상태를 재현
+
+    def _retry(self):
+        return self.client.post(
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
+        )
+
+    # ── 1. needs_recovery_retry 판별 ──────────────────
+    def test_needs_retry_true_when_finalized_unfinished_no_recovery_plan(self):
+        self.assertTrue(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_not_finalized(self):
+        self.daily_plan.finalized_at = None
+        self.daily_plan.save(update_fields=["finalized_at"])
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_no_unfinished_items(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_recovery_plan_already_exists(self):
+        RecoveryPlan.objects.create(
+            exam_period=self.exam_period, source_daily_plan=self.daily_plan,
+            recovery_group_id=uuid.uuid4(), recovery_type="maintain_volume",
+        )
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    # ── 2. retry_recovery_generation 서비스 함수 ──────
+    def test_retry_raises_when_not_needed(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+
+        with self.assertRaises(RecoveryRetryNotNeededError):
+            retry_recovery_generation(self.daily_plan)
+
+    def test_retry_succeeds_after_available_time_increased(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        result = retry_recovery_generation(self.daily_plan)
+
+        self.assertIsNotNone(result["maintain_volume"])
+        self.assertEqual(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan).count(), 1
+        )
+
+    def test_retry_does_not_touch_finalized_at_or_progress_log(self):
+        original_finalized_at = self.daily_plan.finalized_at
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        retry_recovery_generation(self.daily_plan)
+
+        self.daily_plan.refresh_from_db()
+        self.item.progress_log.refresh_from_db()
+        self.assertEqual(self.daily_plan.finalized_at, original_finalized_at)
+        self.assertEqual(self.item.progress_log.progress_status, "not_done")
+
+    # ── 3. View ────────────────────────────────────
+    def test_view_redirects_to_dashboard_when_not_needed(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+
+        response = self._retry()
+        self.assertRedirects(response, reverse("planner:dashboard"))
+
+    def test_view_still_fails_shows_error_and_redirects_dashboard(self):
+        response = self._retry()
+        self.assertRedirects(response, reverse("planner:dashboard"))
+        self.assertFalse(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan).exists()
+        )
+
+    def test_view_success_redirects_to_recovery_compare(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        response = self._retry()
+
+        plan = RecoveryPlan.objects.get(source_daily_plan=self.daily_plan)
+        self.assertRedirects(
+            response,
+            reverse("planner:recovery_compare", kwargs={"group_id": plan.recovery_group_id}),
+        )
+
+    def test_view_404_for_other_user(self):
+        self.client.logout()
+        self.client.login(username="recovery_retry_other@example.com", password="pass1234")
+
+        response = self._retry()
+        self.assertEqual(response.status_code, 404)
+
+    def test_view_requires_post(self):
+        response = self.client.get(
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_concurrent_retry_does_not_create_duplicate_recovery_plans(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        retry_recovery_generation(self.daily_plan)
+        with self.assertRaises(RecoveryRetryNotNeededError):
+            retry_recovery_generation(self.daily_plan)
+
+        self.assertEqual(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan)
+            .values('recovery_group_id').distinct().count(),
+            1,
+        )
