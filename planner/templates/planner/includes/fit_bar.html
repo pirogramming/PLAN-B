@@ -10,6 +10,6 @@
 
 <div class="fit-caption">
   <span class="start">0분</span>
-  <span class="need" style="left:{{ need_label_pct }}%">필요 {{ min_minutes }} ~ {{ max_minutes }}분</span>
+  <span class="need" style="left:clamp(12%, {{ need_label_pct }}%, 88%)">필요 {{ min_minutes }} ~ {{ max_minutes }}분</span>
   <span class="end">{{ axis_max }}분</span>
 </div>

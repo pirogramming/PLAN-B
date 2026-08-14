@@ -127,6 +127,10 @@ def _build_overall(exam_period, remaining_days):
 
     result = calculate_feasibility(required_min, required_max, available_minutes)
     status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+    # fit_bar.html/배지 CSS(.fit-band.ok 등)는 ok/warn/bad 클래스만 알고 있고
+    # calculate_feasibility()의 possible/risky/impossible과 이름이 달라서,
+    # status 원본 값은 그대로 두고 CSS용 값만 따로 매핑해서 내려준다.
+    status_class_map = {POSSIBLE: "ok", RISKY: "warn", IMPOSSIBLE: "bad"}
 
     axis_max = max(available_minutes, required_max, 1) * 1.15
     min_pct = round(required_min / axis_max * 100, 1)
@@ -139,6 +143,7 @@ def _build_overall(exam_period, remaining_days):
 
     return {
         "status": result["status"],
+        "status_class": status_class_map[result["status"]],
         "status_label": status_label_map[result["status"]],
         "viewed_at": timezone.now(),
         "min_minutes": required_min,
@@ -393,7 +398,7 @@ def plan_generate(request, period_id):
             )
         except ScheduleAlreadyExistsError:
             messages.info(request, "이미 생성된 계획이 있습니다.")
-            return redirect('planner:plan_complete', period_id=exam_period.id)
+            return redirect('planner:dashboard')
         except UnallocatedTasksError:
             messages.error(
                 request,
@@ -405,8 +410,7 @@ def plan_generate(request, period_id):
             messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
             return redirect('planner:feasibility', period_id=exam_period.id)
 
-        return redirect('planner:plan_complete', period_id=exam_period.id)
-
+        return redirect('planner:dashboard')
 
 @login_required
 @require_http_methods(["GET"])
@@ -433,12 +437,17 @@ def plan_complete(request, period_id):
     }
     return render(request, 'planner/plan_complete.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def dashboard(request):
     """
     시험기간/계획 존재 여부에 따라 온보딩 화면 또는 전체 대시보드를 보여준다.
+    로그인 안 한 사용자도 들어올 수 있게 @login_required를 빼고 여기서
+    직접 분기한다 (사이드바+메인 화면 틀 안에서 회원가입/로그인 안내를
+    보여주기 위함 — 다른 planner 화면들은 여전히 로그인이 필요하다).
     """
+    if not request.user.is_authenticated:
+        return render(request, 'planner/dashboard.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
@@ -493,9 +502,13 @@ def dashboard(request):
     }
     return render(request, 'planner/dashboard.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def today(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/today.html', {
+            'exam_period': None, 'today': timezone.localdate(),
+        })
+
     today_date = timezone.localdate()
 
     exam_period = (
@@ -508,6 +521,7 @@ def today(request):
     context = {
         'today': today_date,
         'exam_period': exam_period,
+        'has_plan': DailyPlan.objects.filter(exam_period=exam_period).exists(),
         'today_count': 0,
         'tasks': [],
         'is_finalized': False,
@@ -516,10 +530,8 @@ def today(request):
     }
 
     if exam_period is None:
-        context.update({
-            'empty_title': "등록된 시험기간이 없습니다",
-            'empty_desc': "먼저 시험기간을 등록해주세요.",
-        })
+        # exam_period_prompt.html이 이 경우를 처리하므로(today.html의
+        # {% elif not exam_period %}) 여기서는 추가 컨텍스트가 필요 없다.
         return render(request, 'planner/today.html', context)
 
     pending_recovery = _get_pending_recovery(exam_period)
@@ -614,15 +626,26 @@ def today(request):
     })
     return render(request, 'planner/today.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def calendar(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/calendar.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
         .order_by('-created_at')
         .first()
     )
+
+    if exam_period is None:
+        # 예전엔 calendar.html 안에 고정 배너로 떠 있었는데, 다른 화면들처럼
+        # base.html의 전역 토스트(messages)로 통일한다 — 리다이렉트 없이 같은
+        # 요청 안에서 render()해도 messages 컨텍스트 프로세서가 그대로 잡아준다.
+        messages.warning(
+            request,
+            "아직 등록된 시험기간이 없습니다. 시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다.",
+        )
 
     today_date = timezone.localdate()
     try:
@@ -652,6 +675,13 @@ def calendar(request):
 
     context = {
         'exam_period': exam_period,
+        'pending_recovery': (
+            _get_pending_recovery(exam_period) if exam_period else None
+        ),
+        'has_plan': (
+            DailyPlan.objects.filter(exam_period=exam_period).exists()
+            if exam_period else False
+        ),
         'year': year,
         'month': month,
         'prev_year': prev_year,

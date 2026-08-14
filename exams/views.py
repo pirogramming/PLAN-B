@@ -23,6 +23,11 @@ from .forms import (
     StudyTaskFormSet,
 )
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from .services.available_time_updater import (
+    save_available_time_formset,
+    blocked_date_messages,
+    AvailableTimeEditRejected,
+)
 from .services.analysis_orchestrator import (
     analyze_and_estimate,
     retry_analysis,
@@ -171,6 +176,81 @@ def period_detail(request, period_id):
 
 
 # =====================================================================
+# 시험기간 관리 (exams:period_manage)
+# 계획이 이미 생성된 시험기간용 화면. period_detail과 달리 과목 추가/수정/
+# 삭제·시험범위 등록은 여기서 할 수 없다 (계획이 그 데이터를 기준으로 이미
+# 배치돼 있어서, 여기서 바꾸면 계획과 어긋난다) — 가능시간 수정, 학습작업
+# 확인, 시험기간 종료만 가능하다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET"])
+def period_manage(request, period_id):
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    if not DailyPlan.objects.filter(exam_period=period).exists():
+        return redirect('exams:period_detail', period_id=period.id)
+    exams = period.exams.all()
+    available_times = period.available_times.all()
+    context = {'period': period, 'exams': exams, 'available_times': available_times}
+    return render(request, 'exams/period_manage.html', context)
+
+
+# =====================================================================
+# 시험기간 관리 - 가능시간 수정 (exams:period_manage_available_time)
+# available_time_update의 축소판. feasibility 등 다른 화면은 여전히
+# available_time_update(다음 버튼, next 파라미터)를 그대로 쓰고, 이 화면은
+# period_manage 전용이라 저장 버튼 하나만 있고 항상 period_manage로 돌아간다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET", "POST"])
+def period_manage_available_time(request, period_id):
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    if not DailyPlan.objects.filter(exam_period=period).exists():
+        return redirect('exams:period_detail', period_id=period.id)
+    queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+
+    if request.method == 'POST':
+        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
+        if formset.is_valid():
+            try:
+                save_available_time_formset(formset, exam_period=period)
+            except AvailableTimeEditRejected as exc:
+                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                for msg in blocked_date_messages(exc.blocked_dates):
+                    formset._non_form_errors.append(ValidationError(msg))
+                    messages.error(request, msg)
+            else:
+                messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
+                return redirect('exams:period_manage', period_id=period.id)
+    else:
+        formset = AvailableTimeFormSet(queryset=queryset)
+
+    return render(request, 'exams/period_manage_available_time.html', {
+        'formset': formset,
+        'period': period,
+    })
+
+
+# =====================================================================
+# 시험기간 관리 - 학습작업 확인 (exams:period_manage_task_view)
+# task_review의 읽기 전용 버전. 계획이 이미 생성된 뒤라 작업 추가/수정/삭제·
+# 확정은 계획과 어긋날 수 있어서 막고, 내용 확인만 가능하다.
+# =====================================================================
+@login_required
+@require_http_methods(["GET"])
+def period_manage_task_view(request, exam_id):
+    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    if not DailyPlan.objects.filter(exam_period=exam.exam_period_id).exists():
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+    tasks = StudyTask.objects.filter(exam=exam).order_by('order', 'id')
+    return render(request, 'exams/period_manage_task_view.html', {
+        'exam': exam,
+        'tasks': tasks,
+    })
+
+
+# =====================================================================
 # 과목 추가 (exams:subject_create) 
 # =====================================================================
 @login_required
@@ -241,8 +321,6 @@ def available_time_update(request, period_id):
         exam_period=period
     ).order_by("date")
 
-    today = timezone.localdate()
-
     # ================================================================
     # POST
     # ================================================================
@@ -259,9 +337,6 @@ def available_time_update(request, period_id):
             or request.META.get("HTTP_REFERER", "")
         )
 
-        # ------------------------------------------------------------
-        # FormSet validation
-        # ------------------------------------------------------------
         if not formset.is_valid():
             return render(
                 request,
@@ -273,97 +348,14 @@ def available_time_update(request, period_id):
                 },
             )
 
-        # ------------------------------------------------------------
-        # 이미 마감된 날짜 조회
-        # ------------------------------------------------------------
-        finalized_dates = set(
-            DailyPlan.objects.filter(
-                exam_period=period,
-                finalized_at__isnull=False,
-            ).values_list("date", flat=True)
-        )
-
-        # ------------------------------------------------------------
-        # 변경된 폼 + 수정 불가능한 날짜 검사
-        # ------------------------------------------------------------
-        changed_forms = []
-        blocked_dates = []
-
-        for form in formset.forms:
-
-            if not form.cleaned_data:
-                continue
-
-            form_date = form.cleaned_data.get("date")
-
-            hours = form.cleaned_data.get("hours") or 0
-            minutes = form.cleaned_data.get("minutes") or 0
-
-            submitted_minutes = hours * 60 + minutes
-
-            instance = form.instance
-
-            current_minutes = (
-                instance.available_minutes
-                if instance and instance.pk
-                else 0
-            ) or 0
-
-            # 실제 값이 바뀐 경우만 처리
-            is_changed = submitted_minutes != current_minutes
-
-            if not is_changed:
-                continue
-
-            changed_forms.append(form)
-
-            # --------------------------------------------------------
-            # 과거 날짜
-            # --------------------------------------------------------
-            if form_date < today:
-                blocked_dates.append(
-                    (
-                        form_date,
-                        "past",
-                    )
-                )
-                continue
-
-            # --------------------------------------------------------
-            # 마감된 날짜
-            # --------------------------------------------------------
-            if form_date in finalized_dates:
-                blocked_dates.append(
-                    (
-                        form_date,
-                        "finalized",
-                    )
-                )
-
-        # ------------------------------------------------------------
-        # 수정 불가능한 날짜가 하나라도 있으면
-        # 전체 저장 취소
-        # ------------------------------------------------------------
-        if blocked_dates:
-            
-            for blocked_date, reason in blocked_dates:
-                if reason == "past":
-                    msg = (
-                        f"{blocked_date} 은(는) 지난 날짜라 "
-                        "가용 시간을 수정할 수 없습니다."
-                    )
-                else:
-                    msg = (
-                        f"{blocked_date} 은(는) 이미 마감된 날짜라 "
-                        "가용 시간을 수정할 수 없습니다."
-                    )
-
-
-                formset._non_form_errors.append(
-                    ValidationError(msg)
-                )
-
-
+        try:
+            save_available_time_formset(formset, exam_period=period)
+        except AvailableTimeEditRejected as exc:
+            for msg in blocked_date_messages(exc.blocked_dates):
+                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                formset._non_form_errors.append(ValidationError(msg))
                 messages.error(request, msg)
 
             return render(
@@ -376,64 +368,8 @@ def available_time_update(request, period_id):
                 },
             )
 
-        # ------------------------------------------------------------
-        # 변경된 값 저장
-        # ------------------------------------------------------------
-        saved_instances = []
+        messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
 
-        with transaction.atomic():
-
-            for form in changed_forms:
-
-                instance = form.save(commit=False)
-
-                instance.exam_period = period
-
-                instance.save()
-
-                saved_instances.append(instance)
-
-            # --------------------------------------------------------
-            # DailyPlan available_minutes 동기화
-            # --------------------------------------------------------
-            if saved_instances:
-
-                dates = [
-                    instance.date
-                    for instance in saved_instances
-                ]
-
-                minutes_by_date = {
-                    instance.date: instance.available_minutes
-                    for instance in saved_instances
-                }
-
-                daily_plans = list(
-                    DailyPlan.objects.filter(
-                        exam_period=period,
-                        date__in=dates,
-                    )
-                )
-
-                for plan in daily_plans:
-                    plan.available_minutes = minutes_by_date[
-                        plan.date
-                    ]
-
-                if daily_plans:
-                    DailyPlan.objects.bulk_update(
-                        daily_plans,
-                        ["available_minutes"],
-                    )
-
-        messages.success(
-            request,
-            "가용 시간이 성공적으로 저장되었습니다.",
-        )
-
-        # ------------------------------------------------------------
-        # next URL 검증 후 redirect
-        # ------------------------------------------------------------
         if next_url and url_has_allowed_host_and_scheme(
             next_url,
             allowed_hosts={request.get_host()},

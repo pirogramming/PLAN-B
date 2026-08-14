@@ -1762,6 +1762,211 @@ class AvailableTimeUpdateRedirectTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'name="next" value="/some/page/"')
+
+
+class PeriodManageTests(TestCase):
+    """
+    시험기간 관리 허브(period_manage 계열) 접근 제어 + 가용시간 저장 정책
+    (과거/마감 날짜 서버단 차단, DailyPlan.available_minutes 동기화, 시험일
+    입력 허용) 확인.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='pm_owner@example.com', email='pm_owner@example.com', password='pass1234!'
+        )
+        self.other = User.objects.create_user(
+            username='pm_other@example.com', email='pm_other@example.com', password='pass1234!'
+        )
+        self.today = timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.owner, title='관리허브테스트',
+            start_date=self.today, end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name='신호및시스템',
+            exam_date=self.today + datetime.timedelta(days=5),
+        )
+        for i in range(6):
+            AvailableTime.objects.create(
+                exam_period=self.period,
+                date=self.today + datetime.timedelta(days=i),
+                available_minutes=100,
+            )
+
+    def _make_plan(self):
+        from planner.models import DailyPlan, DailyPlanItem
+
+        study_task = StudyTask.objects.create(
+            exam=self.exam, title='1장', estimated_min_minutes=20, estimated_max_minutes=40,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=self.period, date=self.today,
+            available_minutes=100, planned_minutes=40,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=study_task, planned_minutes=40, order=1,
+        )
+        return daily_plan
+
+    def _management_form_data(self, rows):
+        data = {
+            'form-TOTAL_FORMS': str(len(rows)),
+            'form-INITIAL_FORMS': str(len(rows)),
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+        }
+        for i, at in enumerate(rows):
+            data[f'form-{i}-id'] = str(at.id)
+            data[f'form-{i}-date'] = str(at.date)
+            data[f'form-{i}-hours'] = '3'
+            data[f'form-{i}-minutes'] = '0'
+        return data
+
+    # ---- 접근 제어 ----
+
+    def test_period_manage_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_available_time_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_task_view_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage_task_view', kwargs={'exam_id': self.exam.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_accessible_after_plan_generated(self):
+        self._make_plan()
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_other_user_cannot_access_period_manage(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_other_user_cannot_access_period_manage_available_time(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_other_user_cannot_access_period_manage_task_view(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage_task_view', kwargs={'exam_id': self.exam.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    # ---- 가용시간 저장 정책 ----
+
+    def test_past_date_edit_rejected_server_side(self):
+        self._make_plan()
+        past_at = AvailableTime.objects.create(
+            exam_period=self.period, date=self.today - datetime.timedelta(days=1),
+            available_minutes=50,
+        )
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        idx = rows.index(past_at)
+        data[f'form-{idx}-hours'] = '5'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertEqual(response.status_code, 200)  # 리다이렉트 안 됨 = 거부됨
+        past_at.refresh_from_db()
+        self.assertEqual(past_at.available_minutes, 50)
+
+    def test_finalized_date_edit_rejected_server_side(self):
+        daily_plan = self._make_plan()
+        daily_plan.finalized_at = timezone.now()
+        daily_plan.save(update_fields=['finalized_at'])
+
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
+        idx = rows.index(today_at)
+        data[f'form-{idx}-hours'] = '5'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertEqual(response.status_code, 200)
+        today_at.refresh_from_db()
+        self.assertEqual(today_at.available_minutes, 100)
+
+    def test_available_time_edit_syncs_daily_plan(self):
+        daily_plan = self._make_plan()
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
+        idx = rows.index(today_at)
+        data[f'form-{idx}-hours'] = '2'
+        data[f'form-{idx}-minutes'] = '0'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertRedirects(
+            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        daily_plan.refresh_from_db()
+        self.assertEqual(daily_plan.available_minutes, 120)
+
+    def test_exam_day_is_editable(self):
+        """스케줄러는 '그 과목 자신의 시험일'만 배치 금지라, 시험일도
+        가용시간 입력은 가능해야 한다 (다른 과목 공부에 쓸 수 있음)."""
+        self._make_plan()
+        exam_day_at = AvailableTime.objects.get(exam_period=self.period, date=self.exam.exam_date)
+        self.client.force_login(self.owner)
+
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        idx = rows.index(exam_day_at)
+        data[f'form-{idx}-hours'] = '1'
+        data[f'form-{idx}-minutes'] = '30'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertRedirects(
+            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        exam_day_at.refresh_from_db()
+        self.assertEqual(exam_day_at.available_minutes, 90)
+
+
 class SourcePagesTestCase(TestCase):
     """
     PDF 페이지 번호 추적 기능 (pdf_extractor.py가 "--- 페이지 N ---" 경계
