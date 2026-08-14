@@ -36,6 +36,9 @@ from planner.services.recovery import (
     RecoveryPlanAlreadyProcessedError,
     RecoveryPlanStaleError,
     RecoveryPlanInvalidDataError,
+    needs_recovery_retry,
+    retry_recovery_generation,
+    RecoveryRetryNotNeededError,
 )
 import logging
 
@@ -1173,3 +1176,37 @@ def recovery_apply(request, plan_id):
 
     messages.success(request, "선택한 복구안이 일정에 적용되었습니다.")
     return redirect("planner:dashboard")
+
+@login_required
+@require_http_methods(["POST"])
+def recovery_retry(request, daily_plan_id):
+    daily_plan = get_object_or_404(
+        DailyPlan, id=daily_plan_id, exam_period__user=request.user,
+    )
+
+    try:
+        result = retry_recovery_generation(daily_plan)
+    except RecoveryRetryNotNeededError:
+        messages.info(request, "복구안 재생성이 필요한 상태가 아닙니다.")
+        return redirect('planner:dashboard')
+    except Exception:
+        logger.exception(
+            "복구안 재생성 중 예상치 못한 오류 (daily_plan_id=%s)", daily_plan_id
+        )
+        messages.error(
+            request, "복구안 재생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
+        return redirect('planner:dashboard')
+
+    maintain_volume = result['maintain_volume']
+    core_focus = result['core_focus']
+
+    if maintain_volume is None and core_focus is None:
+        messages.error(
+            request,
+            "현재 가용시간으로도 복구안을 만들 수 없습니다. 가용시간을 더 늘려주세요.",
+        )
+        return redirect('planner:dashboard')
+
+    group_id = (maintain_volume or core_focus).recovery_group_id
+    return redirect('planner:recovery_compare', group_id=group_id)
