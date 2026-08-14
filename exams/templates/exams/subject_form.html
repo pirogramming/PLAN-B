@@ -1,29 +1,23 @@
-{% extends "base.html" %}
-{% load static exam_extras %}
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
 {% block title %}
 과목 등록 - PLAN B
 {% endblock %}
+{% block page_heading %}과목 등록하기{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
+{% block exam_content %}
 {% get_period_exams period.id as period_exams %}
 
-<div class="container" style="max-width:900px; margin:0 auto; padding-bottom:60px;">
-  <div style="font-size:11.5px; color:var(--neutral7); margin-bottom:8px;">
-    <a href="{% url 'exams:period_detail' period.id %}" style="color:inherit; text-decoration:none;">
-      PLAN B
-    </a>
-    &nbsp;›&nbsp; 과목 등록
-  </div>
-  <div class="page-title">
-    과목 등록하기
-  </div>
-  <div class="page-sub">
-    시험일과 우선순위를 입력하세요
+<div style="max-width:960px; margin:0 auto;">
+  <div class="page-head">
+    <div>
+      <h1>과목 등록하기</h1>
+      <p class="sub">시험일과 우선순위를 입력하세요</p>
+    </div>
   </div>
 
   {% if form.non_field_errors %}
@@ -32,8 +26,8 @@
   </div>
   {% endif %}
 
-  <div class="two-col">
-    <div class="card" style="flex:1;">
+  <div style="display:flex; gap:24px; align-items:flex-start;">
+    <div class="card card-body" style="flex:1; padding:32px 36px;">
       <form method="post" novalidate>
         {% csrf_token %}
 
@@ -49,7 +43,7 @@
           {% endif %}
         </div>
 
-        <div class="form-group">
+        <div class="form-group" style="margin-top:18px;">
           <label class="form-label" for="{{ form.exam_date.id_for_label }}">
             시험일
           </label>
@@ -61,21 +55,21 @@
           {% endif %}
         </div>
 
-        <div class="form-group">
+        <div class="form-group" style="margin-top:18px;">
           <label class="form-label" for="{{ form.priority.id_for_label }}">
             우선순위 (선택)
           </label>
           {{ form.priority }}
         </div>
 
-        <button type="submit" class="btn btn-ghost btn-block">
+        <button type="submit" class="btn btn-secondary" style="width:100%; margin-top:24px;">
           + 과목 추가
         </button>
       </form>
     </div>
 
-    <div class="card" style="flex:1;">
-      <div style="font-size:13.5px; font-weight:700; margin-bottom:14px;">
+    <div class="card card-body" style="flex:1; padding:32px 36px;">
+      <div style="font-size:14px; font-weight:700; margin-bottom:16px;">
         등록된 과목 {{ period_exams|length }}개
       </div>
       {% for exam in period_exams %}
@@ -91,11 +85,20 @@
         </span>
       </div>
       {% empty %}
-      <div style="font-size:12.5px; color:var(--neutral7); text-align:center; padding:20px 0;">
+      <div style="font-size:12.5px; color:var(--neutral7); text-align:center; padding:24px 0;">
         아직 등록된 과목이 없어요
       </div>
       {% endfor %}
     </div>
   </div>
+
+  <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-primary btn-lg"
+     style="margin-top:20px; {% if not period_exams %}pointer-events:none; opacity:.5;{% endif %}">
+    다음
+  </a>
 </div>
 {% endblock %}
+
+{# subject_create 뷰가 exams 리스트를 안 내려줘서, get_period_exams 템플릿 태그로 직접 조회함
+   (exams/templatetags/exam_extras.py). 나중에 뷰가 context로 내려주게 되면
+   이 태그 호출을 지우고 {{ exams }}로 바꾸면 됨 — 마크업은 그대로 재사용 가능. #}

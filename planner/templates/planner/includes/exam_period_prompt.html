@@ -1,0 +1,16 @@
+{% comment %}
+  로그인은 했지만 아직 시험기간이 없는 사용자에게 대시보드에서 보여주는 안내.
+  login_prompt.html이랑 구조/스타일은 동일하고 문구·이동 URL만 다르다.
+{% endcomment %}
+<div class="card">
+  <div class="empty">
+    <div class="empty-icon" style="background:var(--brand1);border-color:var(--brand2)">
+      <svg class="ico" style="color:var(--brand4)"><use href="#i-calendar"/></svg>
+    </div>
+    <h3>시험기간을 설정해주세요</h3>
+    <p>시험기간을 만들고 과목과 공부 가능시간을 입력하면, PLAN B가 날짜별 계획을 대신 계산해 드립니다.</p>
+    <a class="btn btn-lg onboarding-cta" href="{% url 'exams:period_create' %}">
+      시험기간 설정하러 가기<svg class="ico"><use href="#i-arrow-right"/></svg>
+    </a>
+  </div>
+</div>

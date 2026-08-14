@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/components.css' %}">
+<link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% block exam_extra_css %}{% endblock %}
+{% endblock %}
+
+{% block body %}
+<div class="app">
+  {% block sidebar %}
+  {% include "exams/_sidebar.html" %}
+  {% endblock %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>{% block page_heading %}PLAN B{% endblock %}</h2>
+    </header>
+
+    <div class="content">
+      {% block exam_content %}{% endblock %}
+    </div>
+  </div>
+</div>
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/planner.js' %}"></script>
+{% block exam_extra_js %}{% endblock %}
+{% endblock %}

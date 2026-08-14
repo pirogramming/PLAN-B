@@ -1,28 +1,20 @@
-{% extends "base.html" %}
-{% load static %}
+{% extends "exams/_exam_base.html" %}
 {% block title %}
 작업 추가 - PLAN B
 {% endblock %}
+{% block page_heading %}학습 작업 추가하기{% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_detail" %}
 {% endblock %}
 
-{% block content %}
-{% include "exams/_topbar.html" %}
-
-<div class="container task-form-wrap">
-  <div class="crumb-text">
-    <a href="{% url 'exams:task_review' exam.id %}">
-      {{ exam.subject_name }} 학습 작업
-    </a>
-    &nbsp;›&nbsp; 추가
-  </div>
-  <div class="page-title">
-    학습 작업 추가하기
-  </div>
-  <div class="page-sub">
-    직접 작업을 추가할 수 있어요
+{% block exam_content %}
+<div class="task-form-wrap" style="max-width:640px; margin:0 auto;">
+  <div class="page-head">
+    <div>
+      <h1>학습 작업 추가하기</h1>
+      <p class="sub">직접 작업을 추가할 수 있어요</p>
+    </div>
   </div>
 
   {% if form.non_field_errors %}
@@ -31,7 +23,7 @@
   </div>
   {% endif %}
 
-  <div class="card">
+  <div class="card card-body" style="padding:32px 36px;">
     <form method="post" novalidate>
       {% csrf_token %}
 
@@ -42,7 +34,7 @@
         {{ form.unit_name }}
       </div>
 
-      <div class="form-group">
+      <div class="form-group" style="margin-top:18px;">
         <label class="form-label" for="{{ form.title.id_for_label }}">
           작업명
         </label>
@@ -54,14 +46,14 @@
         {% endif %}
       </div>
 
-      <div class="form-group">
+      <div class="form-group" style="margin-top:18px;">
         <label class="form-label" for="{{ form.task_type.id_for_label }}">
           작업 유형
         </label>
         {{ form.task_type }}
       </div>
 
-      <div class="task-form-select-row">
+      <div class="task-form-select-row" style="margin-top:18px;">
         <div class="form-group">
           <label class="form-label" for="{{ form.importance.id_for_label }}">
             중요도
@@ -82,7 +74,7 @@
         </div>
       </div>
 
-      <button type="submit" class="btn btn-brand btn-block">
+      <button type="submit" class="btn btn-primary btn-lg" style="width:100%; margin-top:24px;">
         추가하기
       </button>
     </form>
