@@ -159,7 +159,7 @@ AUTHENTICATION_BACKENDS = (
 
 # 로그인/로그아웃 리다이렉트 (중복 제거 및 정돈)
 LOGIN_URL = 'accounts:login'
-LOGIN_REDIRECT_URL = 'exams:period_list'  # 로그인 성공 시 이동할 URL
+LOGIN_REDIRECT_URL = 'planner:dashboard'  # 로그인 성공 시 이동할 URL
 LOGOUT_REDIRECT_URL = 'accounts:login'
 ACCOUNT_LOGOUT_REDIRECT_URL = 'accounts:login'
 

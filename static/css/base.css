@@ -3,21 +3,25 @@
    컨테이너 안에 넣지 않고 position:fixed로 모든 화면 위에 동일하게 띄운다. */
 .site-messages {
   position: fixed;
-  top: 20px;
+  top: 24px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 200;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(420px, calc(100vw - 32px));
+  width: min(560px, calc(100vw - 32px));
   pointer-events: none;
+  /* .side가 있는 화면에서는 base.js가 사이드바 폭만큼 left를 보정해서
+     "사이드바 제외한 메인 영역 중앙"에 뜨게 한다 (JS 없으면 이 기본값대로
+     화면 전체 중앙 — 사이드바 없는 로그인/exams 화면 등에 적합) */
 }
 .site-message {
-  padding: 12px 18px;
-  border-radius: 12px;
-  font-size: 13px;
+  padding: 16px 22px;
+  border-radius: 14px;
+  font-size: 13.5px;
   font-weight: 600;
+  text-align: center;
   box-shadow: 0 8px 24px rgba(20, 24, 43, .16);
   opacity: 1;
   transform: translateY(0);

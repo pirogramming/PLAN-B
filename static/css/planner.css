@@ -54,9 +54,19 @@
 .nav-i.off{color:var(--neutral6);pointer-events:none}
 .nav-i .count{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--neutral7)}
 
+/* 시험기간 관리 흐름(period_manage 계열)에서 "시험기간 홈"의 하위 단계임을
+   보여주는 중첩 표시. 나란히 놓인 별개 nav-i처럼 보이면 "시험기간 홈에서
+   이어지는 흐름"이라는 게 안 드러나서, 들여쓰기+세로선으로 계층을 표현한다. */
+.nav-sub{margin:3px 0 3px 19px;padding-left:12px;border-left:1.5px solid var(--neutral4);
+         display:flex;flex-direction:column;gap:1px}
+.nav-sub-i{display:flex;align-items:center;height:30px;padding:0 10px;
+           border-radius:7px;font-size:12.5px;font-weight:450;color:var(--neutral6);
+           letter-spacing:-0.005em;transition:.16s}
+.nav-sub-i.on{color:var(--neutral11);font-weight:600}
+
 .side-label{font-size:11px;font-weight:700;color:var(--neutral7);
             letter-spacing:.08em;padding:20px 10px 9px}
-.side-box{padding:14px;border:1px solid var(--neutral5);border-radius:12px;background:var(--neutral2)}
+.side-box{display:block;padding:14px;border:1px solid var(--neutral5);border-radius:12px;background:var(--neutral2)}
 .side-box.dashed{border-style:dashed;text-align:center}
 .side-box h4{font-size:13px;font-weight:650;color:var(--neutral10)}
 .side-box p{font-size:12px;color:var(--neutral7);line-height:1.6}
@@ -151,8 +161,14 @@
 
 /* ===== 배너 ===== */
 .banner{display:flex;gap:14px;padding:18px 20px;border-radius:var(--r-md);
-        border:1px solid var(--judge2-line);background:var(--judge2-bg);color:var(--judge2)}
+        border:1px solid var(--judge2-line);background:var(--judge2-bg);color:var(--judge2);
+        animation:banner-in .7s cubic-bezier(.16,1,.3,1) both}
 .banner[hidden]{display:none}
+@keyframes banner-in{
+  from{opacity:0;transform:translateY(-6px) scale(.98);filter:blur(3px)}
+  to{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}
+}
+@media (prefers-reduced-motion:reduce){.banner{animation:none}}
 .banner .ico{width:19px;height:19px;margin-top:1px}
 .banner .body{flex:1}
 .banner h4{font-size:14.5px;font-weight:700;margin-bottom:5px}
@@ -160,6 +176,14 @@
 .banner .actions{display:flex;gap:8px;align-self:center}
 .banner.info{border-color:var(--brand2);background:var(--brand1);color:var(--brand5)}
 .banner.info p{color:var(--neutral9)}
+
+/* 배너 안의 CTA — .btn-accent(브랜드 블루, 복구안 "적용" 전용)를 그대로
+   쓰면 amber 톤 배너 안에서 색이 따로 놀아서, 배너와 같은 계열(judge2)로
+   맞춘 진한 노란색 필 버튼을 쓴다. */
+.banner-cta{background:var(--judge2-bg);color:var(--judge2);border:1.5px solid var(--judge2-line);
+            height:60px;padding:0 32px;min-width:220px;justify-content:center;
+            font-size:16px;font-weight:700}
+.banner-cta:hover{background:#F3E4C4}
 
 
 /* ===== 숫자 ===== */
@@ -223,6 +247,17 @@
 .empty h3{font-size:19px;font-weight:750;color:var(--neutral11);margin-bottom:10px}
 .empty p{font-size:14px;color:var(--neutral8);line-height:1.7;max-width:420px;margin-bottom:26px}
 
+/* 온보딩 안내(login_prompt.html/exam_period_prompt.html) 버튼 — 아직 뭘 할 수
+   없는 상태에서 다음 할 일로 보내는 핵심 CTA라 브랜드 컬러 그림자로 강조한다.
+   .btn-accent는 복구안 적용 전용이라 색은 그대로 두고 그림자로만 차별화 */
+.onboarding-cta{
+  background:var(--neutral3);color:var(--neutral10);border-radius:6px;
+  height:56px;padding:0 30px;font-size:16px;
+  box-shadow:0 10px 24px rgba(59,91,219,.28);
+  transition:transform .16s ease,box-shadow .16s ease,background .16s ease;
+}
+.onboarding-cta:hover{background:var(--neutral4);transform:translateY(-1px);box-shadow:0 14px 28px rgba(59,91,219,.34)}
+
 .steps{display:flex;margin-top:36px;width:100%;max-width:720px}
 .step{flex:1;text-align:left;padding:0 18px;border-right:1px solid var(--neutral4)}
 .step:last-child{border-right:0}
@@ -240,7 +275,7 @@
 
 /* ===== 반응형 ===== */
 @media (max-width:1024px){
-  .grid-3,.grid-4{grid-template-columns:repeat(2,1fr)}
+  .grid-3{grid-template-columns:repeat(2,1fr)}
   .content{padding:28px 20px 40px}
 }
 
@@ -253,7 +288,7 @@
     padding:8px 6px 12px;z-index:50;
   }
   .app.collapsed .side>*{display:flex}
-  .brand,.side-label,.side-box,.side-foot{display:none!important}
+  .brand,.side-label,.side-box,.side-foot,.nav-sub{display:none!important}
   .side nav{display:flex;flex:1}
   .nav-i{flex:1;flex-direction:column;gap:4px;height:auto;padding:6px 0;
          font-size:10.5px;background:transparent!important;color:var(--neutral7)}
@@ -261,14 +296,30 @@
   .nav-i .count{display:none}
 
   .content{padding:20px 16px 96px}
-  .grid-3,.grid-4{grid-template-columns:1fr}
+  .grid-3{grid-template-columns:1fr}
   .page-head{flex-direction:column;align-items:flex-start;gap:16px}
   .page-head h1{font-size:23px}
   .page-head .ml-auto{margin-left:0;width:100%}
   .page-head .btn{width:100%}
+
+  /* 대시보드 "오늘의 공부 시작" : 날짜 아래로 내려가지 않고 항상
+     날짜(00월 00일 0요일) 오른쪽에 붙어있게 한다 */
+  .page-head.today-cta-head{flex-direction:row;align-items:center;flex-wrap:wrap}
+  .page-head.today-cta-head .btn{width:auto;margin-left:auto}
+
   .topbar{padding:0 16px}
   .steps{flex-direction:column}
   .step{border-right:0}
+
+  /* 배너(복구안 대기 등) : 버튼(action)이 있는 배너는 좁은 화면에서
+     아이콘+본문 텍스트를 다 보여줄 자리가 없어서, 버튼만 남긴다.
+     (액션 버튼이 없는 안내용 배너는 텍스트가 유일한 정보라 그대로 둔다) */
+  .banner:has(.actions){
+    flex-wrap:wrap;background:none;border:0;padding:0;box-shadow:none;
+  }
+  .banner:has(.actions) .ico,.banner:has(.actions) .body{display:none}
+  .banner .actions{align-self:stretch;width:100%;margin-top:0}
+  .banner .actions .btn{width:100%;min-width:0}
 
   /* 과목 카드 : D-day + 과목명 한 줄, 숫자는 아랫줄로 */
   .subject-card{flex-wrap:wrap;gap:12px;padding:16px}
@@ -419,8 +470,10 @@
 .steps-run li .ico{width:17px;height:17px}
 .steps-run li.doing{color:var(--neutral11);font-weight:650}
 .steps-run li.doing .ico{color:var(--brand4);animation:spin 1s linear infinite}
-.steps-run li.done{color:var(--neutral8)}
+.steps-run li.done{color:var(--neutral10);font-weight:650}
 .steps-run li.done .ico{color:var(--judge1)}
+.steps-run li.error{color:var(--judge3);font-weight:650}
+.steps-run li.error .ico{color:var(--judge3)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.steps-run li.doing .ico{animation:none}}
 
@@ -519,23 +572,23 @@
 
 
 /* ===== 캘린더 ===== */
-.cal-head{display:flex;align-items:center;gap:6px;margin-bottom:22px}
-.cal-head .icon-btn{border-radius:50%}
+.cal-head{display:flex;align-items:center;gap:4px;margin-bottom:16px}
+.cal-head .icon-btn{border-radius:50%;width:30px;height:30px}
 .cal-head .icon-btn:hover{background:var(--neutral3)}
-.cal-head h1{font-size:21px;font-weight:800;color:var(--neutral11);
-             letter-spacing:-0.03em;min-width:130px;text-align:center}
-.cal-legend{display:flex;gap:18px;margin-left:auto;font-size:11.5px;color:var(--neutral7)}
-.cal-legend span{display:flex;align-items:center;gap:7px}
-.cal-legend i{width:8px;height:8px;border-radius:50%;display:block}
+.cal-head h1{font-size:16px;font-weight:700;color:var(--neutral11);
+             letter-spacing:-0.02em;min-width:108px;text-align:center}
+.cal-legend{display:flex;gap:16px;margin-left:auto;font-size:11px;color:var(--neutral7)}
+.cal-legend span{display:flex;align-items:center;gap:6px}
+.cal-legend i{width:7px;height:7px;border-radius:50%;display:block}
 
 .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;
-     background:var(--neutral4);border:1px solid var(--neutral4);
-     border-radius:var(--r-lg);box-shadow:var(--shadow);overflow:hidden}
-.cal-dow{background:var(--neutral1);text-align:center;padding:13px 0;
-         font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--neutral7)}
+     background:var(--neutral4);border:1px solid var(--neutral5);
+     border-radius:var(--r-md);box-shadow:var(--shadow);overflow:hidden}
+.cal-dow{background:var(--neutral1);text-align:center;padding:10px 0;
+         font-size:10.5px;font-weight:650;letter-spacing:.02em;color:var(--neutral7)}
 .cal-dow.sun{color:var(--judge3)}
 
-.cal-day{display:flex;flex-direction:column;background:var(--neutral1);min-height:118px;padding:10px 10px 12px;
+.cal-day{display:flex;flex-direction:column;background:var(--neutral1);min-height:84px;padding:8px 8px 9px;
          text-align:left;position:relative;transition:background .16s ease;width:100%}
 .cal-day:not(.out):hover{background:var(--neutral2)}
 .cal-day.out{background:var(--neutral2);cursor:default}
@@ -582,7 +635,6 @@
 .cal-detail-head .sum{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--neutral7)}
 .cal-detail-empty{padding:44px;text-align:center;font-size:13.5px;color:var(--neutral7)}
 .cal-pane[hidden]{display:none}
-.cal-pane{padding:6px 14px}
 
 
 /* ===== 오늘의 공부 : 모바일 =====
@@ -597,6 +649,13 @@
   .task-time{flex:1 1 auto;text-align:left;padding-top:12px;
              border-top:1px solid var(--neutral4)}
   .task .btn{align-self:flex-end;margin-top:12px}
+
+  /* 전체 계획 날짜 상세 목록은 수정 버튼이 없어서(읽기 전용), 위의
+     세로 쌓기(제목 줄바꿈 + 분 아래로)가 필요 없다 — 학습 작업 제목과
+     분이 한 줄에 나란히 보이게 되돌린다 */
+  .cal-pane .task{flex-wrap:nowrap}
+  .cal-pane .task-main{flex:1;min-width:0}
+  .cal-pane .task-time{flex:none;text-align:right;padding-top:0;border-top:0}
 
   .bottom-bar{flex-direction:column;align-items:stretch;padding:14px 16px;bottom:76px}
   .bottom-bar .row{flex-direction:column;align-items:stretch;margin-left:0;width:100%}
@@ -635,7 +694,7 @@
 
   /* 캘린더 : 좁은 화면에서는 날짜와 막대 + 시험일 표시 정도만 */
   .cal-head{gap:2px}
-  .cal-head h1{font-size:17px;min-width:0;flex:1}
+  .cal-head h1{font-size:15px;min-width:0;flex:1}
   .cal-legend{display:none}
   .cal-dow{padding:9px 0;font-size:10px}
   .cal-day{min-height:60px;padding:6px 4px}
