@@ -45,10 +45,11 @@ class AvailableTimeForm(forms.ModelForm):
         widget=forms.NumberInput(attrs={
             'class': 'form-control number-input',
             'placeholder': '시간',
-            'min': '0'
+            'min': '0',
         }),
-        label="시간"
+        label="시간",
     )
+
     minutes = forms.IntegerField(
         min_value=0,
         max_value=59,
@@ -59,42 +60,43 @@ class AvailableTimeForm(forms.ModelForm):
             'placeholder': '분',
             'min': '0',
             'max': '59',
-            'step': '1'
+            'step': '1',
         }),
-        label="분"
+        label="분",
     )
 
     class Meta:
         model = AvailableTime
-        fields = ['date'] 
+        fields = ['date']
         widgets = {
             'date': forms.DateInput(attrs={
                 'class': 'form-control-plaintext date-picker',
                 'type': 'date',
-                'readonly': 'readonly'
+                'readonly': 'readonly',
             }),
         }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        total_minutes = 0
-        if self.instance and self.instance.pk:
-            total_minutes = self.instance.available_minutes or 0
-        elif 'initial' in kwargs and 'available_minutes' in kwargs['initial']:
-            total_minutes = kwargs['initial']['available_minutes'] or 0
 
-        if total_minutes:
-            self.fields['hours'].initial = total_minutes // 60
-            self.fields['minutes'].initial = total_minutes % 60
+        self.fields['date'].disabled = True
+
+        total_minutes = self.instance.available_minutes or 0
+
+        self.fields['hours'].initial = total_minutes // 60
+        self.fields['minutes'].initial = total_minutes % 60
 
     def save(self, commit=True):
         instance = super().save(commit=False)
+
         hours = self.cleaned_data.get('hours') or 0
         minutes = self.cleaned_data.get('minutes') or 0
-        instance.available_minutes = (hours * 60) + minutes
+
+        instance.available_minutes = hours * 60 + minutes
 
         if commit:
             instance.save()
+
         return instance
 
 
@@ -102,7 +104,7 @@ AvailableTimeFormSet = modelformset_factory(
     AvailableTime,
     form=AvailableTimeForm,
     extra=0,
-    can_delete=False
+    can_delete=False,
 )
 
 class ExamForm(forms.ModelForm):

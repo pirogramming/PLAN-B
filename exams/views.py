@@ -1,4 +1,5 @@
 import datetime
+from django.utils import timezone
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_http_methods
@@ -6,12 +7,13 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.db import transaction
 import logging
-
+from django.core.exceptions import ValidationError
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
 from planner.services.time_estimator import estimate_task_minutes
 from django.utils.http import url_has_allowed_host_and_scheme
 from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
+from planner.models import DailyPlan, RecoveryPlan
 from .forms import (
     ExamPeriodForm,
     AvailableTimeFormSet,
@@ -23,9 +25,9 @@ from .forms import (
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 from .services.available_time_updater import (
     save_available_time_formset,
+    blocked_date_messages,
     AvailableTimeEditRejected,
 )
-from planner.models import DailyPlan
 from .services.analysis_orchestrator import (
     analyze_and_estimate,
     retry_analysis,
@@ -143,9 +145,20 @@ def period_update(request, period_id):
 @require_http_methods(["POST"])
 def period_delete(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    title = period.title
-    period.delete()
-    messages.success(request, f"'{title}' 시험기간이 삭제되었습니다.")
+    
+    # 1. delete() 실행 전, 알림 메시지에 쓸 title 변수 추출 (안전성 보장)
+    period_title = period.title
+
+    with transaction.atomic():
+        # 2. PROTECT 조건 방해 요인인 DailyPlan / RecoveryPlan 선-삭제
+        # (CASCADE에 의해 DailyPlanItem, ProgressLog, RecoveryPlanItem이 함께 정리됨)
+        DailyPlan.objects.filter(exam_period=period).delete()
+        RecoveryPlan.objects.filter(exam_period=period).delete()
+        
+        # 3. ExamPeriod 삭제 (Exam, StudyTask, AvailableTime, StudyMaterial CASCADE 삭제)
+        period.delete()
+
+    messages.success(request, f"'{period_title}' 시험기간과 관련 학습 계획이 모두 삭제되었습니다.")
     return redirect('exams:period_list')
 
 
@@ -200,14 +213,15 @@ def period_manage_available_time(request, period_id):
         if formset.is_valid():
             try:
                 save_available_time_formset(formset, exam_period=period)
-            except AvailableTimeEditRejected:
+            except AvailableTimeEditRejected as exc:
                 # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
                 # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
                 # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                formset._non_form_errors.append(
-                    "과거 날짜이거나 이미 마감된 날짜는 수정할 수 없습니다."
-                )
+                for msg in blocked_date_messages(exc.blocked_dates):
+                    formset._non_form_errors.append(ValidationError(msg))
+                    messages.error(request, msg)
             else:
+                messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
                 return redirect('exams:period_manage', period_id=period.id)
     else:
         formset = AvailableTimeFormSet(queryset=queryset)
@@ -292,45 +306,103 @@ def subject_delete(request, period_id, exam_id):
 
 
 # =====================================================================
-# 가능시간 입력 (exams:available_time_update) 
+# 가능시간 입력 (exams:available_time_update)
 # =====================================================================
 @login_required
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+    period = get_object_or_404(
+        ExamPeriod,
+        id=period_id,
+        user=request.user,
+    )
 
-    if request.method == 'POST':
-        next_url = request.POST.get('next', '')
+    queryset = AvailableTime.objects.filter(
+        exam_period=period
+    ).order_by("date")
 
-        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
-        if formset.is_valid():
-            try:
-                save_available_time_formset(formset, exam_period=period)
-            except AvailableTimeEditRejected:
+    # ================================================================
+    # POST
+    # ================================================================
+    if request.method == "POST":
+
+        formset = AvailableTimeFormSet(
+            request.POST,
+            queryset=queryset,
+        )
+
+        next_url = (
+            request.POST.get("next")
+            or request.GET.get("next")
+            or request.META.get("HTTP_REFERER", "")
+        )
+
+        if not formset.is_valid():
+            return render(
+                request,
+                "exams/available_time_form.html",
+                {
+                    "formset": formset,
+                    "period": period,
+                    "next": next_url,
+                },
+            )
+
+        try:
+            save_available_time_formset(formset, exam_period=period)
+        except AvailableTimeEditRejected as exc:
+            for msg in blocked_date_messages(exc.blocked_dates):
                 # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
                 # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
                 # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                formset._non_form_errors.append(
-                    "과거 날짜이거나 이미 마감된 날짜는 수정할 수 없습니다."
-                )
-            else:
-                if next_url and url_has_allowed_host_and_scheme(
-                    next_url,
-                    allowed_hosts={request.get_host()},
-                    require_https=request.is_secure(),
-                ):
-                    return redirect(next_url)
-                return redirect('exams:period_detail', period_id=period.id)
-    else:
-        formset = AvailableTimeFormSet(queryset=queryset)
-        next_url = request.GET.get('next') or request.META.get('HTTP_REFERER', '')
+                formset._non_form_errors.append(ValidationError(msg))
+                messages.error(request, msg)
 
-    return render(request, 'exams/available_time_form.html', {
-        'formset': formset,
-        'period': period,
-        'next': next_url,
-    })
+            return render(
+                request,
+                "exams/available_time_form.html",
+                {
+                    "formset": formset,
+                    "period": period,
+                    "next": next_url,
+                },
+            )
+
+        messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
+
+        if next_url and url_has_allowed_host_and_scheme(
+            next_url,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure(),
+        ):
+            return redirect(next_url)
+
+        return redirect(
+            "exams:period_detail",
+            period_id=period.id,
+        )
+
+    # ================================================================
+    # GET
+    # ================================================================
+    formset = AvailableTimeFormSet(
+        queryset=queryset,
+    )
+
+    next_url = (
+        request.GET.get("next")
+        or request.META.get("HTTP_REFERER", "")
+    )
+
+    return render(
+        request,
+        "exams/available_time_form.html",
+        {
+            "formset": formset,
+            "period": period,
+            "next": next_url,
+        },
+    )
 
 # =====================================================================
 # 자료 등록 (exams:material_create) 
