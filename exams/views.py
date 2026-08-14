@@ -394,6 +394,7 @@ def subject_delete(request, period_id, exam_id):
 # 가능시간 입력 (exams:available_time_update)
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_period_id
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
     period = get_object_or_404(
@@ -474,7 +475,6 @@ def available_time_update(request, period_id):
                 else 0
             ) or 0
 
-            # 실제 값이 바뀐 경우만 처리
             is_changed = submitted_minutes != current_minutes
 
             if not is_changed:
@@ -482,53 +482,21 @@ def available_time_update(request, period_id):
 
             changed_forms.append(form)
 
-            # --------------------------------------------------------
-            # 과거 날짜
-            # --------------------------------------------------------
             if form_date < today:
-                blocked_dates.append(
-                    (
-                        form_date,
-                        "past",
-                    )
-                )
+                blocked_dates.append((form_date, "past"))
                 continue
 
-            # --------------------------------------------------------
-            # 마감된 날짜
-            # --------------------------------------------------------
             if form_date in finalized_dates:
-                blocked_dates.append(
-                    (
-                        form_date,
-                        "finalized",
-                    )
-                )
+                blocked_dates.append((form_date, "finalized"))
 
-        # ------------------------------------------------------------
-        # 수정 불가능한 날짜가 하나라도 있으면
-        # 전체 저장 취소
-        # ------------------------------------------------------------
         if blocked_dates:
-            
             for blocked_date, reason in blocked_dates:
                 if reason == "past":
-                    msg = (
-                        f"{blocked_date} 은(는) 지난 날짜라 "
-                        "가용 시간을 수정할 수 없습니다."
-                    )
+                    msg = f"{blocked_date} 은(는) 지난 날짜라 가용 시간을 수정할 수 없습니다."
                 else:
-                    msg = (
-                        f"{blocked_date} 은(는) 이미 마감된 날짜라 "
-                        "가용 시간을 수정할 수 없습니다."
-                    )
+                    msg = f"{blocked_date} 은(는) 이미 마감된 날짜라 가용 시간을 수정할 수 없습니다."
 
-
-                formset._non_form_errors.append(
-                    ValidationError(msg)
-                )
-
-
+                formset._non_form_errors.append(ValidationError(msg))
                 messages.error(request, msg)
 
             return render(
@@ -542,63 +510,45 @@ def available_time_update(request, period_id):
             )
 
         # ------------------------------------------------------------
-        # 변경된 값 저장
+        # 변경된 값 저장 (이미 상위 decorator에서 ExamPeriod 락이 걸려 있으므로 바로 저장)
         # ------------------------------------------------------------
         saved_instances = []
 
-        with transaction.atomic():
+        for form in changed_forms:
+            instance = form.save(commit=False)
+            instance.exam_period = period
+            instance.save()
+            saved_instances.append(instance)
 
-            for form in changed_forms:
+        # ------------------------------------------------------------
+        # DailyPlan available_minutes 동기화
+        # ------------------------------------------------------------
+        if saved_instances:
+            dates = [instance.date for instance in saved_instances]
 
-                instance = form.save(commit=False)
+            minutes_by_date = {
+                instance.date: instance.available_minutes
+                for instance in saved_instances
+            }
 
-                instance.exam_period = period
+            daily_plans = list(
+                DailyPlan.objects.filter(
+                    exam_period=period,
+                    date__in=dates,
+                )
+            )
 
-                instance.save()
+            for plan in daily_plans:
+                plan.available_minutes = minutes_by_date[plan.date]
 
-                saved_instances.append(instance)
-
-            # --------------------------------------------------------
-            # DailyPlan available_minutes 동기화
-            # --------------------------------------------------------
-            if saved_instances:
-
-                dates = [
-                    instance.date
-                    for instance in saved_instances
-                ]
-
-                minutes_by_date = {
-                    instance.date: instance.available_minutes
-                    for instance in saved_instances
-                }
-
-                daily_plans = list(
-                    DailyPlan.objects.filter(
-                        exam_period=period,
-                        date__in=dates,
-                    )
+            if daily_plans:
+                DailyPlan.objects.bulk_update(
+                    daily_plans,
+                    ["available_minutes"],
                 )
 
-                for plan in daily_plans:
-                    plan.available_minutes = minutes_by_date[
-                        plan.date
-                    ]
+        messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
 
-                if daily_plans:
-                    DailyPlan.objects.bulk_update(
-                        daily_plans,
-                        ["available_minutes"],
-                    )
-
-        messages.success(
-            request,
-            "가용 시간이 성공적으로 저장되었습니다.",
-        )
-
-        # ------------------------------------------------------------
-        # next URL 검증 후 redirect
-        # ------------------------------------------------------------
         if next_url and url_has_allowed_host_and_scheme(
             next_url,
             allowed_hosts={request.get_host()},
@@ -606,10 +556,7 @@ def available_time_update(request, period_id):
         ):
             return redirect(next_url)
 
-        return redirect(
-            "exams:period_detail",
-            period_id=period.id,
-        )
+        return redirect("exams:period_detail", period_id=period.id)
 
     # ================================================================
     # GET
