@@ -69,6 +69,21 @@
             <a class="btn banner-cta btn-lg" href="{% url 'planner:recovery_compare' group_id=pending_recovery.recovery_group_id %}">복구안 보기</a>
           </div>
         </div>
+      {% elif retry_daily_plan_id %}
+        <div class="banner" style="margin-bottom:22px">
+          <svg class="ico"><use href="#i-alert"/></svg>
+          <div class="body">
+            <h4>복구안을 아직 만들지 못했습니다</h4>
+            <p>가용시간이 부족해서 복구안 생성이 실패했습니다. 가용시간을 수정하셨다면
+               지금 다시 시도해보세요.</p>
+          </div>
+          <div class="actions">
+            <form method="post" action="{% url 'planner:recovery_retry' daily_plan_id=retry_daily_plan_id %}">
+              {% csrf_token %}
+              <button class="btn banner-cta btn-lg" type="submit">복구안 다시 생성</button>
+            </form>
+          </div>
+        </div>
       {% endif %}
 
       {# ---- 전체 판정 ---- #}

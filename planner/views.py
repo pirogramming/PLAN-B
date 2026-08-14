@@ -73,6 +73,17 @@ def _get_pending_recovery(exam_period):
         'count': pending_recovery_qs.values('recovery_group_id').distinct().count(),
     }
 
+def _get_retry_daily_plan_id(today_plan):
+    """
+    오늘 daily_plan이 복구안 재생성이 필요한 상태(needs_recovery_retry)면
+    id를, 아니면 None을 반환한다. (dashboard, today 양쪽에서 공유)
+    """
+    if today_plan is None:
+        return None
+    if not needs_recovery_retry(today_plan):
+        return None
+    return today_plan.id
+
 def _remaining_task_minutes(task):
     """
     아직 안 끝난 작업의 남은 필요시간(min/max).
@@ -479,6 +490,7 @@ def dashboard(request):
         'today_count': today_count,
         'today_minutes': today_minutes,
         'pending_recovery': _get_pending_recovery(exam_period),
+        'retry_daily_plan_id': _get_retry_daily_plan_id(today_plan),
         'remaining_days': remaining_days,
         'overall': _build_overall(exam_period, remaining_days),
         'subject_summary': _build_subject_summary(exam_period),
@@ -510,6 +522,7 @@ def today(request):
         'tasks': [],
         'is_finalized': False,
         'pending_recovery': None,
+        'retry_daily_plan_id': None,
         'calendar_url': reverse('planner:calendar'),
     }
 
@@ -523,6 +536,7 @@ def today(request):
         context['pending_recovery'] = pending_recovery
 
     today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today_date).first()
+    context['retry_daily_plan_id'] = _get_retry_daily_plan_id(today_plan)
 
     if today_plan is None:
         return render(request, 'planner/today.html', context)

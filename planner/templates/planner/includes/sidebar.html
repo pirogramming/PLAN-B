@@ -25,6 +25,11 @@
     <div class="side-box alert">
       <h4><svg class="ico"><use href="#i-alert"/></svg>복구안 대기 중</h4>
     </div>
+  {% elif retry_daily_plan_id %}
+    <div class="side-label">상태</div>
+    <div class="side-box alert">
+      <h4><svg class="ico"><use href="#i-alert"/></svg>복구안 생성 필요</h4>
+    </div>
   {% endif %}
 
   <div class="side-label">시험기간</div>
