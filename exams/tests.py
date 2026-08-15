@@ -3225,70 +3225,70 @@ class ExamPeriodCompletionTests(TestCase):
         self.assertTrue(StudyTask.objects.filter(id=task.id).exists())
         self.assertTrue(DailyPlan.objects.filter(id=plan.id).exists())
 
-        def test_period_complete_blocked_while_ai_analysis_processing(self):
-            period = ExamPeriod.objects.create(
-                user=self.user,
-                title="AI 분석 중 시험기간",
-                start_date=timezone.localdate() - datetime.timedelta(days=10),
-                end_date=timezone.localdate() + datetime.timedelta(days=5),
-                status=ExamPeriodStatus.ACTIVE,
-            )
-            exam = Exam.objects.create(exam_period=period, subject_name="수학", exam_date=period.end_date)
-            material = StudyMaterial.objects.create(
-                exam=exam,
-                material_type=MaterialType.TEXT,
-                status=MaterialStatus.COMPLETED,
-                analysis_status=MaterialStatus.PROCESSING,
-            )
+    def test_period_complete_blocked_while_ai_analysis_processing(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="AI 분석 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="수학", exam_date=period.end_date)
+        material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.TEXT,
+            status=MaterialStatus.COMPLETED,
+            analysis_status=MaterialStatus.PROCESSING,
+        )
 
-            response = self.client.post(reverse('exams:period_complete', args=[period.id]))
+        response = self.client.post(reverse('exams:period_complete', args=[period.id]))
 
-            period.refresh_from_db()
-            self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
-            self.assertRedirects(response, reverse('exams:period_list'))
-
-
-        def test_period_complete_blocked_while_pdf_extraction_processing(self):
-            period = ExamPeriod.objects.create(
-                user=self.user,
-                title="PDF 추출 중 시험기간",
-                start_date=timezone.localdate() - datetime.timedelta(days=10),
-                end_date=timezone.localdate() + datetime.timedelta(days=5),
-                status=ExamPeriodStatus.ACTIVE,
-            )
-            exam = Exam.objects.create(exam_period=period, subject_name="영어", exam_date=period.end_date)
-            material = StudyMaterial.objects.create(
-                exam=exam,
-                material_type=MaterialType.PDF,
-                status=MaterialStatus.PROCESSING,
-            )
-
-            response = self.client.post(reverse('exams:period_complete', args=[period.id]))
-
-            period.refresh_from_db()
-            self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
-            self.assertRedirects(response, reverse('exams:period_list'))
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertRedirects(response, reverse('exams:period_list'))
 
 
-        def test_lazy_check_skips_expired_period_with_processing_material(self):
-            period = ExamPeriod.objects.create(
-                user=self.user,
-                title="만료됐지만 처리 중인 시험기간",
-                start_date=timezone.localdate() - datetime.timedelta(days=30),
-                end_date=timezone.localdate() - datetime.timedelta(days=1),
-                status=ExamPeriodStatus.ACTIVE,
-            )
-            exam = Exam.objects.create(exam_period=period, subject_name="과학", exam_date=period.end_date)
-            StudyMaterial.objects.create(
-                exam=exam,
-                material_type=MaterialType.PDF,
-                status=MaterialStatus.PROCESSING,
-            )
+    def test_period_complete_blocked_while_pdf_extraction_processing(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="PDF 추출 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="영어", exam_date=period.end_date)
+        material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
 
-            self.client.get(reverse('exams:period_list'))
+        response = self.client.post(reverse('exams:period_complete', args=[period.id]))
 
-            period.refresh_from_db()
-            self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+
+    def test_lazy_check_skips_expired_period_with_processing_material(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="만료됐지만 처리 중인 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=30),
+            end_date=timezone.localdate() - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="과학", exam_date=period.end_date)
+        StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
+
+        self.client.get(reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
 class ConcurrencyDefenseAndRaceConditionTests(TestCase):
     """AI 분석/추출 간 경쟁 상태 및 처리 중 자료 삭제 방어 검증"""
 
