@@ -16,6 +16,10 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 from core.choices import ExamPeriodStatus, RecoveryPlanStatus, ProgressStatus
 from django.utils import timezone
+from django.db import transaction
+from exams.models import StudyMaterial
+from core.choices import MaterialStatus
+from django.db.models import Q
 from django.urls import reverse
 from exams.models import ExamPeriod, StudyTask, AvailableTime
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE, RISKY, IMPOSSIBLE
@@ -367,45 +371,60 @@ def feasibility(request, period_id):
 @login_required
 @require_http_methods(["POST"])
 def plan_generate(request, period_id):
-    exam_period = _get_owned_exam_period(request.user, period_id)
-
-    is_ready, readiness_error = _validate_task_readiness(exam_period)
-    if not is_ready:
-        messages.error(request, readiness_error)
-        return redirect('planner:feasibility', period_id=exam_period.id)
-
-    result, tasks = _calculate_feasibility_for_period(exam_period)
-    if result['status'] != POSSIBLE:
-        messages.error(
-            request,
-            "현재 상태에서는 계획을 생성할 수 없습니다. 가능시간 또는 학습작업을 조정해주세요.",
+    with transaction.atomic():
+        exam_period = get_object_or_404(
+            ExamPeriod.objects.select_for_update(),
+            id=period_id, user=request.user,
         )
-        return redirect('planner:feasibility', period_id=exam_period.id)
 
-    available_times = list(_available_times(exam_period))
+        if StudyMaterial.objects.filter(
+            exam__exam_period=exam_period,
+        ).filter(
+            Q(status=MaterialStatus.PROCESSING)
+            | Q(analysis_status=MaterialStatus.PROCESSING)
+        ).exists():
+            messages.error(
+                request,
+                "학습자료 분석이 진행 중이라 계획을 생성할 수 없습니다. 분석이 끝난 뒤 다시 시도해주세요.",
+            )
+            return redirect('planner:feasibility', period_id=exam_period.id)
 
-    try:
-        generate_schedule(
-            exam_period=exam_period,
-            study_tasks=tasks,
-            available_times=available_times,
-        )
-    except ScheduleAlreadyExistsError:
-        messages.info(request, "이미 생성된 계획이 있습니다.")
+        is_ready, readiness_error = _validate_task_readiness(exam_period)
+        if not is_ready:
+            messages.error(request, readiness_error)
+            return redirect('planner:feasibility', period_id=exam_period.id)
+
+        result, tasks = _calculate_feasibility_for_period(exam_period)
+        if result['status'] != POSSIBLE:
+            messages.error(
+                request,
+                "현재 상태에서는 계획을 생성할 수 없습니다. 가능시간 또는 학습작업을 조정해주세요.",
+            )
+            return redirect('planner:feasibility', period_id=exam_period.id)
+
+        available_times = list(_available_times(exam_period))
+
+        try:
+            generate_schedule(
+                exam_period=exam_period,
+                study_tasks=tasks,
+                available_times=available_times,
+            )
+        except ScheduleAlreadyExistsError:
+            messages.info(request, "이미 생성된 계획이 있습니다.")
+            return redirect('planner:dashboard')
+        except UnallocatedTasksError:
+            messages.error(
+                request,
+                "전체 가능시간은 충분하지만 시험일 또는 날짜별 가능시간 제약으로 "
+                "일부 작업을 배치하지 못했습니다. 날짜별 가능시간을 조정해주세요.",
+            )
+            return redirect('planner:feasibility', period_id=exam_period.id)
+        except (MismatchedExamPeriodError, DuplicateTaskAllocationError):
+            messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
+            return redirect('planner:feasibility', period_id=exam_period.id)
+
         return redirect('planner:dashboard')
-    except UnallocatedTasksError:
-        messages.error(
-            request,
-            "전체 가능시간은 충분하지만 시험일 또는 날짜별 가능시간 제약으로 "
-            "일부 작업을 배치하지 못했습니다. 날짜별 가능시간을 조정해주세요.",
-        )
-        return redirect('planner:feasibility', period_id=exam_period.id)
-    except (MismatchedExamPeriodError, DuplicateTaskAllocationError):
-        messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
-        return redirect('planner:feasibility', period_id=exam_period.id)
-
-    return redirect('planner:dashboard')
-
 
 @login_required
 @require_http_methods(["GET"])
