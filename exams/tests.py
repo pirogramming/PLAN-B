@@ -1967,67 +1967,6 @@ class PeriodManageTests(TestCase):
         exam_day_at.refresh_from_db()
         self.assertEqual(exam_day_at.available_minutes, 90)
 
-    # ---- 배정된 시간보다 적게 줄이는 것 차단 (#147) ----
-
-    def test_reducing_below_planned_minutes_rejected_server_side(self):
-        self._make_plan()  # 오늘 planned_minutes=40
-        self.client.force_login(self.owner)
-        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
-        data = self._management_form_data(rows)
-        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
-        idx = rows.index(today_at)
-        data[f'form-{idx}-hours'] = '0'
-        data[f'form-{idx}-minutes'] = '20'  # 40분보다 적음
-
-        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
-        response = self.client.post(url, data)
-
-        self.assertEqual(response.status_code, 200)  # 리다이렉트 안 됨 = 거부됨
-        today_at.refresh_from_db()
-        self.assertEqual(today_at.available_minutes, 100)
-        self.assertContains(response, "이미 40분이 배정되어 있어")
-
-    def test_reducing_to_exactly_planned_minutes_allowed(self):
-        self._make_plan()  # 오늘 planned_minutes=40
-        self.client.force_login(self.owner)
-        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
-        data = self._management_form_data(rows)
-        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
-        idx = rows.index(today_at)
-        data[f'form-{idx}-hours'] = '0'
-        data[f'form-{idx}-minutes'] = '40'  # 배정된 시간과 정확히 같음 -> 허용
-
-        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
-        response = self.client.post(url, data)
-
-        self.assertRedirects(
-            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
-        )
-        today_at.refresh_from_db()
-        self.assertEqual(today_at.available_minutes, 40)
-
-    def test_reducing_below_planned_minutes_on_day_without_plan_allowed(self):
-        """DailyPlan이 아직 없는 날짜는 배정된 시간 자체가 없으니 자유롭게 줄일 수 있다."""
-        self._make_plan()  # 오늘만 DailyPlan 생김
-        self.client.force_login(self.owner)
-        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
-        data = self._management_form_data(rows)
-        tomorrow_at = AvailableTime.objects.get(
-            exam_period=self.period, date=self.today + datetime.timedelta(days=1)
-        )
-        idx = rows.index(tomorrow_at)
-        data[f'form-{idx}-hours'] = '0'
-        data[f'form-{idx}-minutes'] = '10'
-
-        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
-        response = self.client.post(url, data)
-
-        self.assertRedirects(
-            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
-        )
-        tomorrow_at.refresh_from_db()
-        self.assertEqual(tomorrow_at.available_minutes, 10)
-
 
 class SourcePagesTestCase(TestCase):
     """

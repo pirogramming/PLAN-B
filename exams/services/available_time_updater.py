@@ -8,13 +8,10 @@ exams:available_time_update(공용 화면)와 exams:period_manage_available_time
     1) formset에는 화면에 보이는 모든 날짜가 항상 같이 실려 오므로, 값이
        실제로 바뀐 폼만 검사·저장 대상으로 본다 (안 바뀐 과거/마감 날짜가
        같이 있어도 막지 않는다).
-    2) 바뀐 날짜 중 과거 날짜, 이미 마감(finalized)된 DailyPlan이 있는 날짜,
-       또는 이미 배정된 시간(DailyPlan.planned_minutes)보다 더 적게 줄이려는
-       날짜가 하나라도 있으면 전체 저장을 취소한다 (부분 저장으로 인한 혼란을
-       방지 - 사용자가 어떤 날짜는 저장되고 어떤 날짜는 안 됐는지 헷갈리지
-       않게). 배정된 시간보다 적게 줄이는 경우를 막는 이유: 가용시간이 줄어든
-       만큼 계획을 자동으로 재배치/축소하는 건 작업 순서·복구 로직까지 영향이
-       번지는 별도 책임 범위라 (#147), 이 API에서는 다루지 않는다.
+    2) 바뀐 날짜 중 과거 날짜, 또는 이미 마감(finalized)된 DailyPlan이 있는
+       날짜가 하나라도 있으면 전체 저장을 취소한다 (부분 저장으로 인한
+       혼란을 방지 - 사용자가 어떤 날짜는 저장되고 어떤 날짜는 안 됐는지
+       헷갈리지 않게).
     3) 저장에 성공한 날짜 중 이미 DailyPlan이 있는 날짜는
        DailyPlan.available_minutes도 같이 동기화한다.
 """
@@ -25,11 +22,10 @@ from planner.models import DailyPlan
 
 
 class AvailableTimeEditRejected(Exception):
-    """변경하려는 값 중 과거/마감된 날짜, 또는 배정된 시간보다 적게
-    줄이려는 날짜가 있을 때 발생한다."""
+    """변경하려는 값 중 과거 또는 마감된 날짜가 있을 때 발생한다."""
 
     def __init__(self, blocked_dates):
-        # [(date, "past" | "finalized" | "below_planned", planned_minutes | None), ...]
+        # [(date, "past" | "finalized"), ...]
         self.blocked_dates = blocked_dates
         super().__init__(f"수정할 수 없는 날짜: {blocked_dates}")
 
@@ -37,16 +33,11 @@ class AvailableTimeEditRejected(Exception):
 def blocked_date_messages(blocked_dates):
     """AvailableTimeEditRejected.blocked_dates -> 사용자에게 보여줄 문구 목록"""
     messages = []
-    for blocked_date, reason, planned_minutes in blocked_dates:
+    for blocked_date, reason in blocked_dates:
         if reason == "past":
             messages.append(f"{blocked_date} 은(는) 지난 날짜라 가용 시간을 수정할 수 없습니다.")
-        elif reason == "finalized":
-            messages.append(f"{blocked_date} 은(는) 이미 마감된 날짜라 가용 시간을 수정할 수 없습니다.")
         else:
-            messages.append(
-                f"{blocked_date} 은(는) 이미 {planned_minutes}분이 배정되어 있어 "
-                f"그보다 적게 줄일 수 없습니다."
-            )
+            messages.append(f"{blocked_date} 은(는) 이미 마감된 날짜라 가용 시간을 수정할 수 없습니다.")
     return messages
 
 
@@ -60,16 +51,16 @@ def save_available_time_formset(formset, *, exam_period):
         저장된 AvailableTime 인스턴스 목록 (변경 없음 -> 빈 리스트)
 
     Raises:
-        AvailableTimeEditRejected: 바뀐 값 중 과거/마감된 날짜, 또는 이미
-            배정된 시간보다 적게 줄이려는 날짜가 있는 경우
+        AvailableTimeEditRejected: 바뀐 값 중 과거 또는 마감된 날짜가 있는 경우
             (이 경우 아무것도 저장하지 않는다)
     """
     today = timezone.localdate()
 
-    daily_plans_by_date = {
-        daily_plan.date: daily_plan
-        for daily_plan in DailyPlan.objects.filter(exam_period=exam_period)
-    }
+    finalized_dates = set(
+        DailyPlan.objects.filter(
+            exam_period=exam_period, finalized_at__isnull=False,
+        ).values_list("date", flat=True)
+    )
 
     changed_forms = []
     blocked_dates = []
@@ -96,13 +87,10 @@ def save_available_time_formset(formset, *, exam_period):
 
         changed_forms.append(form)
 
-        daily_plan = daily_plans_by_date.get(form_date)
         if form_date < today:
-            blocked_dates.append((form_date, "past", None))
-        elif daily_plan is not None and daily_plan.finalized_at is not None:
-            blocked_dates.append((form_date, "finalized", None))
-        elif daily_plan is not None and submitted_minutes < daily_plan.planned_minutes:
-            blocked_dates.append((form_date, "below_planned", daily_plan.planned_minutes))
+            blocked_dates.append((form_date, "past"))
+        elif form_date in finalized_dates:
+            blocked_dates.append((form_date, "finalized"))
 
     if blocked_dates:
         raise AvailableTimeEditRejected(blocked_dates)
@@ -116,13 +104,17 @@ def save_available_time_formset(formset, *, exam_period):
             saved_instances.append(instance)
 
         if saved_instances:
-            affected_plans = []
-            for instance in saved_instances:
-                daily_plan = daily_plans_by_date.get(instance.date)
-                if daily_plan is not None:
-                    daily_plan.available_minutes = instance.available_minutes
-                    affected_plans.append(daily_plan)
-            if affected_plans:
-                DailyPlan.objects.bulk_update(affected_plans, ["available_minutes"])
+            dates = [instance.date for instance in saved_instances]
+            minutes_by_date = {
+                instance.date: instance.available_minutes
+                for instance in saved_instances
+            }
+            daily_plans = list(
+                DailyPlan.objects.filter(exam_period=exam_period, date__in=dates)
+            )
+            for daily_plan in daily_plans:
+                daily_plan.available_minutes = minutes_by_date[daily_plan.date]
+            if daily_plans:
+                DailyPlan.objects.bulk_update(daily_plans, ["available_minutes"])
 
     return saved_instances
