@@ -146,24 +146,6 @@ def _get_owned_exam_period(user, period_id):
     return _lazy_complete_expired_period_locked(period)
 
 
-def _get_owned_exam_period(user, period_id):
-    """
-    사용자의 시험기간을 조회하고, end_date가 지났는데 여전히 ACTIVE 상태인 경우
-    조회 시점에 즉시 COMPLETED 상태로 전환(Lazy Check)합니다.
-
-    단, PDF 추출/AI 분석이 PROCESSING 중인 학습자료가 있으면 이번에는 전환하지
-    않고 ACTIVE로 유지한다 (다음 조회 때 다시 시도).
-    """
-    period = get_object_or_404(ExamPeriod, id=period_id, user=user)
-    if (
-        period.status == ExamPeriodStatus.ACTIVE
-        and period.end_date < timezone.localdate()
-        and not _has_processing_material(period)
-    ):
-        period.status = ExamPeriodStatus.COMPLETED
-        period.save(update_fields=['status'])
-    return period
-
 
 # =====================================================================
 # 시험기간 잠금 데코레이터 (동시성 방어 + POST만 차단)

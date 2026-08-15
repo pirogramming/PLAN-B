@@ -3289,6 +3289,35 @@ class ExamPeriodCompletionTests(TestCase):
 
         period.refresh_from_db()
         self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_lazy_check_skips_expired_period_with_processing_material_on_detail_view(self):
+        """period_detail() GET 조회 시에도 PROCESSING 중인 학습자료가 있는 만료
+        ACTIVE 시험기간은 COMPLETED로 전환되지 않고 ACTIVE로 유지되어야 한다.
+
+        (회귀 방지: _get_owned_exam_period()가 한때 중복 정의되어, 뒤에 정의된
+        non-lock 버전이 앞의 lock 기반 버전을 덮어쓰는 바람에 이 케이스가
+        검증되지 않고 있었다)
+        """
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="만료됐지만 처리 중인 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=30),
+            end_date=timezone.localdate() - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="과학", exam_date=period.end_date)
+        StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
+
+        response = self.client.get(reverse('exams:period_detail', args=[period.id]))
+
+        self.assertEqual(response.status_code, 200)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        
 class ConcurrencyDefenseAndRaceConditionTests(TestCase):
     """AI 분석/추출 간 경쟁 상태 및 처리 중 자료 삭제 방어 검증"""
 
