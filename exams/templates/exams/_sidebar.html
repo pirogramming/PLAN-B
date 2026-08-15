@@ -1,5 +1,4 @@
-{% load static %}
-{% load exam_extras %}
+{% load static exam_extras %}
 {% get_wizard_context period exam as wiz %}
 
 <aside class="side">
@@ -8,14 +7,60 @@
   </button>
 
   <nav>
+    {% if nav == 'period_manage' or nav == 'period_manage_available_time' or nav == 'period_manage_task_view' %}
+      {% if nav == 'period_manage' %}
+      <a class="nav-i" href="{% url 'planner:dashboard' %}">
+        <svg class="ico"><use href="#i-dashboard"/></svg>대시보드로 이동
+      </a>
+      {% endif %}
+      {% if nav == 'period_manage_available_time' %}
+      {% comment %}
+      가능시간 폼에 입력한 내용을 버리지 않도록, 그냥 링크가 아니라 폼을
+      제출(저장)한 다음 시험기간 홈으로 이동하는 버튼으로 만든다.
+      {% endcomment %}
+      <button type="submit" form="available-time-form" class="nav-i on" style="width:100%; text-align:left;">
+        <svg class="ico"><use href="#i-graduation"/></svg>시험기간 홈
+      </button>
+      {% elif period %}
+      <a class="nav-i on" href="{% url 'exams:period_manage' period.id %}">
+        <svg class="ico"><use href="#i-graduation"/></svg>시험기간 홈
+      </a>
+      {% elif exam %}
+      <a class="nav-i on" href="{% url 'exams:period_manage' exam.exam_period_id %}">
+        <svg class="ico"><use href="#i-graduation"/></svg>시험기간 홈
+      </a>
+      {% endif %}
+      {% if nav == 'period_manage_available_time' or nav == 'period_manage_task_view' %}
+      {% if period %}
+        {% get_period_exams period.id as sub_period_exams %}
+      {% elif exam %}
+        {% get_period_exams exam.exam_period_id as sub_period_exams %}
+      {% endif %}
+      <div class="nav-sub">
+        <a class="nav-sub-i {% if nav == 'period_manage_available_time' %}on{% endif %}"
+           href="{% if period %}{% url 'exams:period_manage_available_time' period.id %}{% else %}{% url 'exams:period_manage_available_time' exam.exam_period_id %}{% endif %}">
+          가능시간 수정
+        </a>
+        {% if nav == 'period_manage_task_view' %}
+        <a class="nav-sub-i on" href="{% url 'exams:period_manage_task_view' exam.id %}">학습 작업 확인</a>
+        {% elif sub_period_exams %}
+        <a class="nav-sub-i" href="{% url 'exams:period_manage_task_view' sub_period_exams.0.id %}">학습 작업 확인</a>
+        {% else %}
+        <span class="nav-sub-i">학습 작업 확인</span>
+        {% endif %}
+      </div>
+      {% endif %}
+    {% else %}
     {% if wiz.period_id %}
     <a class="nav-i {% if nav == 'period_detail' %}on{% endif %}"
        href="{% url 'exams:period_detail' wiz.period_id %}">
       <svg class="ico"><use href="#i-dashboard"/></svg>시험기간 홈
     </a>
     {% endif %}
+    {% endif %}
   </nav>
 
+  {% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %}
   <div class="side-label">시험 준비 단계</div>
   <nav class="nav-steps">
     <a class="nav-i nav-step {% if nav == 'period_form' %}on{% endif %}"
@@ -48,13 +93,19 @@
       <span class="step-num">6</span>계획 가능성 판단
     </a>
   </nav>
+  {% endif %}
 
   <div class="side-foot">
+    <a class="nav-i"
+       href="{% if period %}{% url 'exams:period_manage' period.id %}{% elif exam %}{% url 'exams:period_manage' exam.exam_period_id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
+      <svg class="ico"><use href="#i-user"/></svg>
+      {{ request.user.nickname|default:request.user.username }}
+    </a>
     <form method="post" action="{% url 'accounts:logout' %}" style="margin:0;">
       {% csrf_token %}
       <button type="submit" class="nav-i" style="width:100%; text-align:left;">
         <svg class="ico"><use href="#i-logout"/></svg>
-        {{ request.user.nickname|default:request.user.username }} · 로그아웃
+        로그아웃
       </button>
     </form>
   </div>

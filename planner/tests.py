@@ -25,7 +25,11 @@ from planner.services.recovery import (
     RecoveryPlanAlreadyProcessedError,
     RecoveryPlanStaleError,
 )
-
+from planner.services.recovery import (
+    needs_recovery_retry,
+    retry_recovery_generation,
+    RecoveryRetryNotNeededError,
+)
 # Create your tests here.
 from planner.services.feasibility_checker import (
     calculate_feasibility,
@@ -1823,14 +1827,12 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 2
         )
 
-    def test_plan_generate_twice_redirects_to_complete(self):
+    def test_plan_generate_twice_redirects_to_dashboard(self):
         self._make_confirmed_task(order=1, min_m=20, max_m=40)
         AvailableTime.objects.create(exam_period=self.exam_period, date=self.today, available_minutes=100)
 
@@ -1838,9 +1840,7 @@ class PlanGenerateFlowTests(TestCase):
         response = self.client.post(
             reverse('planner:plan_generate', kwargs={'period_id': self.exam_period.id})
         )
-        self.assertRedirects(
-            response, reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
+        self.assertRedirects(response, reverse('planner:dashboard'))
         self.assertEqual(
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 1
         )
@@ -1862,6 +1862,52 @@ class PlanGenerateFlowTests(TestCase):
         )
         self.assertEqual(response.context['available_time_edit_url'], expected)
 
+    def test_subject_result_status_reflects_exam_date_order(self):
+        """
+        시험일이 빠른 과목이 가용시간을 먼저 차지하고, 뒤 과목은 남은 시간
+        기준으로 판정돼야 한다.
+        """
+        from exams.models import Exam, StudyTask
+
+        near_exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="임박 과목",
+            exam_date=self.today + timedelta(days=2),
+        )
+        StudyTask.objects.create(
+            exam=near_exam, title="임박 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=50, estimated_max_minutes=50, is_confirmed=True,
+        )
+        far_exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="여유 과목",
+            exam_date=self.today + timedelta(days=8),
+        )
+        StudyTask.objects.create(
+            exam=far_exam, title="여유 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=10, estimated_max_minutes=10, is_confirmed=True,
+        )
+        # 임박 과목 시험일(오늘+2) 전까지는 하루치(오늘)만 있고 가용시간이 부족함
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=10,
+        )
+        # 시험일 이후엔 넉넉하지만 임박 과목엔 못 씀
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=5),
+            available_minutes=100,
+        )
+
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        results = {s['subject_name']: s for s in response.context['subject_results']}
+
+        # 임박 과목: 시험일 전 가용시간 10분 < 필요 50분 -> impossible
+        self.assertEqual(results['임박 과목']['status'], IMPOSSIBLE)
+        # 여유 과목: 남은 가용시간 넉넉함 -> possible
+        self.assertEqual(results['여유 과목']['status'], POSSIBLE)
+
+        
 class FeasibilitySubjectResultsTests(TestCase):
     """
     #90 feasibility() subject_results context 테스트.
@@ -2099,6 +2145,41 @@ class DashboardViewTests(TestCase):
         response = self.client.get(reverse('planner:dashboard'))
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.context['pending_recovery'])
+
+    def test_dashboard_shows_recovery_retry_banner_when_generation_failed(self):
+        from exams.models import ExamPeriod, Exam, StudyTask
+
+        exam_period = ExamPeriod.objects.create(
+            user=self.user, title="테스트 시험기간",
+            start_date=self.today, end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=5),
+        )
+        # importance=high, depth=core -> 핵심집중형에서도 제외 대상이 안 됨
+        task = StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        item = DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=task, planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=item, status="not_done", actual_minutes=0)
+        # 미래 가용시간을 일부러 안 만듦 -> 두 복구 전략 다 실패 -> RecoveryPlan 없음
+        finalize_daily_plan(daily_plan)
+
+        response = self.client.get(reverse('planner:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context['pending_recovery'])
+        self.assertEqual(response.context['retry_daily_plan_id'], daily_plan.id)
+        self.assertContains(response, "복구안 다시 생성")
 
     def test_dashboard_does_not_show_other_user_exam_period(self):
         from django.contrib.auth import get_user_model
@@ -2858,6 +2939,28 @@ class CalendarViewTests(TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.context["year"], self.today.year)
             self.assertEqual(response.context["month"], self.today.month)
+
+    def test_boundary_year_month_navigation_links_use_normalized_month(self):
+        """
+        리뷰 반영: year=9999, month=12는 build_calendar_context() 내부에서
+        오늘 날짜로 보정되지만(그래야 6주 격자 패딩이 연도 경계를 안 넘음),
+        View가 그 보정된 값을 다시 받아오지 않으면 화면 제목(year/month)은
+        정상인데 "다음 달" 링크(next_year/next_month)는 여전히 9999/12
+        기준(예: next_year=10000)으로 깨질 수 있었다. 이제는 prev/next도
+        보정된 값 기준으로 계산되어야 한다.
+        """
+        self._make_active_exam_period()
+
+        response = self.client.get(self.url, {"year": 9999, "month": 12})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["year"], self.today.year)
+        self.assertEqual(response.context["month"], self.today.month)
+        # next_month가 1~12 범위를 벗어나거나(예: 13), next_year가 10000처럼
+        # 깨진 값이면 안 된다.
+        self.assertTrue(1 <= response.context["next_month"] <= 12)
+        self.assertTrue(1 <= response.context["prev_month"] <= 12)
+        self.assertNotEqual(response.context["next_year"], 10000)
 
     def test_week_grid_has_six_weeks_of_seven_days(self):
         self._make_active_exam_period()
@@ -3959,3 +4062,310 @@ class DashboardContextTests(TestCase):
 
         # task_c(배치됨, 미착수) + 미배치 2개 = 총 3개
         self.assertEqual(progress["core_left"], 3)
+
+    # ── 9. 이미 배치된 미래 작업이 available_minutes를 이중 차감하지 않는지 ──
+    def test_overall_available_minutes_not_double_counted_by_scheduled_items(self):
+        from exams.models import StudyTask
+
+        future_task = StudyTask.objects.create(
+            exam=self.exam, title="이미 배치된 작업", importance="high", depth="basic",
+            task_type="concept", difficulty="normal", order=10,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        tomorrow = self.today + timedelta(days=1)
+        future_plan = DailyPlan.objects.filter(
+            exam_period=self.exam_period, date=tomorrow
+        ).first()
+        if future_plan is None:
+            future_plan = DailyPlan.objects.create(
+                exam_period=self.exam_period, date=tomorrow,
+                available_minutes=60, planned_minutes=0,
+            )
+        DailyPlanItem.objects.create(
+            daily_plan=future_plan, study_task=future_task,
+            planned_minutes=60, order=99,
+        )
+
+        response = self._get_dashboard()
+        overall = response.context["overall"]
+
+        # available_minutes는 occupied 차감 없이 AvailableTime 원본 총량(180)이어야 한다
+        self.assertEqual(overall["available_minutes"], 180)
+
+
+class CalendarServiceYearMonthValidationTests(TestCase):
+    """
+    build_calendar_context() 자체가 year/month를 검증하는지 확인한다 (리뷰 반영).
+    View(planner/views.py)에 방어 코드가 없어도(또는 나중에 또 빠지더라도),
+    이 서비스 함수를 직접 호출하는 어떤 경로에서든 최소한의 안전장치가
+    되도록 함수 내부에서도 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="calendar_service_tester", email="calendar_service_tester@example.com",
+            password="pass1234",
+        )
+        self.today = django_timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="검증 테스트 시험기간",
+            start_date=self.today - timedelta(days=3),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def test_month_13_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, self.today.year, 13)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
+    def test_month_zero_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, self.today.year, 0)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_year_out_of_datetime_range_falls_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 10000, 8)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_non_integer_values_fall_back_to_today(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, "abc", "xyz")
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+
+    def test_year_9999_december_boundary_does_not_crash(self):
+        """
+        year=9999, month=12는 1~12/1~9999 범위 안이라 '형식상' 유효하지만,
+        6주 격자를 채우다 보면 다음 해(10000년) 날짜가 필요해져서 그대로
+        두면 ValueError가 난다. 이 경계 케이스도 오늘 날짜로 안전하게
+        대체되어야 한다.
+        """
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 9999, 12)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
+    def test_year_1_january_boundary_does_not_crash(self):
+        """
+        year=1, month=1은 하한 경계값이다 (datetime.MINYEAR=1). 1월 1일이
+        속한 주(일요일 시작)를 채우려면 그 전 며칠(0년 12월)이 필요한데,
+        datetime은 0년을 표현할 수 없어 ValueError("year 0 is out of range")가
+        난다. 상한 경계(9999/12)뿐 아니라 이 하한 경계도 오늘 날짜로 안전하게
+        대체되어야 한다.
+        """
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 1, 1)
+
+        self.assertEqual(data["year"], self.today.year)
+        self.assertEqual(data["month"], self.today.month)
+        self.assertEqual(len(data["weeks"]), 6)
+
+    def test_valid_year_month_is_not_altered(self):
+        from planner.services.calendar import build_calendar_context
+
+        data = build_calendar_context(self.period, 2026, 8)
+
+        self.assertEqual(data["year"], 2026)
+        self.assertEqual(data["month"], 8)
+
+class RecoveryRetryTests(TestCase):
+    """
+    #141 복구안 재생성(needs_recovery_retry / retry_recovery_generation / recovery_retry View) 테스트.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="recovery_retry_tester",
+            email="recovery_retry@example.com",
+            password="pass1234",
+        )
+        self.other_user = User.objects.create_user(
+            username="recovery_retry_other",
+            email="recovery_retry_other@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="recovery_retry@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="복구 재생성 테스트용 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=7),
+        )
+        # importance=high, depth=core -> 핵심집중형에서도 제외 대상이 안 됨
+        # -> 가용시간이 없으면 두 안 다 실패하기 딱 좋은 조건
+        self.task = StudyTask.objects.create(
+            exam=self.exam, title="미완료 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        self.item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan, study_task=self.task,
+            planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=self.item, status="not_done", actual_minutes=0)
+
+        self.daily_plan.finalized_at = django_timezone.now()
+        self.daily_plan.save(update_fields=["finalized_at"])
+        # 미래 가용시간을 일부러 안 만듦 -> 복구안 생성 실패 상태를 재현
+
+    def _retry(self):
+        return self.client.post(
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
+        )
+
+    # ── 1. needs_recovery_retry 판별 ──────────────────
+    def test_needs_retry_true_when_finalized_unfinished_no_recovery_plan(self):
+        self.assertTrue(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_not_finalized(self):
+        self.daily_plan.finalized_at = None
+        self.daily_plan.save(update_fields=["finalized_at"])
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_no_unfinished_items(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    def test_needs_retry_false_when_recovery_plan_already_exists(self):
+        RecoveryPlan.objects.create(
+            exam_period=self.exam_period, source_daily_plan=self.daily_plan,
+            recovery_group_id=uuid.uuid4(), recovery_type="maintain_volume",
+        )
+        self.assertFalse(needs_recovery_retry(self.daily_plan))
+
+    # ── 2. retry_recovery_generation 서비스 함수 ──────
+    def test_retry_raises_when_not_needed(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+
+        with self.assertRaises(RecoveryRetryNotNeededError):
+            retry_recovery_generation(self.daily_plan)
+
+    def test_retry_succeeds_after_available_time_increased(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        result = retry_recovery_generation(self.daily_plan)
+
+        self.assertIsNotNone(result["maintain_volume"])
+        self.assertEqual(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan).count(), 1
+        )
+
+    def test_retry_does_not_touch_finalized_at_or_progress_log(self):
+        original_finalized_at = self.daily_plan.finalized_at
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        retry_recovery_generation(self.daily_plan)
+
+        self.daily_plan.refresh_from_db()
+        self.item.progress_log.refresh_from_db()
+        self.assertEqual(self.daily_plan.finalized_at, original_finalized_at)
+        self.assertEqual(self.item.progress_log.progress_status, "not_done")
+
+    # ── 3. View ────────────────────────────────────
+    def test_view_redirects_to_dashboard_when_not_needed(self):
+        self.item.progress_log.progress_status = "done"
+        self.item.progress_log.save(update_fields=["progress_status"])
+
+        response = self._retry()
+        self.assertRedirects(response, reverse("planner:dashboard"))
+
+    def test_view_still_fails_shows_error_and_redirects_dashboard(self):
+        response = self._retry()
+        self.assertRedirects(response, reverse("planner:dashboard"))
+        self.assertFalse(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan).exists()
+        )
+
+    def test_view_success_redirects_to_recovery_compare(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        response = self._retry()
+
+        plan = RecoveryPlan.objects.get(source_daily_plan=self.daily_plan)
+        self.assertRedirects(
+            response,
+            reverse("planner:recovery_compare", kwargs={"group_id": plan.recovery_group_id}),
+        )
+
+    def test_view_404_for_other_user(self):
+        self.client.logout()
+        self.client.login(username="recovery_retry_other@example.com", password="pass1234")
+
+        response = self._retry()
+        self.assertEqual(response.status_code, 404)
+
+    def test_view_requires_post(self):
+        response = self.client.get(
+            reverse("planner:recovery_retry", kwargs={"daily_plan_id": self.daily_plan.id})
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_concurrent_retry_does_not_create_duplicate_recovery_plans(self):
+        AvailableTime.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=100,
+        )
+
+        retry_recovery_generation(self.daily_plan)
+        with self.assertRaises(RecoveryRetryNotNeededError):
+            retry_recovery_generation(self.daily_plan)
+
+        self.assertEqual(
+            RecoveryPlan.objects.filter(source_daily_plan=self.daily_plan)
+            .values('recovery_group_id').distinct().count(),
+            1,
+        )
