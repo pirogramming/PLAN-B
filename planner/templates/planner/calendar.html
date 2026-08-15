@@ -22,9 +22,9 @@
 
     <div class="content">
 
-    {% if not exam_period %}
-      <div class="banner" style="margin-bottom:20px">아직 등록된 시험기간이 없습니다. 시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다.</div>
-    {% endif %}
+    {% if not user.is_authenticated %}
+      {% include "planner/includes/login_prompt.html" %}
+    {% else %}
 
       <div class="cal-head">
         <a class="icon-btn" href="?year={{ prev_year }}&month={{ prev_month }}" aria-label="이전 달">
@@ -110,6 +110,8 @@
           </div>
         {% endfor %}
       </div>
+    {% endif %}
+
     </div>
   </div>
 </div>

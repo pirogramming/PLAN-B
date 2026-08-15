@@ -36,6 +36,9 @@ from planner.services.recovery import (
     RecoveryPlanAlreadyProcessedError,
     RecoveryPlanStaleError,
     RecoveryPlanInvalidDataError,
+    needs_recovery_retry,
+    retry_recovery_generation,
+    RecoveryRetryNotNeededError,
 )
 import logging
 
@@ -69,6 +72,17 @@ def _get_pending_recovery(exam_period):
         'created_at': pending_recovery_item.created_at,
         'count': pending_recovery_qs.values('recovery_group_id').distinct().count(),
     }
+
+def _get_retry_daily_plan_id(today_plan):
+    """
+    오늘 daily_plan이 복구안 재생성이 필요한 상태(needs_recovery_retry)면
+    id를, 아니면 None을 반환한다. (dashboard, today 양쪽에서 공유)
+    """
+    if today_plan is None:
+        return None
+    if not needs_recovery_retry(today_plan):
+        return None
+    return today_plan.id
 
 def _remaining_task_minutes(task):
     """
@@ -123,6 +137,10 @@ def _build_overall(exam_period, remaining_days):
 
     result = calculate_feasibility(required_min, required_max, available_minutes)
     status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+    # fit_bar.html/배지 CSS(.fit-band.ok 등)는 ok/warn/bad 클래스만 알고 있고
+    # calculate_feasibility()의 possible/risky/impossible과 이름이 달라서,
+    # status 원본 값은 그대로 두고 CSS용 값만 따로 매핑해서 내려준다.
+    status_class_map = {POSSIBLE: "ok", RISKY: "warn", IMPOSSIBLE: "bad"}
 
     axis_max = max(available_minutes, required_max, 1) * 1.15
     min_pct = round(required_min / axis_max * 100, 1)
@@ -135,6 +153,7 @@ def _build_overall(exam_period, remaining_days):
 
     return {
         "status": result["status"],
+        "status_class": status_class_map[result["status"]],
         "status_label": status_label_map[result["status"]],
         "viewed_at": timezone.now(),
         "min_minutes": required_min,
@@ -373,7 +392,7 @@ def plan_generate(request, period_id):
         )
     except ScheduleAlreadyExistsError:
         messages.info(request, "이미 생성된 계획이 있습니다.")
-        return redirect('planner:plan_complete', period_id=exam_period.id)
+        return redirect('planner:dashboard')
     except UnallocatedTasksError:
         messages.error(
             request,
@@ -385,7 +404,7 @@ def plan_generate(request, period_id):
         messages.error(request, "계획 생성 중 데이터 오류가 발생했습니다.")
         return redirect('planner:feasibility', period_id=exam_period.id)
 
-    return redirect('planner:plan_complete', period_id=exam_period.id)
+    return redirect('planner:dashboard')
 
 
 @login_required
@@ -413,12 +432,17 @@ def plan_complete(request, period_id):
     }
     return render(request, 'planner/plan_complete.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def dashboard(request):
     """
     시험기간/계획 존재 여부에 따라 온보딩 화면 또는 전체 대시보드를 보여준다.
+    로그인 안 한 사용자도 들어올 수 있게 @login_required를 빼고 여기서
+    직접 분기한다 (사이드바+메인 화면 틀 안에서 회원가입/로그인 안내를
+    보여주기 위함 — 다른 planner 화면들은 여전히 로그인이 필요하다).
     """
+    if not request.user.is_authenticated:
+        return render(request, 'planner/dashboard.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
@@ -466,6 +490,7 @@ def dashboard(request):
         'today_count': today_count,
         'today_minutes': today_minutes,
         'pending_recovery': _get_pending_recovery(exam_period),
+        'retry_daily_plan_id': _get_retry_daily_plan_id(today_plan),
         'remaining_days': remaining_days,
         'overall': _build_overall(exam_period, remaining_days),
         'subject_summary': _build_subject_summary(exam_period),
@@ -473,9 +498,13 @@ def dashboard(request):
     }
     return render(request, 'planner/dashboard.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def today(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/today.html', {
+            'exam_period': None, 'today': timezone.localdate(),
+        })
+
     today_date = timezone.localdate()
 
     exam_period = (
@@ -488,18 +517,18 @@ def today(request):
     context = {
         'today': today_date,
         'exam_period': exam_period,
+        'has_plan': DailyPlan.objects.filter(exam_period=exam_period).exists(),
         'today_count': 0,
         'tasks': [],
         'is_finalized': False,
         'pending_recovery': None,
+        'retry_daily_plan_id': None,
         'calendar_url': reverse('planner:calendar'),
     }
 
     if exam_period is None:
-        context.update({
-            'empty_title': "등록된 시험기간이 없습니다",
-            'empty_desc': "먼저 시험기간을 등록해주세요.",
-        })
+        # exam_period_prompt.html이 이 경우를 처리하므로(today.html의
+        # {% elif not exam_period %}) 여기서는 추가 컨텍스트가 필요 없다.
         return render(request, 'planner/today.html', context)
 
     pending_recovery = _get_pending_recovery(exam_period)
@@ -507,6 +536,7 @@ def today(request):
         context['pending_recovery'] = pending_recovery
 
     today_plan = DailyPlan.objects.filter(exam_period=exam_period, date=today_date).first()
+    context['retry_daily_plan_id'] = _get_retry_daily_plan_id(today_plan)
 
     if today_plan is None:
         return render(request, 'planner/today.html', context)
@@ -594,15 +624,26 @@ def today(request):
     })
     return render(request, 'planner/today.html', context)
 
-@login_required
 @require_http_methods(["GET"])
 def calendar(request):
+    if not request.user.is_authenticated:
+        return render(request, 'planner/calendar.html', {'exam_period': None})
+
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
         .order_by('-created_at')
         .first()
     )
+
+    if exam_period is None:
+        # 예전엔 calendar.html 안에 고정 배너로 떠 있었는데, 다른 화면들처럼
+        # base.html의 전역 토스트(messages)로 통일한다 — 리다이렉트 없이 같은
+        # 요청 안에서 render()해도 messages 컨텍스트 프로세서가 그대로 잡아준다.
+        messages.warning(
+            request,
+            "아직 등록된 시험기간이 없습니다. 시험기간을 만들면 날짜별 계획을 여기서 확인할 수 있습니다.",
+        )
 
     today_date = timezone.localdate()
     try:
@@ -632,6 +673,13 @@ def calendar(request):
 
     context = {
         'exam_period': exam_period,
+        'pending_recovery': (
+            _get_pending_recovery(exam_period) if exam_period else None
+        ),
+        'has_plan': (
+            DailyPlan.objects.filter(exam_period=exam_period).exists()
+            if exam_period else False
+        ),
         'year': year,
         'month': month,
         'prev_year': prev_year,
@@ -1142,3 +1190,37 @@ def recovery_apply(request, plan_id):
 
     messages.success(request, "선택한 복구안이 일정에 적용되었습니다.")
     return redirect("planner:dashboard")
+
+@login_required
+@require_http_methods(["POST"])
+def recovery_retry(request, daily_plan_id):
+    daily_plan = get_object_or_404(
+        DailyPlan, id=daily_plan_id, exam_period__user=request.user,
+    )
+
+    try:
+        result = retry_recovery_generation(daily_plan)
+    except RecoveryRetryNotNeededError:
+        messages.info(request, "복구안 재생성이 필요한 상태가 아닙니다.")
+        return redirect('planner:dashboard')
+    except Exception:
+        logger.exception(
+            "복구안 재생성 중 예상치 못한 오류 (daily_plan_id=%s)", daily_plan_id
+        )
+        messages.error(
+            request, "복구안 재생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        )
+        return redirect('planner:dashboard')
+
+    maintain_volume = result['maintain_volume']
+    core_focus = result['core_focus']
+
+    if maintain_volume is None and core_focus is None:
+        messages.error(
+            request,
+            "현재 가용시간으로도 복구안을 만들 수 없습니다. 가용시간을 더 늘려주세요.",
+        )
+        return redirect('planner:dashboard')
+
+    group_id = (maintain_volume or core_focus).recovery_group_id
+    return redirect('planner:recovery_compare', group_id=group_id)

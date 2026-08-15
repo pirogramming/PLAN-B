@@ -61,14 +61,21 @@
     <div id="eodProgress" hidden>
       <div class="modal-body" style="padding:36px 30px">
         <ol class="steps-run">
-          <li data-step="1"><svg class="ico"><use href="#i-save"/></svg>오늘 기록을 확정하는 중</li>
+          <li data-step="1" id="eodStep">
+            <svg class="ico" id="eodStepIco"><use href="#i-loader"/></svg>
+            <span id="eodStepLabel">오늘 기록을 확정하는 중</span>
+          </li>
         </ol>
         <p class="field-hint" id="eodProgressHint" style="margin-top:24px;padding-top:18px;border-top:1px solid var(--neutral4)">
           잠시만 기다려 주세요.
         </p>
       </div>
-      <div class="modal-foot" id="eodProgressFoot">
-        <button class="btn btn-primary ml-auto" id="eodProgressDone" type="button" disabled>확인</button>
+      <div class="modal-foot" id="eodProgressFoot" hidden>
+        <button class="btn btn-secondary js-close" type="button">닫기</button>
+        <a class="btn btn-primary ml-auto" id="eodAvailTimeBtn"
+           href="{% url 'exams:period_manage_available_time' exam_period.id %}" hidden>
+          가용시간 수정
+        </a>
       </div>
     </div>
 
