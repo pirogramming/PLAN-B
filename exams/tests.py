@@ -3128,6 +3128,102 @@ class ExamPeriodCompletionTests(TestCase):
         )
         self.assertEqual(response.status_code, 302)
 
+    def _available_time_formset_post_data(self, available_time, new_hours, new_minutes):
+        return {
+            'form-TOTAL_FORMS': '1',
+            'form-INITIAL_FORMS': '1',
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+            'form-0-id': str(available_time.id),
+            'form-0-date': available_time.date.isoformat(),  # disabled 필드라 무시되지만 형식상 포함
+            'form-0-hours': str(new_hours),
+            'form-0-minutes': str(new_minutes),
+        }
+
+
+    def test_period_manage_available_time_blocked_when_completed_with_plan(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="종료된 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+        Exam.objects.create(
+            exam_period=period,
+            subject_name="수학",
+            exam_date=period.end_date,
+        )
+        at = AvailableTime.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60,
+        )
+        DailyPlan.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60, planned_minutes=0,
+        )
+
+        response = self.client.post(
+            reverse('exams:period_manage_available_time', args=[period.id]),
+            self._available_time_formset_post_data(at, new_hours=2, new_minutes=0),
+        )
+
+        at.refresh_from_db()
+        self.assertEqual(at.available_minutes, 60)
+        self.assertRedirects(response, reverse('exams:period_manage', args=[period.id]))
+
+
+
+    def test_period_update_blocked_when_completed_without_plan(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="계획 없이 종료된 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse('exams:period_update', args=[period.id]),
+            {
+                'title': '수정 시도',
+                'start_date': period.start_date,
+                'end_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.title, "계획 없이 종료된 시험기간")  # 변경되지 않음
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+
+    def test_period_complete_preserves_related_records(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="진행 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(
+            exam_period=period,
+            subject_name="영어",
+            exam_date=period.end_date,
+        )
+        material = StudyMaterial.objects.create(
+            exam=exam, material_type=MaterialType.TEXT, status=MaterialStatus.COMPLETED,
+        )
+        task = StudyTask.objects.create(exam=exam, title="영단어 암기")
+        plan = DailyPlan.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60, planned_minutes=0,
+        )
+
+        self.client.post(reverse('exams:period_complete', args=[period.id]))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertTrue(Exam.objects.filter(id=exam.id).exists())
+        self.assertTrue(StudyMaterial.objects.filter(id=material.id).exists())
+        self.assertTrue(StudyTask.objects.filter(id=task.id).exists())
+        self.assertTrue(DailyPlan.objects.filter(id=plan.id).exists())
 class ConcurrencyDefenseAndRaceConditionTests(TestCase):
     """AI 분석/추출 간 경쟁 상태 및 처리 중 자료 삭제 방어 검증"""
 

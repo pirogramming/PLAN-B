@@ -406,28 +406,57 @@ def period_manage(request, period_id):
 @login_required
 @require_http_methods(["GET", "POST"])
 def period_manage_available_time(request, period_id):
+    """
+    계획 생성 후 전용 가용시간 수정 화면. plan_generate()와의 직렬화, 그리고
+    "종료된 시험기간은 읽기 전용" 정책을 함께 지키기 위해 available_time_update와
+    동일하게 POST 처리 전체를 ExamPeriod row lock(select_for_update) 안에서
+    수행하고, DailyPlan/상태 확인부터 저장까지 같은 트랜잭션에서 끝낸다.
+    """
+    if request.method == 'POST':
+        with transaction.atomic():
+            period = get_object_or_404(
+                ExamPeriod.objects.select_for_update(),
+                id=period_id,
+                user=request.user,
+            )
+
+            if not DailyPlan.objects.filter(exam_period=period).exists():
+                return redirect('exams:period_detail', period_id=period.id)
+
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
+                return redirect('exams:period_manage', period_id=period.id)
+
+            queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+            formset = AvailableTimeFormSet(request.POST, queryset=queryset)
+
+            if formset.is_valid():
+                try:
+                    save_available_time_formset(formset, exam_period=period)
+                except AvailableTimeEditRejected as exc:
+                    # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                    # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                    # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                    for msg in blocked_date_messages(exc.blocked_dates):
+                        formset._non_form_errors.append(ValidationError(msg))
+                        messages.error(request, msg)
+                else:
+                    messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
+                    return redirect('exams:period_manage', period_id=period.id)
+        # atomic 블록 종료 → ExamPeriod 락 해제
+        return render(request, 'exams/period_manage_available_time.html', {
+            'formset': formset,
+            'period': period,
+        })
+
+    # ================================================================
+    # GET
+    # ================================================================
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     if not DailyPlan.objects.filter(exam_period=period).exists():
         return redirect('exams:period_detail', period_id=period.id)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
-
-    if request.method == 'POST':
-        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
-        if formset.is_valid():
-            try:
-                save_available_time_formset(formset, exam_period=period)
-            except AvailableTimeEditRejected as exc:
-                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
-                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
-                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                for msg in blocked_date_messages(exc.blocked_dates):
-                    formset._non_form_errors.append(ValidationError(msg))
-                    messages.error(request, msg)
-            else:
-                messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
-                return redirect('exams:period_manage', period_id=period.id)
-    else:
-        formset = AvailableTimeFormSet(queryset=queryset)
+    formset = AvailableTimeFormSet(queryset=queryset)
 
     return render(request, 'exams/period_manage_available_time.html', {
         'formset': formset,
