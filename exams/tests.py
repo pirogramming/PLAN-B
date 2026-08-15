@@ -2648,6 +2648,53 @@ class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
         self.assertEqual(at_no_plan.available_minutes, 45)
 
 
+class ExamPeriodProgressPercentTests(TestCase):
+    """ExamPeriod.progress_percent (사이드바 진행률 바) 날짜 경과율 계산 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='progress_tester@example.com',
+            email='progress_tester@example.com', password='pass1234!'
+        )
+        self.today = timezone.localdate()
+
+    def test_midway_through_period(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='진행률 테스트',
+            start_date=self.today - datetime.timedelta(days=2),
+            end_date=self.today + datetime.timedelta(days=2),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        # 4일 중 2일 경과 -> 50%
+        self.assertEqual(period.progress_percent, 50)
+
+    def test_before_start_date_is_zero(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='시작 전',
+            start_date=self.today + datetime.timedelta(days=1),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 0)
+
+    def test_after_end_date_is_full(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='종료 후',
+            start_date=self.today - datetime.timedelta(days=10),
+            end_date=self.today - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+        self.assertEqual(period.progress_percent, 100)
+
+    def test_start_equals_end_date_is_full(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='당일 시작=종료',
+            start_date=self.today, end_date=self.today,
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 100)
+
+
 class ExamPeriodLockValidationTests(TestCase):
     """계획이 생성된 시험기간에 대한 서버단 수정/삭제/Task/AI 경로 방어 락 검증"""
 

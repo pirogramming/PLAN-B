@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from core.choices import (
     ExamPeriodStatus,
@@ -44,6 +45,25 @@ class ExamPeriod(models.Model):
 
     def __str__(self):
         return f"[{self.user}] {self.title} ({self.status})"
+
+    @property
+    def progress_percent(self):
+        """
+        오늘까지의 날짜 경과율 (사이드바 진행률 바 용도).
+        시작 전은 0%, 종료 후는 100%로 고정한다.
+        """
+        total_days = (self.end_date - self.start_date).days
+        if total_days <= 0:
+            return 100
+
+        today = timezone.localdate()
+        if today <= self.start_date:
+            return 0
+        if today >= self.end_date:
+            return 100
+
+        elapsed_days = (today - self.start_date).days
+        return round(elapsed_days / total_days * 100)
 
 
 class AvailableTime(models.Model):
