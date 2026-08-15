@@ -6,6 +6,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -52,13 +53,49 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # 헬퍼 함수: 소유권 검증 + Lazy Check 자동 종료
 # =====================================================================
+def _has_processing_material(period):
+    """해당 시험기간에 PDF 추출(status) 또는 AI 분석(analysis_status)이
+    PROCESSING 중인 StudyMaterial이 하나라도 있는지 확인한다.
+
+    #132의 AI/OCR 경로는 'ExamPeriod lock → PROCESSING 선점 → lock 해제 →
+    외부 OCR/AI 호출 → 결과 저장' 구조라, lock을 해제한 뒤 실제 호출이
+    끝나기 전까지는 ExamPeriod row lock만으로 진행 중 여부를 알 수 없다.
+    그 사이 시험기간을 COMPLETED로 만들어버리면(수동 종료든 lazy check든)
+    "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"이 가능해지므로,
+    종료/자동종료 판정 전에 이 함수로 반드시 확인해야 한다.
+    """
+    return StudyMaterial.objects.filter(
+        exam__exam_period=period,
+    ).filter(
+        Q(status=MaterialStatus.PROCESSING) | Q(analysis_status=MaterialStatus.PROCESSING)
+    ).exists()
+
+
+def _period_ids_with_processing_material(user):
+    """사용자의 시험기간 중 PROCESSING 중인 StudyMaterial을 가진 ExamPeriod id 목록.
+    일괄 Lazy Check(period_list, period_create)에서 이런 시험기간을 자동
+    COMPLETED 대상에서 제외하는 데 쓴다."""
+    return StudyMaterial.objects.filter(
+        exam__exam_period__user=user,
+    ).filter(
+        Q(status=MaterialStatus.PROCESSING) | Q(analysis_status=MaterialStatus.PROCESSING)
+    ).values_list('exam__exam_period_id', flat=True)
+
+
 def _get_owned_exam_period(user, period_id):
     """
     사용자의 시험기간을 조회하고, end_date가 지났는데 여전히 ACTIVE 상태인 경우
     조회 시점에 즉시 COMPLETED 상태로 전환(Lazy Check)합니다.
+
+    단, PDF 추출/AI 분석이 PROCESSING 중인 학습자료가 있으면 이번에는 전환하지
+    않고 ACTIVE로 유지한다 (다음 조회 때 다시 시도).
     """
     period = get_object_or_404(ExamPeriod, id=period_id, user=user)
-    if period.status == ExamPeriodStatus.ACTIVE and period.end_date < timezone.localdate():
+    if (
+        period.status == ExamPeriodStatus.ACTIVE
+        and period.end_date < timezone.localdate()
+        and not _has_processing_material(period)
+    ):
         period.status = ExamPeriodStatus.COMPLETED
         period.save(update_fields=['status'])
     return period
@@ -231,11 +268,15 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
 @require_http_methods(["GET"])
 def period_list(request):
     today = timezone.localdate()
-    # end_date가 지난 ACTIVE 시험기간 일괄 COMPLETED 처리
+    # end_date가 지난 ACTIVE 시험기간 일괄 COMPLETED 처리.
+    # PDF 추출/AI 분석이 PROCESSING 중인 학습자료를 가진 시험기간은 이번엔
+    # 건너뛰고 ACTIVE로 유지한다 (다음 조회 때 다시 시도).
     ExamPeriod.objects.filter(
         user=request.user,
         status=ExamPeriodStatus.ACTIVE,
         end_date__lt=today
+    ).exclude(
+        id__in=_period_ids_with_processing_material(request.user)
     ).update(status=ExamPeriodStatus.COMPLETED)
 
     periods = ExamPeriod.objects.filter(user=request.user)
@@ -261,11 +302,14 @@ def period_list(request):
 def period_create(request):
     # period_list/period_detail을 거치지 않고 바로 생성 화면으로 들어오는 경우에도
     # end_date가 지난 ACTIVE 시험기간이 남아있으면 안 되므로, ACTIVE 존재 여부를
-    # 검사하기 전에 동일한 lazy check를 먼저 수행한다.
+    # 검사하기 전에 동일한 lazy check를 먼저 수행한다. PROCESSING 중인 학습자료가
+    # 있는 시험기간은 건너뛴다 (다음 조회 때 다시 시도).
     ExamPeriod.objects.filter(
         user=request.user,
         status=ExamPeriodStatus.ACTIVE,
         end_date__lt=timezone.localdate(),
+    ).exclude(
+        id__in=_period_ids_with_processing_material(request.user)
     ).update(status=ExamPeriodStatus.COMPLETED)
 
     if request.method == 'POST':
@@ -353,15 +397,34 @@ def period_delete(request, period_id):
 @login_required
 @require_http_methods(["POST"])
 def period_complete(request, period_id):
-    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    
-    if period.status == ExamPeriodStatus.ACTIVE:
+    """
+    시험기간 수동 종료. #132의 AI/OCR 경로('ExamPeriod lock → PROCESSING 선점 →
+    lock 해제 → 외부 호출 → 결과 저장')와 동일한 기준으로 직렬화하기 위해,
+    ExamPeriod를 select_for_update()로 잠근 뒤 PROCESSING 중인 학습자료가 있으면
+    종료를 거부한다. 이렇게 하면 AI/OCR 쪽과 이 뷰 중 어느 쪽이 먼저 락을
+    잡든 같은 규칙으로 순서가 정해진다.
+    """
+    with transaction.atomic():
+        period = get_object_or_404(
+            ExamPeriod.objects.select_for_update(),
+            id=period_id,
+            user=request.user,
+        )
+
+        if period.status != ExamPeriodStatus.ACTIVE:
+            messages.info(request, "이미 완료되거나 보관 처리된 시험기간입니다.")
+            return redirect('exams:period_list')
+
+        if _has_processing_material(period):
+            messages.error(request, "PDF 추출 또는 AI 분석이 진행 중인 학습자료가 있어 시험기간을 종료할 수 없습니다. 처리가 끝난 후 다시 시도해주세요.")
+            return redirect('exams:period_list')
+
         period.status = ExamPeriodStatus.COMPLETED
         period.save(update_fields=['status'])
-        messages.success(request, f"'{period.title}' 시험기간이 완료 처리되었습니다.")
-    else:
-        messages.info(request, "이미 완료되거나 보관 처리된 시험기간입니다.")
-        
+        period_title = period.title
+    # atomic 블록 종료 → ExamPeriod 락 해제
+
+    messages.success(request, f"'{period_title}' 시험기간이 완료 처리되었습니다.")
     return redirect('exams:period_list')
 
 
