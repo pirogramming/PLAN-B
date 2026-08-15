@@ -142,24 +142,41 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
         view_func를 호출하지 않은 채 material_detail로 리다이렉트한다.
         claimed=True면 extra는 view_func에 claim_extra 키워드 인자로
         그대로 전달된다 (예: 분석 run_id).
-
-    이렇게 하면 planner.plan_generate()가 이후 같은 ExamPeriod를 잠갔을 때
-    '이 material은 이미 PROCESSING 상태다'를 보고 계획 생성을 막을 수 있어,
-    'AI 요청 → 락 해제 → 계획 생성 → 뒤늦게 선점/결과 반영'같은 역전이 불가능해진다.
     """
     def decorator(view_func):
         @wraps(view_func)
         def wrapped_view(request, material_id, *args, **kwargs):
             if request.method == 'POST':
                 with transaction.atomic():
-                    material = get_object_or_404(
+                    # 1. exam_period_id만 얻기 위한 조회. 이 시점의 material은
+                    #    claim_func 판정에 절대 쓰지 않는다 - ExamPeriod 락을
+                    #    기다리는 동안 다른 요청(삭제 등)이 먼저 락을 잡고
+                    #    이 material을 지우거나 상태를 바꿀 수 있기 때문이다.
+                    material_ref = get_object_or_404(
                         StudyMaterial.objects.select_related('exam__exam_period'),
                         id=material_id,
                         exam__exam_period__user=request.user
                     )
-                    period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
+                    period = ExamPeriod.objects.select_for_update().get(
+                        id=material_ref.exam.exam_period_id
+                    )
+
                     if DailyPlan.objects.filter(exam_period=period).exists():
                         messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                        return redirect('exams:period_detail', period_id=period.id)
+
+                    # 2. ExamPeriod 락 획득 이후 material을 다시 조회한다.
+                    #    락 대기 중 다른 요청이 먼저 락을 잡고 material을 삭제했거나
+                    #    상태를 바꿨을 수 있으므로, claim_func에는 이 재조회 결과만
+                    #    넘긴다. 삭제된 경우 material_detail로 안내하고 종료한다
+                    #    (500 대신 정상적인 사용자 메시지).
+                    try:
+                        material = StudyMaterial.objects.get(
+                            id=material_id,
+                            exam__exam_period__user=request.user,
+                        )
+                    except StudyMaterial.DoesNotExist:
+                        messages.error(request, "이미 삭제된 학습자료입니다.")
                         return redirect('exams:period_detail', period_id=period.id)
 
                     if claim_func is not None:
@@ -168,9 +185,7 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
                             getattr(messages, level)(request, message)
                             return redirect('exams:material_detail', material_id=material.id)
                         kwargs['claim_extra'] = extra
-                # atomic 블록 종료 → ExamPeriod 락 해제.
-                # 이 시점에 이미 material은 선점되어 있으므로 이후 시작되는
-                # plan_generate()와 안전하게 직렬화된다.
+                # atomic 블록 종료 → ExamPeriod 락 해제
             return view_func(request, material_id, *args, **kwargs)
         return wrapped_view
     return decorator
