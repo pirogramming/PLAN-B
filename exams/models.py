@@ -52,13 +52,13 @@ class ExamPeriod(models.Model):
         오늘까지의 날짜 경과율 (사이드바 진행률 바 용도).
         시작 전은 0%, 종료 후는 100%로 고정한다.
         """
+        today = timezone.localdate()
+        if today < self.start_date:
+            return 0
+
         total_days = (self.end_date - self.start_date).days
         if total_days <= 0:
             return 100
-
-        today = timezone.localdate()
-        if today <= self.start_date:
-            return 0
         if today >= self.end_date:
             return 100
 

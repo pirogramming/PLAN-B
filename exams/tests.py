@@ -2694,6 +2694,17 @@ class ExamPeriodProgressPercentTests(TestCase):
         )
         self.assertEqual(period.progress_percent, 100)
 
+    def test_future_single_day_period_is_zero(self):
+        """total_days<=0 체크가 today<start_date 검사보다 먼저 실행되면,
+        미래의 하루짜리 시험기간도 시작 전인데 100%로 잘못 나온다."""
+        period = ExamPeriod.objects.create(
+            user=self.user, title='미래 하루짜리',
+            start_date=self.today + datetime.timedelta(days=5),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 0)
+
 
 class ExamPeriodLockValidationTests(TestCase):
     """계획이 생성된 시험기간에 대한 서버단 수정/삭제/Task/AI 경로 방어 락 검증"""
