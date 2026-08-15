@@ -91,18 +91,34 @@ def check_exam_period_locked_by_material_id(view_func):
     def wrapped_view(request, material_id, *args, **kwargs):
         if request.method == 'POST':
             with transaction.atomic():
-                material = get_object_or_404(
+                # 1. exam_period_id만 얻기 위한 조회. 이 시점의 status/analysis_status는
+                #    아래 판정에 절대 사용하지 않는다 - ExamPeriod 락을 기다리는 동안
+                #    다른 요청(AI 분석 등)이 먼저 락을 잡고 이 material을 PROCESSING으로
+                #    선점할 수 있기 때문이다.
+                material_ref = get_object_or_404(
                     StudyMaterial.objects.select_related('exam__exam_period'),
                     id=material_id,
                     exam__exam_period__user=request.user
                 )
-                period = ExamPeriod.objects.select_for_update().get(id=material.exam.exam_period_id)
-                
+                period = ExamPeriod.objects.select_for_update().get(
+                    id=material_ref.exam.exam_period_id
+                )
+
                 if DailyPlan.objects.filter(exam_period=period).exists():
                     messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
 
-                # 💡 현재 처리 중인 자료(텍스트 추출 중 또는 AI 분석 중)인 경우 삭제/수정 차단
+                # 2. ExamPeriod 락을 획득한 *이후*에 material을 다시 조회해서
+                #    최신 status/analysis_status로 판정한다. 위 1번에서 락 대기가
+                #    있었다면, 그 사이 다른 요청이 먼저 이 ExamPeriod를 잠그고
+                #    material을 PROCESSING으로 바꿔놓았을 수 있는데, 이 재조회로
+                #    그 변경 사항을 놓치지 않고 반영한다.
+                material = get_object_or_404(
+                    StudyMaterial,
+                    id=material_id,
+                    exam__exam_period__user=request.user,
+                )
+
                 if (
                     material.status == MaterialStatus.PROCESSING
                     or material.analysis_status == MaterialStatus.PROCESSING
@@ -474,65 +490,71 @@ def subject_delete(request, period_id, exam_id):
 # 가능시간 입력 (exams:available_time_update)
 # =====================================================================
 @login_required
-@check_exam_period_locked_by_period_id
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    period = get_object_or_404(
-        ExamPeriod,
-        id=period_id,
-        user=request.user,
-    )
+    """
+    가용시간 수정. 계획(DailyPlan) 존재 여부와 무관하게 항상 허용하되,
+    과거/마감된 날짜 차단은 save_available_time_formset()이 담당한다.
 
-    queryset = AvailableTime.objects.filter(
-        exam_period=period
-    ).order_by("date")
+    예전에는 @check_exam_period_locked_by_period_id를 적용해서 DailyPlan이
+    하나라도 있으면 POST 자체를 막았는데, 이는 "계획 생성 후에도 가용시간
+    수정은 허용한다"는 정책과 충돌해서 제거했다 (관련 논의: PR 리뷰).
 
-    # ================================================================
-    # POST
-    # ================================================================
+    plan_generate()와의 직렬화는 여전히 필요하므로, DailyPlan 존재 여부로
+    차단하는 대신 ExamPeriod row lock만 POST 처리 전체에 건다. 이렇게 하면
+    plan_generate()가 같은 ExamPeriod를 잠그고 finalized_at/가용시간을 읽는
+    동안 이 뷰가 끼어들어 값을 바꾸는 것만 막힌다.
+    """
     if request.method == "POST":
-
-        formset = AvailableTimeFormSet(
-            request.POST,
-            queryset=queryset,
-        )
-
-        next_url = (
-            request.POST.get("next")
-            or request.GET.get("next")
-            or request.META.get("HTTP_REFERER", "")
-        )
-
-        if not formset.is_valid():
-            return render(
-                request,
-                "exams/available_time_form.html",
-                {
-                    "formset": formset,
-                    "period": period,
-                    "next": next_url,
-                },
+        with transaction.atomic():
+            period = get_object_or_404(
+                ExamPeriod.objects.select_for_update(),
+                id=period_id,
+                user=request.user,
             )
 
-        try:
-            save_available_time_formset(formset, exam_period=period)
-        except AvailableTimeEditRejected as exc:
-            for msg in blocked_date_messages(exc.blocked_dates):
-                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
-                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
-                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                formset._non_form_errors.append(ValidationError(msg))
-                messages.error(request, msg)
+            queryset = AvailableTime.objects.filter(
+                exam_period=period
+            ).order_by("date")
 
-            return render(
-                request,
-                "exams/available_time_form.html",
-                {
-                    "formset": formset,
-                    "period": period,
-                    "next": next_url,
-                },
+            formset = AvailableTimeFormSet(
+                request.POST,
+                queryset=queryset,
             )
+
+            next_url = (
+                request.POST.get("next")
+                or request.GET.get("next")
+                or request.META.get("HTTP_REFERER", "")
+            )
+
+            if not formset.is_valid():
+                return render(
+                    request,
+                    "exams/available_time_form.html",
+                    {
+                        "formset": formset,
+                        "period": period,
+                        "next": next_url,
+                    },
+                )
+
+            try:
+                save_available_time_formset(formset, exam_period=period)
+            except AvailableTimeEditRejected as exc:
+                for msg in blocked_date_messages(exc.blocked_dates):
+                    formset._non_form_errors.append(ValidationError(msg))
+                    messages.error(request, msg)
+                return render(
+                    request,
+                    "exams/available_time_form.html",
+                    {
+                        "formset": formset,
+                        "period": period,
+                        "next": next_url,
+                    },
+                )
+        # atomic 블록 종료 → ExamPeriod 락 해제
 
         messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
 
@@ -548,14 +570,10 @@ def available_time_update(request, period_id):
     # ================================================================
     # GET
     # ================================================================
-    formset = AvailableTimeFormSet(
-        queryset=queryset,
-    )
-
-    next_url = (
-        request.GET.get("next")
-        or request.META.get("HTTP_REFERER", "")
-    )
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    queryset = AvailableTime.objects.filter(exam_period=period).order_by("date")
+    formset = AvailableTimeFormSet(queryset=queryset)
+    next_url = request.GET.get("next") or request.META.get("HTTP_REFERER", "")
 
     return render(
         request,
