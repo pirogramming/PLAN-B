@@ -27,9 +27,13 @@
           <h1>{{ period.title }}</h1>
           <div class="sub">{{ period.start_date|date:"n월 j일" }} ~ {{ period.end_date|date:"n월 j일" }}</div>
         </div>
-        <a class="btn btn-ghost ml-auto" href="#" style="font-weight:400">
-          시험기간 종료
-        </a>
+        <form class="ml-auto" method="post" action="{% url 'exams:period_complete' period.id %}"
+              onsubmit="return confirm('시험기간을 종료할까요? 종료 후에는 수정할 수 없습니다.');">
+          {% csrf_token %}
+          <button class="btn btn-ghost" type="submit" style="font-weight:400">
+            시험기간 종료
+          </button>
+        </form>
       </div>
 
       <div class="card" style="margin-bottom:22px">
