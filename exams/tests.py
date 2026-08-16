@@ -3560,3 +3560,179 @@ class ConcurrencyDefenseAndRaceConditionTests(TestCase):
         self.assertNotEqual(self.material.analysis_status, MaterialStatus.PROCESSING)
         messages_list = list(response.context['messages'])
         self.assertTrue(any("텍스트 추출이 완료된 자료만" in str(m) or "추출이 진행 중" in str(m) for m in messages_list))
+
+from exams.views import StaleExtractionRunError, STALE_EXTRACTION_TIMEOUT_SECONDS
+
+
+class MaterialExtractStaleTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='u5@example.com', email='u5@example.com', password='pass1234!'
+        )
+        self.client.force_login(self.user)
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title='기간',
+            start_date=datetime.date(2026, 10, 1), end_date=datetime.date(2026, 10, 10),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name='과목',
+            exam_date=datetime.date(2026, 10, 5),
+        )
+
+    def _make_pdf_material(self, **overrides):
+        dummy_pdf = SimpleUploadedFile(
+            "dummy.pdf", b"%PDF-1.4 dummy content", content_type="application/pdf"
+        )
+        defaults = dict(
+            exam=self.exam, title='자료', material_type=MaterialType.PDF,
+            file=dummy_pdf, status=MaterialStatus.PENDING,
+        )
+        defaults.update(overrides)
+        return StudyMaterial.objects.create(**defaults)
+
+    # -----------------------------------------------------------------
+    # 1. 예상 못 한 Exception -> FAILED
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_unexpected_exception_marks_failed(self, mock_extract):
+        mock_extract.side_effect = ValueError("예상 못 한 내부 오류")
+        material = self._make_pdf_material()
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.FAILED)
+        self.assertIn("알 수 없는 오류", material.error_message)
+
+    # -----------------------------------------------------------------
+    # 2. 5분 미만 PROCESSING -> 중복 추출 거부
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_recent_processing_is_rejected(self, mock_extract):
+        mock_extract.return_value = "새 텍스트"
+        old_run_id = uuid.uuid4()
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now(),
+            extraction_run_id=old_run_id,
+        )
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        # claim 자체가 거부되어 PROCESSING/run_id가 그대로 유지되어야 함
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
+        self.assertEqual(material.extraction_run_id, old_run_id)
+        mock_extract.assert_not_called()
+
+    # -----------------------------------------------------------------
+    # 3. 5분 초과 PROCESSING -> 재선점 허용
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_stale_processing_over_timeout_is_reclaimed(self, mock_extract):
+        mock_extract.return_value = "재선점 후 추출된 텍스트"
+        old_run_id = uuid.uuid4()
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now() - datetime.timedelta(
+                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
+            ),
+            extraction_run_id=old_run_id,
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "재선점 후 추출된 텍스트")
+        self.assertNotEqual(material.extraction_run_id, old_run_id)
+
+    # -----------------------------------------------------------------
+    # 4. extraction_started_at=NULL 기존 PROCESSING -> 재선점 허용
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_null_extraction_started_at_is_treated_as_stale(self, mock_extract):
+        mock_extract.return_value = "NULL 좀비 구제 후 텍스트"
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=None,
+            extraction_run_id=None,
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "NULL 좀비 구제 후 텍스트")
+
+    # -----------------------------------------------------------------
+    # 5. stale 재선점 후 이전 실행이 최신 실행 결과를 덮지 못함
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_stale_reclaim_prevents_old_run_from_overwriting_new_result(self, mock_extract):
+        mock_extract.return_value = "새 실행(B)의 결과"
+        old_run_id = uuid.uuid4()
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now() - datetime.timedelta(
+                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
+            ),
+            extraction_run_id=old_run_id,
+        )
+
+        # B: 좀비 상태를 재선점해서 정상적으로 추출을 완료시킨다.
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+        new_run_id = material.extraction_run_id
+
+        self.assertNotEqual(old_run_id, new_run_id)
+        self.assertEqual(material.extracted_text, "새 실행(B)의 결과")
+
+        # A: 죽지 않고 뒤늦게 살아 돌아와 old_run_id로 저장을 시도한다고 가정.
+        # material_extract의 _save_if_owner와 동일한 조건부 UPDATE를 직접 재현해서
+        # A의 저장이 실제로 무시되는지 검증한다.
+        updated = StudyMaterial.objects.filter(
+            pk=material.pk, extraction_run_id=old_run_id,
+        ).update(extracted_text="죽지 않고 뒤늦게 돌아온 A의 낡은 결과")
+
+        self.assertEqual(updated, 0)  # A의 저장은 반영되지 않아야 함
+
+        material.refresh_from_db()
+        self.assertEqual(material.extracted_text, "새 실행(B)의 결과")  # B의 결과가 유지
+
+    # -----------------------------------------------------------------
+    # 6. material_analysis_status 응답의 extraction_is_stale
+    # -----------------------------------------------------------------
+    def test_analysis_status_reports_extraction_is_stale_when_timed_out(self):
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now() - datetime.timedelta(
+                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
+            ),
+            extraction_run_id=uuid.uuid4(),
+        )
+
+        response = self.client.get(
+            reverse('exams:material_analysis_status', args=[material.id])
+        )
+        data = response.json()
+
+        self.assertTrue(data["extraction_is_stale"])
+        self.assertEqual(data["stage"], "EXTRACTING")
+
+    def test_analysis_status_reports_extraction_not_stale_when_recent(self):
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now(),
+            extraction_run_id=uuid.uuid4(),
+        )
+
+        response = self.client.get(
+            reverse('exams:material_analysis_status', args=[material.id])
+        )
+        data = response.json()
+
+        self.assertFalse(data["extraction_is_stale"])

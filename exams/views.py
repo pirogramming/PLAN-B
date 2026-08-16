@@ -1,4 +1,5 @@
 import datetime
+import uuid
 from functools import wraps
 import logging
 
@@ -775,7 +776,10 @@ def material_detail(request, material_id):
 # =====================================================================
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
-STALE_EXTRACTION_TIMEOUT_SECONDS = 300  # 5분, AI 분석 쪽(PROCESSING_TIMEOUT_SECONDS)과 동일 기준
+class StaleExtractionRunError(Exception):
+    """이 실행(extraction_run_id)이 결과를 저장하기 전에 이미 다른(더 최신) 실행이 이어받음."""
+    pass
+STALE_EXTRACTION_TIMEOUT_SECONDS = 200
 
 
 def _claim_material_for_extraction(material):
@@ -786,8 +790,10 @@ def _claim_material_for_extraction(material):
 
     now = timezone.now()
     stale_cutoff = now - timezone.timedelta(seconds=STALE_EXTRACTION_TIMEOUT_SECONDS)
+    run_id = uuid.uuid4()
 
-    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(
+        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
     ).filter(
         Q(status__in=[MaterialStatus.PENDING, MaterialStatus.FAILED])
         | Q(status=MaterialStatus.PROCESSING, extraction_started_at__lt=stale_cutoff)
@@ -796,6 +802,7 @@ def _claim_material_for_extraction(material):
         status=MaterialStatus.PROCESSING,
         error_message=None,
         extraction_started_at=now,
+        extraction_run_id=run_id,
     )
 
     if not updated:
@@ -806,7 +813,7 @@ def _claim_material_for_extraction(material):
             return False, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.", "error", None
         return False, "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.", "error", None
 
-    return True, None, None, None
+    return True, None, None, run_id
 
 @login_required
 @check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
@@ -815,50 +822,76 @@ def material_extract(request, material_id, claim_extra=None):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
+    run_id = claim_extra
     previous_extracted_text = material.extracted_text
-    # material_type / file / status 선점은 claim_func가 락 안에서 이미 끝냈으므로
-    # 여기서는 바로 추출을 진행한다.
+
+    def _save_if_owner(**fields):
+        """extraction_run_id가 여전히 이 실행의 것일 때만 저장한다.
+        다르면 이미 다른(더 최신) 실행이 이어받은 것이므로 StaleExtractionRunError."""
+        updated = StudyMaterial.objects.filter(
+            pk=material.pk, extraction_run_id=run_id,
+        ).update(**fields)
+        if not updated:
+            raise StaleExtractionRunError(
+                f"extraction_run_id 불일치로 저장 무시 (material_id={material_id})"
+            )
 
     try:
         extracted = extract_text_from_pdf(material.file)
     except PdfExtractionError as e:
-        material.status = MaterialStatus.FAILED
-        material.error_message = str(e)
-        material.save(update_fields=['status', 'error_message'])
+        try:
+            _save_if_owner(status=MaterialStatus.FAILED, error_message=str(e))
+        except StaleExtractionRunError:
+            logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+            messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+            return redirect('exams:material_detail', material_id=material.id)
         messages.error(request, "PDF 텍스트 추출에 실패했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
     except Exception:
         logger.exception(f"PDF 추출 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
-        material.status = MaterialStatus.FAILED
-        material.error_message = "알 수 없는 오류로 추출에 실패했습니다."
-        material.save(update_fields=['status', 'error_message'])
+        try:
+            _save_if_owner(status=MaterialStatus.FAILED, error_message="알 수 없는 오류로 추출에 실패했습니다.")
+        except StaleExtractionRunError:
+            logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+            messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+            return redirect('exams:material_detail', material_id=material.id)
         messages.error(request, "PDF 추출 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
 
     if not extracted:
-        material.status = MaterialStatus.FAILED
-        material.error_message = "텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다."
-        material.save(update_fields=['status', 'error_message'])
+        try:
+            _save_if_owner(
+                status=MaterialStatus.FAILED,
+                error_message="텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다.",
+            )
+        except StaleExtractionRunError:
+            logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+            messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+            return redirect('exams:material_detail', material_id=material.id)
         messages.warning(request, "텍스트를 추출하지 못했습니다. 스캔 이미지 PDF일 수 있어요.")
         return redirect('exams:material_detail', material_id=material.id)
 
-    material.status = MaterialStatus.COMPLETED
-    material.extracted_text = extracted
-    material.error_message = None
-
+    update_fields = {
+        'status': MaterialStatus.COMPLETED,
+        'extracted_text': extracted,
+        'error_message': None,
+    }
     if extracted != previous_extracted_text:
-        material.analysis_status = MaterialStatus.PENDING
-        material.analysis_error_message = None
-        material.analysis_retry_count = 0
+        update_fields.update(
+            analysis_status=MaterialStatus.PENDING,
+            analysis_error_message=None,
+            analysis_retry_count=0,
+        )
 
-    material.save(update_fields=[
-        'status', 'extracted_text', 'error_message',
-        'analysis_status', 'analysis_error_message', 'analysis_retry_count',
-    ])
+    try:
+        _save_if_owner(**update_fields)
+    except StaleExtractionRunError:
+        logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
+        return redirect('exams:material_detail', material_id=material.id)
+
     messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
     return redirect('exams:material_detail', material_id=material.id)
-
-
 # =====================================================================
 # 자료 삭제 (exams:material_delete) 
 # =====================================================================
