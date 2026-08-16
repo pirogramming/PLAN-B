@@ -163,6 +163,20 @@ class RecoveryPlanItem(models.Model):
     )
     reason = models.TextField(null=True, blank=True)
     remaining_minutes = models.PositiveIntegerField(default=0)
+
+    source_daily_plan_item = models.ForeignKey(
+        'DailyPlanItem',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='recovery_source_items',
+        help_text=(
+            "이 복구 항목이 원래 있던 DailyPlanItem. "
+            "None이면 실패한 작업을 새로 배치하는 것이고, "
+            "값이 있으면 학습 순서 보존을 위해 기존에 배치돼 있던 "
+            "미래 작업을 이동시키는 것이다."
+        ),
+    )
     
     def __str__(self):
         return f'{self.recovery_plan} - {self.study_task} ({self.action_type})'
