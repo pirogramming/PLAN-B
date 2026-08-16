@@ -147,3 +147,22 @@ class SocialAccountAdapterTests(TestCase):
         user = adapter.populate_user(self.request, sociallogin, data)
 
         self.assertEqual(user.nickname, '네이버유저')
+
+    def test_populate_user_falls_back_to_full_name_with_space(self):
+        """extra_data에 name/nickname이 둘 다 없으면 first_name+last_name을
+        공백으로 이어붙여야 한다 (공백 없이 붙던 문제 수정)."""
+        adapter = CustomSocialAccountAdapter()
+        sociallogin = SocialLogin(
+            account=SocialAccount(provider='google', uid='12345', extra_data={})
+        )
+        user = adapter.new_user(self.request, sociallogin)
+        sociallogin.user = user
+
+        data = {
+            'email': 'googleuser@example.com',
+            'first_name': 'John',
+            'last_name': 'Doe',
+        }
+        user = adapter.populate_user(self.request, sociallogin, data)
+
+        self.assertEqual(user.nickname, 'John Doe')

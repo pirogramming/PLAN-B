@@ -19,7 +19,7 @@ class CustomSocialAccountAdapter(DefaultSocialAccountAdapter):
         # 비어 있는 채로 저장되어 화면에 이메일이 그대로 노출되는 걸 막을 수 있다.
         if not user.nickname:
             extra_data = sociallogin.account.extra_data or {}
-            full_name = f"{user.first_name}{user.last_name}".strip()
+            full_name = " ".join(part for part in (user.first_name, user.last_name) if part)
             user.nickname = (
                 extra_data.get("name")
                 or extra_data.get("nickname")
