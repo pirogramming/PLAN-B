@@ -145,10 +145,33 @@
 
   var fileInput = document.getElementById('{{ form.file.id_for_label }}');
   var uploadText = document.querySelector('.material-upload-text');
+  var uploadBox = document.querySelector('.material-upload-box');
+
+  function setFileName() {
+    if (fileInput.files[0] && uploadText) {
+      uploadText.textContent = fileInput.files[0].name;
+    }
+  }
+
   if (fileInput) {
-    fileInput.addEventListener('change', function () {
-      if (fileInput.files[0] && uploadText) {
-        uploadText.textContent = fileInput.files[0].name;
+    fileInput.addEventListener('change', setFileName);
+  }
+
+  if (uploadBox && fileInput) {
+    uploadBox.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      uploadBox.classList.add('drag-over');
+    });
+    uploadBox.addEventListener('dragleave', function () {
+      uploadBox.classList.remove('drag-over');
+    });
+    uploadBox.addEventListener('drop', function (e) {
+      e.preventDefault();
+      uploadBox.classList.remove('drag-over');
+      var dropped = e.dataTransfer.files;
+      if (dropped.length > 0) {
+        fileInput.files = dropped;
+        setFileName();
       }
     });
   }

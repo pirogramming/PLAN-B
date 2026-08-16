@@ -301,6 +301,10 @@
   background: var(--neutral2);
   cursor: pointer;
 }
+.material-upload-box.drag-over {
+  border-color: var(--brand4);
+  background: var(--brand1);
+}
 .material-upload-icon {
   font-size: 30px;
   color: var(--neutral6);
