@@ -28,7 +28,7 @@ steps:
     secretEnv: ["DATABASE_URL", "SECRET_KEY"]
 
   # 4. Cloud Run 배포
-  - name: "gcr.io/google-cloud-sdk/slim"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     entrypoint: gcloud
     args:
       - "run"
