@@ -15,6 +15,8 @@ from exams.models import AvailableTime
 from planner.models import RecoveryPlan, RecoveryPlanItem, DailyPlanItem, DailyPlan
 from planner.services.scheduler import (
     TaskInput, AvailableTimeInput, allocate_tasks_to_days,
+    IMPORTANCE_PRIORITY, DEPTH_PRIORITY,
+    DEFAULT_IMPORTANCE_PRIORITY, DEFAULT_DEPTH_PRIORITY,
 )
 from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
 
@@ -51,11 +53,15 @@ def _remaining_minutes(item) -> int:
     return round_up_to_five(estimated_max * remaining_ratio)
 
 
-def _future_available_capacity(exam_period, from_date) -> list[AvailableTimeInput]:
+def _future_available_capacity(exam_period, from_date, exclude_item_ids=None) -> list[AvailableTimeInput]:
     """
     복구 작업을 배치할 수 있는 날짜별 순수 잔여 가용시간.
     시작일은 항상 '내일'로 고정한다 (from_date가 과거여도 오늘 이전으로는
     절대 배치하지 않기 위함 — 늦게 마감해도 복구는 항상 내일부터 시작).
+
+    exclude_item_ids로 넘어온 DailyPlanItem은 "점유 중"에서 제외한다.
+    학습 순서 보존을 위해 재배치되는 후속 작업들은 원래 자리를 떠나므로,
+    그 자리가 차지하던 시간을 실제 사용 가능한 용량으로 돌려줘야 한다.
     """
     from datetime import timedelta
     start_date = max(
@@ -66,11 +72,14 @@ def _future_available_capacity(exam_period, from_date) -> list[AvailableTimeInpu
     available_times = AvailableTime.objects.filter(
         exam_period=exam_period, date__gte=start_date
     )
+    occupied_qs = DailyPlanItem.objects.filter(
+        daily_plan__exam_period=exam_period,
+        daily_plan__date__gte=start_date,
+    )
+    if exclude_item_ids:
+        occupied_qs = occupied_qs.exclude(id__in=exclude_item_ids)
     occupied = dict(
-        DailyPlanItem.objects.filter(
-            daily_plan__exam_period=exam_period,
-            daily_plan__date__gte=start_date,
-        )
+        occupied_qs
         .values('daily_plan__date')
         .annotate(total=Sum('planned_minutes'))
         .values_list('daily_plan__date', 'total')
@@ -177,6 +186,7 @@ def _create_recovery_plan(
     items_with_remaining,
     allocation_result,
     excluded_items=None,
+    carry_along_ids=None,
 ):
     """
     이미 계산된 allocation_result를 그대로 저장만 한다 (재배치하지 않음).
@@ -194,11 +204,13 @@ def _create_recovery_plan(
     )
     recovery_plan.full_clean()
     
+    carry_along_ids = carry_along_ids or set()
     items_by_id = {item.id: (item, remaining) for item, remaining in items_with_remaining}
 
     recovery_items = []
     for alloc in allocation_result['allocations']:
         item, remaining = items_by_id[alloc['task_id']]
+        is_carry_along = item.id in carry_along_ids
         recovery_items.append(RecoveryPlanItem(
             recovery_plan=recovery_plan,
             study_task=item.study_task,
@@ -206,11 +218,17 @@ def _create_recovery_plan(
             changed_date=alloc['date'],
             action_type=RecoveryActionType.RESCHEDULE,
             remaining_minutes=remaining,
-            reason="재배치: 가용시간 내 재계산",
+            source_daily_plan_item=item if is_carry_along else None,
+            is_carry_along=is_carry_along,
+            reason=(
+                "학습 순서 유지를 위해 함께 이동"
+                if is_carry_along else "재배치: 가용시간 내 재계산"
+            ),
         ))
 
     for item in (excluded_items or []):
         remaining = getattr(item, '_recovery_remaining_minutes', 0)
+        is_carry_along = item.id in carry_along_ids
         recovery_items.append(RecoveryPlanItem(
             recovery_plan=recovery_plan,
             study_task=item.study_task,
@@ -218,11 +236,204 @@ def _create_recovery_plan(
             changed_date=None,
             action_type=RecoveryActionType.EXCLUDE,
             remaining_minutes=remaining,
-            reason="핵심 집중형: 우선순위 낮은 작업 단계적 제외",
+            source_daily_plan_item=item if is_carry_along else None,
+            is_carry_along=is_carry_along,
+            reason=(
+                "학습 순서 보존 대상이었으나 핵심 집중형에서 함께 제외됨"
+                if is_carry_along else
+                "핵심 집중형: 우선순위 낮은 작업 단계적 제외"
+            ),
         ))
 
     RecoveryPlanItem.objects.bulk_create(recovery_items)
     return recovery_plan
+
+
+def _get_carry_along_items(daily_plan, unfinished_items):
+    """
+    미완료 작업과 같은 exam 안에서, order가 더 큰 미래 작업들을 찾는다.
+    (min 기준 — 같은 exam에 미완료 작업이 여러 개면, 그중 가장 앞선
+    order를 기준으로 잡아야 뒤에 있는 미완료 작업들도 후속 대상에서
+    안 빠진다.)
+
+    이미 진행 기록(ProgressLog)이 있거나 마감된 계획에 속한 항목은
+    실제 학습 기록이므로 건드리지 않는다.
+    """
+    first_unfinished_order_by_exam = {}
+    exam_ids = set()
+    for item in unfinished_items:
+        exam_id = item.study_task.exam_id
+        exam_ids.add(exam_id)
+        order = item.study_task.order
+        current = first_unfinished_order_by_exam.get(exam_id)
+        if current is None or order < current:
+            first_unfinished_order_by_exam[exam_id] = order
+
+    if not exam_ids:
+        return []
+
+    candidates = (
+        DailyPlanItem.objects
+        .filter(
+            daily_plan__exam_period=daily_plan.exam_period,
+            daily_plan__date__gt=daily_plan.date,
+            daily_plan__finalized_at__isnull=True,
+            study_task__exam_id__in=exam_ids,
+            progress_log__isnull=True,
+        )
+        .select_related('study_task__exam', 'daily_plan')
+    )
+
+    return [
+        item for item in candidates
+        if item.study_task.order > first_unfinished_order_by_exam[item.study_task.exam_id]
+    ]
+
+
+def _allocate_with_order_preserved(exam_period, from_date, items_with_remaining, exclude_item_ids=None):
+    """
+    같은 exam에 속한 작업들은 study_task.order 오름차순으로만 배치되도록
+    보장한다 (한 과목 안에서 앞 단원이 뒤 단원보다 항상 먼저 오거나 같은
+    날짜). 서로 다른 exam끼리는 순서를 강제하지 않지만, 같은 가용시간
+    풀(capacity)을 공유해서 배치한다.
+
+    일반 스케줄러(allocate_tasks_to_days)는 order를 최종 타이브레이커로만
+    쓰기 때문에 순서 역전이 가능해서, 이 함수는 그와 별개로 recovery
+    전용으로 순서를 강제한다.
+    """
+    capacity = {
+        c.date: c.available_minutes
+        for c in _future_available_capacity(exam_period, from_date, exclude_item_ids)
+    }
+    sorted_dates = sorted(capacity.keys())
+    consumed = defaultdict(int)
+
+    by_exam = defaultdict(list)
+    for item, remaining in items_with_remaining:
+        by_exam[item.study_task.exam_id].append((item, remaining))
+    for exam_id in by_exam:
+        by_exam[exam_id].sort(key=lambda pair: pair[0].study_task.order)
+
+    pointer = {exam_id: 0 for exam_id in by_exam}
+    cursor_date_by_exam = {}
+    allocations = {}
+    remaining_count = sum(len(v) for v in by_exam.values())
+
+    while remaining_count > 0:
+        candidates = []
+        for exam_id, queue in by_exam.items():
+            idx = pointer[exam_id]
+            if idx < len(queue):
+                candidates.append((exam_id, queue[idx]))
+
+        if not candidates:
+            break
+
+        candidates.sort(
+            key=lambda c: (
+                c[1][0].study_task.exam.exam_date,
+                IMPORTANCE_PRIORITY.get(
+                    c[1][0].study_task.importance, DEFAULT_IMPORTANCE_PRIORITY
+                ),
+                DEPTH_PRIORITY.get(
+                    c[1][0].study_task.depth, DEFAULT_DEPTH_PRIORITY
+                ),
+                -c[1][1],
+                c[1][0].study_task.order,
+                c[1][0].id,
+            )
+        )
+        exam_id, (item, remaining) = candidates[0]
+
+        cursor = cursor_date_by_exam.get(exam_id)
+        exam_date = item.study_task.exam.exam_date
+
+        placed_date = None
+        for day in sorted_dates:
+            if cursor is not None and day < cursor:
+                continue
+            if day >= exam_date:
+                continue
+            free = capacity[day] - consumed[day]
+            if free < remaining:
+                continue
+            placed_date = day
+            break
+
+        if placed_date is None:
+            return {"success": False, "allocations": {}}
+
+        allocations[item.id] = placed_date
+        consumed[placed_date] += remaining
+        cursor_date_by_exam[exam_id] = placed_date
+        pointer[exam_id] += 1
+        remaining_count -= 1
+
+    return {"success": True, "allocations": allocations}
+
+
+def _try_core_focus_exclusion_ordered(exam_period, from_date, items_with_remaining, carry_along_ids):
+    """
+    _try_core_focus_exclusion()과 동일한 EXCLUSION_TIERS 기반 단계적 제외
+    로직을 쓰되, 배치 시도만 _allocate_with_order_preserved()로 바꾼
+    버전. 후속 작업(carry-along)이 있을 때만 이 함수를 쓴다.
+
+    RESCHEDULE되는 carry-along뿐 아니라 EXCLUDE되는 carry-along도
+    apply 시 원래 자리에서 실제로 삭제되므로, 원래 점유량은 둘 다
+    용량 계산에서 반환해야 한다 (제외됐다고 그 자리를 여전히 점유
+    중이라고 계산하면, 실제로는 가능한 복구안도 가용시간 부족으로
+    잘못 실패한다).
+    """
+    remaining_items = list(items_with_remaining)
+    excluded_items = []
+
+    for item, remaining in remaining_items:
+        item._recovery_remaining_minutes = remaining
+
+    for tier_importance, tier_depth in EXCLUSION_TIERS:
+        while True:
+            candidates = [
+                (item, remaining) for item, remaining in remaining_items
+                if item.study_task.importance == tier_importance
+                and item.study_task.depth == tier_depth
+            ]
+            if not candidates:
+                break
+
+            candidates.sort(key=lambda pair: _exclusion_sort_key(pair[0]))
+            to_exclude = candidates[0]
+            remaining_items.remove(to_exclude)
+            excluded_items.append(to_exclude[0])
+
+            if not remaining_items:
+                return None
+
+            # 남아서 재배치될 carry-along과, 제외돼서 실제로 삭제될
+            # carry-along 둘 다 원래 점유량을 반환 대상으로 넘긴다.
+            all_freed_carry_along_ids = {
+                item.id for item, _ in remaining_items if item.id in carry_along_ids
+            } | {
+                item.id for item in excluded_items if item.id in carry_along_ids
+            }
+            result = _allocate_with_order_preserved(
+                exam_period, from_date, remaining_items,
+                exclude_item_ids=all_freed_carry_along_ids,
+            )
+            if result['success']:
+                allocation_result = {
+                    'allocations': [
+                        {'task_id': item.id, 'date': result['allocations'][item.id]}
+                        for item, _ in remaining_items
+                    ],
+                    'unallocated_tasks': [],
+                }
+                return {
+                    'remaining': remaining_items,
+                    'excluded': excluded_items,
+                    'allocation_result': allocation_result,
+                }
+
+    return None
 
 
 def generate_recovery_options(daily_plan, unfinished_items) -> dict:
@@ -230,29 +441,67 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
     from_date = daily_plan.date
     recovery_group_id = uuid.uuid4()
 
-    items_with_remaining = [
-        (item, _remaining_minutes(item)) for item in unfinished_items
-    ]
+    carry_along_items = _get_carry_along_items(daily_plan, unfinished_items)
+    carry_along_ids = {item.id for item in carry_along_items}
 
-    maintain_volume_allocation = _try_allocate(
-        exam_period, from_date, items_with_remaining
-    )
+    if carry_along_items:
+        items_with_remaining = (
+            [(item, _remaining_minutes(item)) for item in unfinished_items]
+            + [(item, item.planned_minutes) for item in carry_along_items]
+        )
+    else:
+        items_with_remaining = [
+            (item, _remaining_minutes(item)) for item in unfinished_items
+        ]
+
     maintain_volume = None
     maintain_volume_failure_reason = None
-    if maintain_volume_allocation['unallocated_tasks']:
-        maintain_volume_failure_reason = "남은 가용시간이 부족합니다."
-    else:
-        maintain_volume = _create_recovery_plan(
-            source_daily_plan=daily_plan,
-            recovery_type=RecoveryType.MAINTAIN_VOLUME,
-            recovery_group_id=recovery_group_id,
-            items_with_remaining=items_with_remaining,
-            allocation_result=maintain_volume_allocation,
+    if carry_along_items:
+        ordered_result = _allocate_with_order_preserved(
+            exam_period, from_date, items_with_remaining,
+            exclude_item_ids=carry_along_ids,
         )
+        if not ordered_result["success"]:
+            maintain_volume_failure_reason = "학습 순서를 지키면서 배치할 가용시간이 부족합니다."
+        else:
+            allocation_result = {
+                'allocations': [
+                    {'task_id': item.id, 'date': ordered_result['allocations'][item.id]}
+                    for item, _ in items_with_remaining
+                ],
+                'unallocated_tasks': [],
+            }
+            maintain_volume = _create_recovery_plan(
+                source_daily_plan=daily_plan,
+                recovery_type=RecoveryType.MAINTAIN_VOLUME,
+                recovery_group_id=recovery_group_id,
+                items_with_remaining=items_with_remaining,
+                allocation_result=allocation_result,
+                carry_along_ids=carry_along_ids,
+            )
+    else:
+        maintain_volume_allocation = _try_allocate(
+            exam_period, from_date, items_with_remaining
+        )
+        if maintain_volume_allocation['unallocated_tasks']:
+            maintain_volume_failure_reason = "남은 가용시간이 부족합니다."
+        else:
+            maintain_volume = _create_recovery_plan(
+                source_daily_plan=daily_plan,
+                recovery_type=RecoveryType.MAINTAIN_VOLUME,
+                recovery_group_id=recovery_group_id,
+                items_with_remaining=items_with_remaining,
+                allocation_result=maintain_volume_allocation,
+            )
 
-    core_focus_result = _try_core_focus_exclusion(
-        exam_period, from_date, items_with_remaining
-    )
+    if carry_along_items:
+        core_focus_result = _try_core_focus_exclusion_ordered(
+            exam_period, from_date, items_with_remaining, carry_along_ids
+        )
+    else:
+        core_focus_result = _try_core_focus_exclusion(
+            exam_period, from_date, items_with_remaining
+        )
 
     core_focus = None
     core_focus_failure_reason = None
@@ -264,6 +513,7 @@ def generate_recovery_options(daily_plan, unfinished_items) -> dict:
             items_with_remaining=core_focus_result['remaining'],
             allocation_result=core_focus_result['allocation_result'],
             excluded_items=core_focus_result['excluded'],
+            carry_along_ids=carry_along_ids if carry_along_items else None,
         )
     else:
         core_focus_failure_reason = "제외 가능한 작업을 줄여도 배치할 수 없습니다."
@@ -384,7 +634,7 @@ def _get_or_create_daily_plan(exam_period, date):
     return daily_plan
 
 
-def _validate_not_stale(exam_period, items_by_date):
+def _validate_not_stale(exam_period, items_by_date, exclude_item_ids=None):
     """
     복구안 계산 이후 가용시간/기존 일정/시험일/날짜 경과 여부가 바뀌었을
     수 있으므로 적용 직전에 changed_date별로 다시 검증한다.
@@ -418,10 +668,13 @@ def _validate_not_stale(exam_period, items_by_date):
                 f"{changed_date}의 가용시간이 더 이상 존재하지 않습니다."
             )
 
-        occupied = DailyPlanItem.objects.filter(
+        occupied_qs = DailyPlanItem.objects.filter(
             daily_plan__exam_period=exam_period,
             daily_plan__date=changed_date,
-        ).aggregate(total=Sum('planned_minutes'))['total'] or 0
+        )
+        if exclude_item_ids:
+            occupied_qs = occupied_qs.exclude(id__in=exclude_item_ids)
+        occupied = occupied_qs.aggregate(total=Sum('planned_minutes'))['total'] or 0
 
         needed = sum(item.remaining_minutes for item in date_items)
         remaining_capacity = available_time.available_minutes - occupied
@@ -482,6 +735,12 @@ def apply_recovery_plan(recovery_plan) -> dict:
             if item.action_type == RecoveryActionType.RESCHEDULE
         ]
 
+        excluded_carry_along_items = [
+            item for item in items
+            if item.action_type == RecoveryActionType.EXCLUDE
+            and item.is_carry_along
+        ]
+
         items_by_date = defaultdict(list)
         for item in reschedule_items:
             if item.changed_date is None:
@@ -493,12 +752,71 @@ def apply_recovery_plan(recovery_plan) -> dict:
                     f"{item.study_task}의 remaining_minutes가 {item.remaining_minutes}로 "
                     f"유효하지 않습니다. 복구안 생성 로직을 확인해야 합니다."
                 )
+            if item.is_carry_along:
+                # carry-along인데 source가 SET_NULL로 이미 None이 됐다면
+                # 원본이 삭제된 것이므로, "원래 실패 작업이었던 것처럼"
+                # 조용히 새로 만들면 안 되고 명시적으로 거부해야 한다.
+                if item.source_daily_plan_item_id is None:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 삭제되어 복구안을 "
+                        f"다시 생성해야 합니다."
+                    )
+                try:
+                    source_item = DailyPlanItem.objects.select_for_update().get(
+                        id=item.source_daily_plan_item_id
+                    )
+                except DailyPlanItem.DoesNotExist:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 더 이상 존재하지 않습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
+                if source_item.study_task_id != item.study_task_id:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획 내용이 변경되었습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
+                if source_item.daily_plan.finalized_at is not None:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 이미 마감되었습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
+                if hasattr(source_item, 'progress_log') and source_item.progress_log is not None:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}에 이미 진행 기록이 생겼습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
+                if source_item.daily_plan.date != item.original_date:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 다른 복구안에 의해 "
+                        f"이미 이동되었습니다. 복구안을 다시 생성해주세요."
+                    )
+                if source_item.planned_minutes != item.remaining_minutes:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획 분량이 변경되었습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
             items_by_date[item.changed_date].append(item)
 
-        _validate_not_stale(target.exam_period, items_by_date)
+        moving_source_ids = {
+            item.source_daily_plan_item_id for item in reschedule_items
+            if item.source_daily_plan_item_id is not None
+        } | {
+            item.source_daily_plan_item_id for item in excluded_carry_along_items
+            if item.source_daily_plan_item_id is not None
+        }
+        _validate_not_stale(target.exam_period, items_by_date, exclude_item_ids=moving_source_ids)
 
         created_items = []
+        moved_from_plan_ids = set()
+
         for changed_date, date_items in items_by_date.items():
+            # 같은 날짜에 여러 작업이 배치될 때도, 같은 과목 안에서는
+            # study_task.order 순서로 저장되도록 정렬한다.
+            date_items = sorted(
+                date_items,
+                key=lambda item: (item.study_task.exam_id, item.study_task.order),
+            )
+
             daily_plan = _get_or_create_daily_plan(target.exam_period, changed_date)
 
             next_order = (
@@ -506,18 +824,89 @@ def apply_recovery_plan(recovery_plan) -> dict:
             )
             for item in date_items:
                 next_order += 1
-                new_item = DailyPlanItem.objects.create(
-                    daily_plan=daily_plan,
-                    study_task=item.study_task,
-                    planned_minutes=item.remaining_minutes,
-                    order=next_order,
-                )
-                created_items.append(new_item)
+
+                if item.source_daily_plan_item_id:
+                    # 학습 순서 보존을 위해 재배치되는 후속 작업 -
+                    # 기존 DailyPlanItem을 새 날짜로 이동시킨다 (새로
+                    # 만들지 않는다 - 안 그러면 같은 작업이 두 자리에
+                    # 중복으로 남는다).
+                    moved_item = DailyPlanItem.objects.select_for_update().get(
+                        id=item.source_daily_plan_item_id
+                    )
+                    moved_from_plan_ids.add(moved_item.daily_plan_id)
+                    moved_item.daily_plan = daily_plan
+                    moved_item.planned_minutes = item.remaining_minutes
+                    moved_item.order = next_order
+                    moved_item.save(
+                        update_fields=['daily_plan', 'planned_minutes', 'order']
+                    )
+                    created_items.append(moved_item)
+                else:
+                    new_item = DailyPlanItem.objects.create(
+                        daily_plan=daily_plan,
+                        study_task=item.study_task,
+                        planned_minutes=item.remaining_minutes,
+                        order=next_order,
+                    )
+                    created_items.append(new_item)
 
             daily_plan.planned_minutes = (
                 daily_plan.items.aggregate(total=Sum('planned_minutes'))['total'] or 0
             )
             daily_plan.save(update_fields=['planned_minutes'])
+
+        # 이동으로 인해 아이템이 빠져나간 기존 날짜들의 planned_minutes도
+        # 다시 계산해야 한다 (안 그러면 옛날 값이 그대로 남는다).
+        for plan_id in moved_from_plan_ids:
+            old_plan = DailyPlan.objects.get(id=plan_id)
+            old_plan.planned_minutes = (
+                old_plan.items.aggregate(total=Sum('planned_minutes'))['total'] or 0
+            )
+            old_plan.save(update_fields=['planned_minutes'])
+
+        # 핵심집중형에서 제외된 carry-along 작업은 실제 일정에서도 지운다.
+        # (제외됐다고 복구안에만 표시되고 실제 DailyPlanItem이 남아있으면
+        # 안 됨 - 화면과 실제 데이터가 어긋나는 버그)
+        excluded_plan_ids = set()
+        for exc_item in excluded_carry_along_items:
+            if exc_item.source_daily_plan_item_id is None:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 삭제되어 복구안을 "
+                    f"다시 생성해야 합니다."
+                )
+            try:
+                source_item = DailyPlanItem.objects.select_for_update().get(
+                    id=exc_item.source_daily_plan_item_id
+                )
+            except DailyPlanItem.DoesNotExist:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 더 이상 존재하지 않습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
+            if source_item.daily_plan.finalized_at is not None:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 이미 마감되었습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
+            if hasattr(source_item, 'progress_log') and source_item.progress_log is not None:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}에 이미 진행 기록이 생겼습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
+            if source_item.daily_plan.date != exc_item.original_date:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 다른 복구안에 의해 "
+                    f"이미 변경되었습니다. 복구안을 다시 생성해주세요."
+                )
+            excluded_plan_ids.add(source_item.daily_plan_id)
+            source_item.delete()
+
+        for plan_id in excluded_plan_ids:
+            excl_plan = DailyPlan.objects.get(id=plan_id)
+            excl_plan.planned_minutes = (
+                excl_plan.items.aggregate(total=Sum('planned_minutes'))['total'] or 0
+            )
+            excl_plan.save(update_fields=['planned_minutes'])
 
         target.status = RecoveryPlanStatus.APPLIED
         target.applied_at = timezone.now()

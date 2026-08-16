@@ -21,9 +21,11 @@ from planner.services.progress_recorder import IncompleteProgressError
 from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
 
 from planner.services.recovery import (
+    generate_recovery_options,
     apply_recovery_plan,
     RecoveryPlanAlreadyProcessedError,
     RecoveryPlanStaleError,
+    _get_carry_along_items,
 )
 from planner.services.recovery import (
     needs_recovery_retry,
@@ -4456,3 +4458,499 @@ class RecoveryRetryTests(TestCase):
             .values('recovery_group_id').distinct().count(),
             1,
         )
+
+class RecoveryOrderPreservationTests(TestCase):
+    """
+    #162: 복구 재배치 시 같은 과목 후속 작업의 학습 순서가 보존되는지 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="order_tester",
+            email="order_tester@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="order_tester@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="순서 보존 테스트용 시험기간",
+            start_date=self.today - timedelta(days=1),
+            end_date=self.today + timedelta(days=20),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="운영체제",
+            exam_date=self.today + timedelta(days=15),
+            speed_factor=1.0,
+        )
+        self.other_exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="자료구조",
+            exam_date=self.today + timedelta(days=15),
+            speed_factor=1.0,
+        )
+
+        self.task_1_2 = StudyTask.objects.create(
+            exam=self.exam, title="1-2 프로세스", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=2,
+            estimated_min_minutes=30, estimated_max_minutes=30, is_confirmed=True,
+        )
+        self.task_2_1 = StudyTask.objects.create(
+            exam=self.exam, title="2-1 스레드", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=3,
+            estimated_min_minutes=30, estimated_max_minutes=30, is_confirmed=True,
+        )
+        self.task_2_2 = StudyTask.objects.create(
+            exam=self.exam, title="2-2 동기화", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=4,
+            estimated_min_minutes=30, estimated_max_minutes=30, is_confirmed=True,
+        )
+        # 다른 과목 작업 (순서 제약이 섞이면 안 됨)
+        self.task_ds_1 = StudyTask.objects.create(
+            exam=self.other_exam, title="자료구조 1단원", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=30, estimated_max_minutes=30, is_confirmed=True,
+        )
+
+        self.source_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=1),
+            available_minutes=30, planned_minutes=30,
+        )
+        self.item_1_2 = DailyPlanItem.objects.create(
+            daily_plan=self.source_plan, study_task=self.task_1_2,
+            planned_minutes=30, order=1,
+        )
+        record_progress(daily_plan_item=self.item_1_2, status="not_done", actual_minutes=0)
+        self.source_plan.finalized_at = django_timezone.now()
+        self.source_plan.save(update_fields=["finalized_at"])
+
+        self.future_plan_1 = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today,
+            available_minutes=60, planned_minutes=60,
+        )
+        self.item_2_1 = DailyPlanItem.objects.create(
+            daily_plan=self.future_plan_1, study_task=self.task_2_1,
+            planned_minutes=30, order=1,
+        )
+        self.item_ds_1 = DailyPlanItem.objects.create(
+            daily_plan=self.future_plan_1, study_task=self.task_ds_1,
+            planned_minutes=30, order=2,
+        )
+
+        self.future_plan_2 = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=30, planned_minutes=30,
+        )
+        self.item_2_2 = DailyPlanItem.objects.create(
+            daily_plan=self.future_plan_2, study_task=self.task_2_2,
+            planned_minutes=30, order=1,
+        )
+
+        for i in range(2, 15):
+            AvailableTime.objects.create(
+                exam_period=self.exam_period,
+                date=self.today + timedelta(days=i),
+                available_minutes=60,
+            )
+
+    def test_carry_along_uses_min_order_so_all_following_tasks_included(self):
+        """
+        같은 과목에 미완료 작업이 여러 개일 때도(여기선 1개뿐이지만),
+        가장 앞선 미완료 order를 기준으로 그 뒤 모든 미진행 작업(2-1, 2-2)이
+        빠짐없이 carry-along으로 잡혀야 한다.
+        """
+        carry_along = _get_carry_along_items(self.source_plan, [self.item_1_2])
+        carry_along_tasks = {item.study_task for item in carry_along}
+        self.assertEqual(carry_along_tasks, {self.task_2_1, self.task_2_2})
+
+    def test_maintain_volume_preserves_order_within_exam(self):
+        """1-2 -> 2-1 -> 2-2 순서로, 날짜가 뒤로 갈수록만 배치돼야 한다."""
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume, result['maintain_volume_failure_reason'])
+
+        d1 = maintain_volume.items.get(study_task=self.task_1_2).changed_date
+        d2 = maintain_volume.items.get(study_task=self.task_2_1).changed_date
+        d3 = maintain_volume.items.get(study_task=self.task_2_2).changed_date
+        self.assertLessEqual(d1, d2)
+        self.assertLessEqual(d2, d3)
+
+    def test_other_exam_not_constrained_by_carry_along(self):
+        """
+        운영체제 순서 보존이 자료구조 작업 배치 날짜에 영향을 주면 안 된다
+        (자료구조는 원래 자리 그대로 유지되거나, 자기 시험일 안에서 자유롭게).
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 자료구조는 carry-along 대상이 아니었으므로 RecoveryPlanItem에
+        # 아예 없어야 한다 (건드리지 않았어야 함).
+        self.assertFalse(
+            maintain_volume.items.filter(study_task=self.task_ds_1).exists()
+        )
+        # 원래 자리에 그대로 남아있어야 한다.
+        self.assertTrue(
+            DailyPlanItem.objects.filter(
+                daily_plan=self.future_plan_1, study_task=self.task_ds_1
+            ).exists()
+        )
+
+    def test_carry_along_frees_up_original_capacity(self):
+        """
+        2-1, 2-2가 재배치되면서 원래 자리(future_plan_1, future_plan_2)의
+        점유량이 용량 계산에서 빠져야, 재배치가 가용시간 부족 없이 성공한다.
+        (원래 자리 점유량을 안 빼면 이 테스트가 실패로 나와야 정상이다.)
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        self.assertIsNotNone(result['maintain_volume'])
+
+    def test_apply_moves_existing_item_without_duplication(self):
+        """
+        적용 후 2-1, 2-2는 원래 자리에서 사라지고 새 자리에 하나씩만
+        존재해야 한다 (삭제+재생성이 아니라 이동이므로 pk도 그대로 유지).
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+
+        original_item_2_1_id = self.item_2_1.id
+
+        apply_recovery_plan(maintain_volume)
+
+        task_2_1_items = DailyPlanItem.objects.filter(study_task=self.task_2_1)
+        self.assertEqual(task_2_1_items.count(), 1)
+        self.assertEqual(task_2_1_items.first().id, original_item_2_1_id)
+
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                daily_plan=self.future_plan_1, study_task=self.task_2_1
+            ).exists()
+        )
+
+        # 원래 자리(future_plan_1)의 planned_minutes도 다시 계산됐어야 한다
+        # (2-1이 빠졌으니 자료구조 30분만 남아야 함).
+        self.future_plan_1.refresh_from_db()
+        self.assertEqual(self.future_plan_1.planned_minutes, 30)
+
+    def test_core_focus_excludes_middle_task_and_preserves_remaining_order(self):
+        """
+        핵심집중형에서 2-1이 제외되면, 남은 1-2 -> 2-2 순서만 유지되면
+        된다 (제외된 작업은 순서 체인에서 완전히 빠짐).
+        """
+        # 2-1을 제외 대상이 되도록 importance/depth를 낮춘다.
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        excluded_tasks = {
+            item.study_task for item in
+            core_focus.items.filter(action_type=RecoveryActionType.EXCLUDE)
+        }
+        self.assertIn(self.task_2_1, excluded_tasks)
+
+        d1 = core_focus.items.get(study_task=self.task_1_2, action_type=RecoveryActionType.RESCHEDULE).changed_date
+        d3 = core_focus.items.get(study_task=self.task_2_2, action_type=RecoveryActionType.RESCHEDULE).changed_date
+        self.assertLessEqual(d1, d3)
+
+    def test_apply_does_not_falsely_reject_carry_along_as_stale(self):
+        """
+        생성 시 carry-along의 원래 점유시간을 빼주고 계산했는데,
+        적용 시 그 원래 점유시간을 다시 세서 stale로 거부되면 안 된다
+        (이중 차감 버그 재발 방지).
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 예외 없이 적용까지 성공해야 한다.
+        apply_recovery_plan(maintain_volume)
+
+        self.assertEqual(
+            DailyPlanItem.objects.filter(study_task=self.task_2_1).count(), 1
+        )
+
+    def test_order_preserved_allocator_prefers_earliest_not_best_fit(self):
+        """
+        D1(더 이른 날짜, 여유 넉넉함), D2(더 늦은 날짜, 딱 한 작업만 들어갈
+        만큼만 여유)에서, order가 앞선 작업이 '가장 딱 맞는'(best-fit) D2가
+        아니라 '가장 이른'(earliest-fit) D1에 배치돼야, 뒤따르는 작업들이
+        D1/D2에 나눠 들어갈 자리가 남는다.
+        """
+        from planner.services.time_estimator import estimate_task_minutes
+
+        # 실제 재계산되는 필요시간을 직접 가져와서 시나리오를 정확히 맞춘다
+        # (StudyTask.estimated_max_minutes를 그대로 쓰는 게 아니라
+        # task_type/difficulty/speed_factor 기준으로 다시 계산되므로).
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+
+        d1 = self.today + timedelta(days=1)
+        d2 = self.today + timedelta(days=2)
+
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date__gt=d2,
+        ).update(available_minutes=0)
+        # D1: 두 작업이 들어가고도 남을 만큼 넉넉하게
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes * 3},
+        )
+        # D2: 딱 한 작업만 들어갈 만큼만 (best-fit이었다면 여기 먼저 꽂힘)
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d2,
+            defaults={'available_minutes': per_task_minutes},
+        )
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume, result.get('maintain_volume_failure_reason'))
+
+        d1_2 = maintain_volume.items.get(study_task=self.task_1_2).changed_date
+        d2_1 = maintain_volume.items.get(study_task=self.task_2_1).changed_date
+        d2_2 = maintain_volume.items.get(study_task=self.task_2_2).changed_date
+
+        # best-fit이었다면 1-2가 D2(더 딱 맞음)에 먼저 들어가서 cursor가
+        # D2로 이동, 이후 2-1/2-2가 배치될 자리가 없어 전체 실패했을 것.
+        self.assertEqual(d1_2, d1)
+        self.assertLessEqual(d2_1, d2_2)
+
+    def test_core_focus_exclusion_actually_removes_carry_along_from_schedule(self):
+        """
+        핵심집중형에서 carry-along 작업(2-1)이 EXCLUDE되면, 복구안에만
+        표시되는 게 아니라 실제 DailyPlanItem도 apply 이후 사라져야 한다.
+        """
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        excluded_item = core_focus.items.get(
+            study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+        )
+        self.assertEqual(excluded_item.source_daily_plan_item_id, self.item_2_1.id)
+
+        original_id = self.item_2_1.id
+        apply_recovery_plan(core_focus)
+
+        self.assertFalse(
+            DailyPlanItem.objects.filter(id=original_id).exists()
+        )
+        self.future_plan_1.refresh_from_db()
+        # future_plan_1에는 원래 자료구조(30) + 2-1(30) = 60이었는데,
+        # 2-1이 제외됐으니 30만 남아야 한다.
+        self.assertEqual(self.future_plan_1.planned_minutes, 30)
+
+    def test_apply_rejects_when_carry_along_source_deleted(self):
+        """
+        복구안 생성 후, 적용 전에 원본(2-1) DailyPlanItem이 삭제되면
+        (예: 다른 복구안이 먼저 적용되면서), is_carry_along=True인데
+        source_daily_plan_item이 SET_NULL로 None이 된 상태다.
+
+        이 경우 "원래 실패 작업이었던 것"처럼 조용히 새로 만들면 안 되고
+        RecoveryPlanStaleError로 거부해야 한다.
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 원본 2-1을 미리 삭제 -> source_daily_plan_item이 SET_NULL로 None이 됨
+        self.item_2_1.delete()
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(maintain_volume)
+
+        # 신규 DailyPlanItem이 생성되지 않았어야 한다.
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task=self.task_2_1,
+                daily_plan__date__gt=self.source_plan.date,
+            ).exists()
+        )
+
+    def test_core_focus_exclusion_frees_capacity_for_actual_use(self):
+        """
+        핵심집중형에서 2-1이 EXCLUDE되면, 2-1이 원래 차지하던 시간이
+        재배치에 실제로 사용될 수 있어야 한다. (용량을 EXCLUDE 시점에
+        반환하지 않으면, 충분히 가능한 배치도 가용시간 부족으로
+        실패한다.)
+        """
+        from planner.services.time_estimator import estimate_task_minutes
+
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+        d1 = self.today + timedelta(days=1)
+        d2 = self.today + timedelta(days=2)
+
+        # d1에는 2-1이 이미 차지 중인 딱 그만큼만, d2도 2-2가 차지 중인
+        # 딱 그만큼만 가용시간을 준다. 즉 2-1이 EXCLUDE로 빠져야만
+        # 1-2가 d1에 들어갈 여유가 생긴다.
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date__gt=d2,
+        ).update(available_minutes=0)
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes},  # 2-1 자리만큼만
+        )
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d2,
+            defaults={'available_minutes': per_task_minutes},  # 2-2 자리만큼만
+        )
+        # future_plan_1/2의 available_minutes도 위와 동기화 (occupied 계산에
+        # 영향 없지만 일관성 유지 차원).
+
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        # 2-1이 실제로 EXCLUDE됐는지 확인
+        self.assertTrue(
+            core_focus.items.filter(
+                study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+            ).exists()
+        )
+        # 1-2가 배치될 자리를 확보했는지 확인 (2-1이 빠진 d1에 들어감)
+        item_1_2_recovery = core_focus.items.get(
+            study_task=self.task_1_2, action_type=RecoveryActionType.RESCHEDULE
+        )
+        self.assertEqual(item_1_2_recovery.changed_date, d1)
+
+    def test_apply_rejects_when_source_already_moved_by_other_recovery(self):
+        """
+        같은 미래 작업(2-1)을 참조하는 복구안이 생성된 후, 다른 경로로
+        2-1이 이미 다른 날짜로 이동됐다면(다른 복구안 적용 등), 이
+        복구안을 나중에 적용하려 하면 "원본이 다른 곳으로 이미 이동됨"
+        으로 거부돼야 한다. 그렇지 않으면 이미 이동된 작업을 또
+        엉뚱하게 옮겨버릴 수 있다.
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 다른 경로로 2-1이 이미 다른 날짜로 옮겨졌다고 가정
+        # (원본 daily_plan.date를 바꿔서 재현).
+        moved_date = self.today + timedelta(days=10)
+        moved_plan, _ = DailyPlan.objects.get_or_create(
+            exam_period=self.exam_period, date=moved_date,
+            defaults={'available_minutes': 60, 'planned_minutes': 0},
+        )
+        self.item_2_1.daily_plan = moved_plan
+        self.item_2_1.save(update_fields=['daily_plan'])
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(maintain_volume)
+
+    def test_apply_rejects_core_focus_exclude_when_source_deleted(self):
+        """
+        핵심집중형에서 carry-along(2-1)이 EXCLUDE된 뒤, 적용 전에
+        원본이 삭제되면(SET_NULL) is_carry_along=True인데 source가
+        None인 상태가 된다. 이 경우도 RESCHEDULE과 동일하게
+        RecoveryPlanStaleError로 거부돼야 하고, 원본이 조용히
+        무시된 채 나머지만 적용되면 안 된다.
+        """
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        excluded_item = core_focus.items.get(
+            study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+        )
+        self.assertTrue(excluded_item.is_carry_along)
+
+        # 원본을 미리 삭제 -> source_daily_plan_item이 SET_NULL로 None이 됨
+        self.item_2_1.delete()
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(core_focus)
+
+        # 적용이 거부됐으므로 상태 변경도 없어야 한다.
+        core_focus.refresh_from_db()
+        self.assertEqual(core_focus.status, RecoveryPlanStatus.PENDING)
+
+    def test_cross_exam_competition_respects_importance_and_depth(self):
+        """
+        서로 다른 과목이 같은 시험일 + 제한된 용량(d1)을 두고 경쟁할 때,
+        순서 보존 로직이 있어도 기존 스케줄러의 중요도/깊이 우선순위
+        (high/core가 low/optional보다 먼저)가 유지돼야 한다.
+        """
+        shared_exam_date = self.today + timedelta(days=20)
+        self.exam.exam_date = shared_exam_date
+        self.exam.save(update_fields=["exam_date"])
+        self.other_exam.exam_date = shared_exam_date
+        self.other_exam.save(update_fields=["exam_date"])
+
+        from planner.services.time_estimator import estimate_task_minutes
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+
+        # 자료구조를 1-2와 정확히 같은 소요시간으로 맞춰서, 경쟁 결과가
+        # 순수하게 중요도/깊이 차이로만 결정되게 한다.
+        self.task_ds_1.importance = "low"
+        self.task_ds_1.depth = "optional"
+        self.task_ds_1.task_type = self.task_1_2.task_type
+        self.task_ds_1.difficulty = self.task_1_2.difficulty
+        self.task_ds_1.estimated_min_minutes = self.task_1_2.estimated_min_minutes
+        self.task_ds_1.estimated_max_minutes = self.task_1_2.estimated_max_minutes
+        self.task_ds_1.save(update_fields=[
+            "importance", "depth", "task_type", "difficulty",
+            "estimated_min_minutes", "estimated_max_minutes",
+        ])
+
+        ds_source_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=2),
+            available_minutes=60, planned_minutes=60,
+        )
+        item_ds_failed = DailyPlanItem.objects.create(
+            daily_plan=ds_source_plan, study_task=self.task_ds_1,
+            planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=item_ds_failed, status="not_done", actual_minutes=0)
+        ds_source_plan.finalized_at = django_timezone.now()
+        ds_source_plan.save(update_fields=["finalized_at"])
+
+        d1 = self.today + timedelta(days=1)
+
+        # d1만 "딱 한 작업만 들어갈 용량"으로 좁게 만든다. setUp()에서
+        # 이미 만들어둔 today+2~today+14(각 60분)는 그대로 둬서, d1을
+        # 제외한 나머지 작업들은 전부 넉넉하게 배치될 수 있게 한다
+        # (그래야 "d1 자리를 누가 먼저 차지하는가"만 순수하게 검증됨).
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes},
+        )
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2, item_ds_failed])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume, result.get('maintain_volume_failure_reason'))
+
+        item_1_2_recovery = maintain_volume.items.get(study_task=self.task_1_2)
+        item_ds_recovery = maintain_volume.items.get(study_task=self.task_ds_1)
+
+        # high/core인 1-2가 d1(딱 하나만 들어가는 자리)을 차지해야 하고,
+        # low/optional인 자료구조는 그 뒤 날짜로 밀려야 한다.
+        self.assertEqual(item_1_2_recovery.changed_date, d1)
+        self.assertGreater(item_ds_recovery.changed_date, d1)
