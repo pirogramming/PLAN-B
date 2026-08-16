@@ -982,7 +982,15 @@ def material_analysis_status(request, material_id):
 
     extraction_status = material.status
     extraction_error = material.error_message
-    
+
+    extraction_is_stale = False
+    if extraction_status == MaterialStatus.PROCESSING:
+        if material.extraction_started_at is None:
+            extraction_is_stale = True
+        else:
+            elapsed = (timezone.now() - material.extraction_started_at).total_seconds()
+            extraction_is_stale = elapsed >= STALE_EXTRACTION_TIMEOUT_SECONDS
+
     analysis_status = analysis_data["status"]
     analysis_error = analysis_data["error_message"]
     retry_count = analysis_data["retry_count"]
@@ -1015,6 +1023,7 @@ def material_analysis_status(request, material_id):
         "stage": stage,
         "extraction_status": extraction_status,
         "extraction_error_message": extraction_error,
+        "extraction_is_stale": extraction_is_stale,
         "analysis_status": analysis_status,
         "analysis_error_message": analysis_error,
         "failed_stage": failed_stage,
