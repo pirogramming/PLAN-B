@@ -3673,36 +3673,27 @@ class MaterialExtractStaleTests(TestCase):
     # -----------------------------------------------------------------
     @patch('exams.views.extract_text_from_pdf')
     def test_stale_reclaim_prevents_old_run_from_overwriting_new_result(self, mock_extract):
-        mock_extract.return_value = "새 실행(B)의 결과"
-        old_run_id = uuid.uuid4()
-        material = self._make_pdf_material(
-            status=MaterialStatus.PROCESSING,
-            extraction_started_at=timezone.now() - datetime.timedelta(
-                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
-            ),
-            extraction_run_id=old_run_id,
-        )
+        material = self._make_pdf_material()  # PENDING
 
-        # B: 좀비 상태를 재선점해서 정상적으로 추출을 완료시킨다.
-        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        def _simulate_competing_run_during_extraction(file):
+            # 이 실행(A)이 아직 OCR 중인 동안, 다른 실행(B)이 A를 stale로 판단해
+            # 재선점하고 먼저 결과를 저장해버린 상황을 재현한다.
+            StudyMaterial.objects.filter(pk=material.pk).update(
+                extraction_run_id=uuid.uuid4(),
+                extracted_text="B의 결과 (다른 실행이 먼저 완료함)",
+                status=MaterialStatus.COMPLETED,
+            )
+            return "A의 뒤늦은 결과"
+
+        mock_extract.side_effect = _simulate_competing_run_during_extraction
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
         material.refresh_from_db()
-        new_run_id = material.extraction_run_id
 
-        self.assertNotEqual(old_run_id, new_run_id)
-        self.assertEqual(material.extracted_text, "새 실행(B)의 결과")
-
-        # A: 죽지 않고 뒤늦게 살아 돌아와 old_run_id로 저장을 시도한다고 가정.
-        # material_extract의 _save_if_owner와 동일한 조건부 UPDATE를 직접 재현해서
-        # A의 저장이 실제로 무시되는지 검증한다.
-        updated = StudyMaterial.objects.filter(
-            pk=material.pk, extraction_run_id=old_run_id,
-        ).update(extracted_text="죽지 않고 뒤늦게 돌아온 A의 낡은 결과")
-
-        self.assertEqual(updated, 0)  # A의 저장은 반영되지 않아야 함
-
-        material.refresh_from_db()
-        self.assertEqual(material.extracted_text, "새 실행(B)의 결과")  # B의 결과가 유지
-
+        # material_extract 내부의 실제 _save_if_owner가 A의 저장을 막아야 하므로,
+        # B가 먼저 저장해둔 결과가 그대로 유지되어야 한다.
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.extracted_text, "B의 결과 (다른 실행이 먼저 완료함)")
     # -----------------------------------------------------------------
     # 6. material_analysis_status 응답의 extraction_is_stale
     # -----------------------------------------------------------------
