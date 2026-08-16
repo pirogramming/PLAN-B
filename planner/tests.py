@@ -4662,3 +4662,95 @@ class RecoveryOrderPreservationTests(TestCase):
         d1 = core_focus.items.get(study_task=self.task_1_2, action_type=RecoveryActionType.RESCHEDULE).changed_date
         d3 = core_focus.items.get(study_task=self.task_2_2, action_type=RecoveryActionType.RESCHEDULE).changed_date
         self.assertLessEqual(d1, d3)
+
+    def test_apply_does_not_falsely_reject_carry_along_as_stale(self):
+        """
+        생성 시 carry-along의 원래 점유시간을 빼주고 계산했는데,
+        적용 시 그 원래 점유시간을 다시 세서 stale로 거부되면 안 된다
+        (이중 차감 버그 재발 방지).
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 예외 없이 적용까지 성공해야 한다.
+        apply_recovery_plan(maintain_volume)
+
+        self.assertEqual(
+            DailyPlanItem.objects.filter(study_task=self.task_2_1).count(), 1
+        )
+
+    def test_order_preserved_allocator_prefers_earliest_not_best_fit(self):
+        """
+        D1(더 이른 날짜, 여유 넉넉함), D2(더 늦은 날짜, 딱 한 작업만 들어갈
+        만큼만 여유)에서, order가 앞선 작업이 '가장 딱 맞는'(best-fit) D2가
+        아니라 '가장 이른'(earliest-fit) D1에 배치돼야, 뒤따르는 작업들이
+        D1/D2에 나눠 들어갈 자리가 남는다.
+        """
+        from planner.services.time_estimator import estimate_task_minutes
+
+        # 실제 재계산되는 필요시간을 직접 가져와서 시나리오를 정확히 맞춘다
+        # (StudyTask.estimated_max_minutes를 그대로 쓰는 게 아니라
+        # task_type/difficulty/speed_factor 기준으로 다시 계산되므로).
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+
+        d1 = self.today + timedelta(days=1)
+        d2 = self.today + timedelta(days=2)
+
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date__gt=d2,
+        ).update(available_minutes=0)
+        # D1: 두 작업이 들어가고도 남을 만큼 넉넉하게
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes * 3},
+        )
+        # D2: 딱 한 작업만 들어갈 만큼만 (best-fit이었다면 여기 먼저 꽂힘)
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d2,
+            defaults={'available_minutes': per_task_minutes},
+        )
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume, result.get('maintain_volume_failure_reason'))
+
+        d1_2 = maintain_volume.items.get(study_task=self.task_1_2).changed_date
+        d2_1 = maintain_volume.items.get(study_task=self.task_2_1).changed_date
+        d2_2 = maintain_volume.items.get(study_task=self.task_2_2).changed_date
+
+        # best-fit이었다면 1-2가 D2(더 딱 맞음)에 먼저 들어가서 cursor가
+        # D2로 이동, 이후 2-1/2-2가 배치될 자리가 없어 전체 실패했을 것.
+        self.assertEqual(d1_2, d1)
+        self.assertLessEqual(d2_1, d2_2)
+
+    def test_core_focus_exclusion_actually_removes_carry_along_from_schedule(self):
+        """
+        핵심집중형에서 carry-along 작업(2-1)이 EXCLUDE되면, 복구안에만
+        표시되는 게 아니라 실제 DailyPlanItem도 apply 이후 사라져야 한다.
+        """
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        excluded_item = core_focus.items.get(
+            study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+        )
+        self.assertEqual(excluded_item.source_daily_plan_item_id, self.item_2_1.id)
+
+        original_id = self.item_2_1.id
+        apply_recovery_plan(core_focus)
+
+        self.assertFalse(
+            DailyPlanItem.objects.filter(id=original_id).exists()
+        )
+        self.future_plan_1.refresh_from_db()
+        # future_plan_1에는 원래 자료구조(30) + 2-1(30) = 60이었는데,
+        # 2-1이 제외됐으니 30만 남아야 한다.
+        self.assertEqual(self.future_plan_1.planned_minutes, 30)
