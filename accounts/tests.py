@@ -113,3 +113,37 @@ class SocialAccountAdapterTests(TestCase):
 
         # 4. username이 email과 동일하게 들어갔는지 확인
         self.assertEqual(user.username, 'googleuser@example.com')
+
+    def test_populate_user_sets_nickname_from_extra_data_name(self):
+        """구글처럼 extra_data에 name이 있으면 그걸 nickname으로 채워야 한다."""
+        adapter = CustomSocialAccountAdapter()
+        sociallogin = SocialLogin(
+            account=SocialAccount(
+                provider='google', uid='12345',
+                extra_data={'name': '홍길동'},
+            )
+        )
+        user = adapter.new_user(self.request, sociallogin)
+        sociallogin.user = user
+
+        data = {'email': 'googleuser@example.com'}
+        user = adapter.populate_user(self.request, sociallogin, data)
+
+        self.assertEqual(user.nickname, '홍길동')
+
+    def test_populate_user_sets_nickname_from_extra_data_naver_nickname(self):
+        """네이버는 extra_data에 name이 없을 수 있어 nickname 필드로 폴백해야 한다."""
+        adapter = CustomSocialAccountAdapter()
+        sociallogin = SocialLogin(
+            account=SocialAccount(
+                provider='naver', uid='67890',
+                extra_data={'nickname': '네이버유저'},
+            )
+        )
+        user = adapter.new_user(self.request, sociallogin)
+        sociallogin.user = user
+
+        data = {'email': 'naveruser@example.com'}
+        user = adapter.populate_user(self.request, sociallogin, data)
+
+        self.assertEqual(user.nickname, '네이버유저')

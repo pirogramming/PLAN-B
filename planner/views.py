@@ -455,31 +455,6 @@ def plan_generate(request, period_id):
 
         return redirect('planner:dashboard')
 
-@login_required
-@require_http_methods(["GET"])
-def plan_complete(request, period_id):
-    exam_period = _get_owned_exam_period(request.user, period_id)
-    daily_plans = (
-        DailyPlan.objects
-        .filter(exam_period=exam_period)
-        .order_by('date')
-        .prefetch_related('items')
-    )
-
-    if not daily_plans.exists():
-        messages.info(request, "아직 생성된 계획이 없습니다.")
-        return redirect('planner:feasibility', period_id=exam_period.id)
-
-    total_planned_minutes = sum(dp.planned_minutes for dp in daily_plans)
-
-    context = {
-        'exam_period': exam_period,
-        'daily_plans': daily_plans,
-        'daily_plan_count': daily_plans.count(),
-        'total_planned_minutes': total_planned_minutes,
-    }
-    return render(request, 'planner/plan_complete.html', context)
-
 @require_http_methods(["GET"])
 def dashboard(request):
     """

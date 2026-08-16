@@ -1845,14 +1845,6 @@ class PlanGenerateFlowTests(TestCase):
             DailyPlanItem.objects.filter(daily_plan__exam_period=self.exam_period).count(), 1
         )
 
-    def test_plan_complete_redirects_when_no_plan_yet(self):
-        response = self.client.get(
-            reverse('planner:plan_complete', kwargs={'period_id': self.exam_period.id})
-        )
-        self.assertRedirects(
-            response, reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
-        )
-
     def test_feasibility_includes_available_time_edit_url(self):
         response = self.client.get(
             reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
