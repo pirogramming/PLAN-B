@@ -4858,3 +4858,99 @@ class RecoveryOrderPreservationTests(TestCase):
 
         with self.assertRaises(RecoveryPlanStaleError):
             apply_recovery_plan(maintain_volume)
+
+    def test_apply_rejects_core_focus_exclude_when_source_deleted(self):
+        """
+        핵심집중형에서 carry-along(2-1)이 EXCLUDE된 뒤, 적용 전에
+        원본이 삭제되면(SET_NULL) is_carry_along=True인데 source가
+        None인 상태가 된다. 이 경우도 RESCHEDULE과 동일하게
+        RecoveryPlanStaleError로 거부돼야 하고, 원본이 조용히
+        무시된 채 나머지만 적용되면 안 된다.
+        """
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        excluded_item = core_focus.items.get(
+            study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+        )
+        self.assertTrue(excluded_item.is_carry_along)
+
+        # 원본을 미리 삭제 -> source_daily_plan_item이 SET_NULL로 None이 됨
+        self.item_2_1.delete()
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(core_focus)
+
+        # 적용이 거부됐으므로 상태 변경도 없어야 한다.
+        core_focus.refresh_from_db()
+        self.assertEqual(core_focus.status, RecoveryPlanStatus.PENDING)
+
+    def test_cross_exam_competition_respects_importance_and_depth(self):
+        """
+        서로 다른 과목이 같은 시험일 + 제한된 용량(d1)을 두고 경쟁할 때,
+        순서 보존 로직이 있어도 기존 스케줄러의 중요도/깊이 우선순위
+        (high/core가 low/optional보다 먼저)가 유지돼야 한다.
+        """
+        shared_exam_date = self.today + timedelta(days=20)
+        self.exam.exam_date = shared_exam_date
+        self.exam.save(update_fields=["exam_date"])
+        self.other_exam.exam_date = shared_exam_date
+        self.other_exam.save(update_fields=["exam_date"])
+
+        from planner.services.time_estimator import estimate_task_minutes
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+
+        # 자료구조를 1-2와 정확히 같은 소요시간으로 맞춰서, 경쟁 결과가
+        # 순수하게 중요도/깊이 차이로만 결정되게 한다.
+        self.task_ds_1.importance = "low"
+        self.task_ds_1.depth = "optional"
+        self.task_ds_1.task_type = self.task_1_2.task_type
+        self.task_ds_1.difficulty = self.task_1_2.difficulty
+        self.task_ds_1.estimated_min_minutes = self.task_1_2.estimated_min_minutes
+        self.task_ds_1.estimated_max_minutes = self.task_1_2.estimated_max_minutes
+        self.task_ds_1.save(update_fields=[
+            "importance", "depth", "task_type", "difficulty",
+            "estimated_min_minutes", "estimated_max_minutes",
+        ])
+
+        ds_source_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=2),
+            available_minutes=60, planned_minutes=60,
+        )
+        item_ds_failed = DailyPlanItem.objects.create(
+            daily_plan=ds_source_plan, study_task=self.task_ds_1,
+            planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=item_ds_failed, status="not_done", actual_minutes=0)
+        ds_source_plan.finalized_at = django_timezone.now()
+        ds_source_plan.save(update_fields=["finalized_at"])
+
+        d1 = self.today + timedelta(days=1)
+
+        # d1만 "딱 한 작업만 들어갈 용량"으로 좁게 만든다. setUp()에서
+        # 이미 만들어둔 today+2~today+14(각 60분)는 그대로 둬서, d1을
+        # 제외한 나머지 작업들은 전부 넉넉하게 배치될 수 있게 한다
+        # (그래야 "d1 자리를 누가 먼저 차지하는가"만 순수하게 검증됨).
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes},
+        )
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2, item_ds_failed])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume, result.get('maintain_volume_failure_reason'))
+
+        item_1_2_recovery = maintain_volume.items.get(study_task=self.task_1_2)
+        item_ds_recovery = maintain_volume.items.get(study_task=self.task_ds_1)
+
+        # high/core인 1-2가 d1(딱 하나만 들어가는 자리)을 차지해야 하고,
+        # low/optional인 자료구조는 그 뒤 날짜로 밀려야 한다.
+        self.assertEqual(item_1_2_recovery.changed_date, d1)
+        self.assertGreater(item_ds_recovery.changed_date, d1)

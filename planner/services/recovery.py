@@ -15,6 +15,8 @@ from exams.models import AvailableTime
 from planner.models import RecoveryPlan, RecoveryPlanItem, DailyPlanItem, DailyPlan
 from planner.services.scheduler import (
     TaskInput, AvailableTimeInput, allocate_tasks_to_days,
+    IMPORTANCE_PRIORITY, DEPTH_PRIORITY,
+    DEFAULT_IMPORTANCE_PRIORITY, DEFAULT_DEPTH_PRIORITY,
 )
 from planner.services.time_estimator import estimate_task_minutes, round_up_to_five
 
@@ -328,7 +330,18 @@ def _allocate_with_order_preserved(exam_period, from_date, items_with_remaining,
             break
 
         candidates.sort(
-            key=lambda c: (c[1][0].study_task.exam.exam_date, -c[1][1])
+            key=lambda c: (
+                c[1][0].study_task.exam.exam_date,
+                IMPORTANCE_PRIORITY.get(
+                    c[1][0].study_task.importance, DEFAULT_IMPORTANCE_PRIORITY
+                ),
+                DEPTH_PRIORITY.get(
+                    c[1][0].study_task.depth, DEFAULT_DEPTH_PRIORITY
+                ),
+                -c[1][1],
+                c[1][0].study_task.order,
+                c[1][0].id,
+            )
         )
         exam_id, (item, remaining) = candidates[0]
 
@@ -725,7 +738,7 @@ def apply_recovery_plan(recovery_plan) -> dict:
         excluded_carry_along_items = [
             item for item in items
             if item.action_type == RecoveryActionType.EXCLUDE
-            and item.source_daily_plan_item_id is not None
+            and item.is_carry_along
         ]
 
         items_by_date = defaultdict(list)
