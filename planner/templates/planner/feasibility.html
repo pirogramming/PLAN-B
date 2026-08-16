@@ -106,8 +106,28 @@
   </div>
   {% endif %}
 
-  <div class="feasibility-subject-note">
-    과목별 판정은 곧 추가될 예정이에요.
+  <div class="feasibility-subject-section">
+    <div class="feasibility-subject-title">과목별 판정</div>
+    {% if subject_results %}
+    <div class="feasibility-subject-list">
+      {% for s in subject_results %}
+      <div class="feasibility-subject-row">
+        <div>
+          <div class="feasibility-subject-name">{{ s.subject_name }}</div>
+          <div class="feasibility-subject-meta">시험 {{ s.exam_date|date:"n월 j일" }} · 작업 {{ s.task_count }}개</div>
+        </div>
+        <div class="feasibility-subject-right">
+          <span class="badge badge-{{ s.status }}">{{ s.status_label }}</span>
+          <span class="feasibility-subject-minutes num">{{ s.required_min_minutes }}–{{ s.required_recommended_minutes }}분</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="feasibility-subject-note">
+      등록된 과목이 없습니다.
+    </div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

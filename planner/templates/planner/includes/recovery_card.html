@@ -13,7 +13,7 @@
     min_pct band_pct mark_pct need_label_pct   Fit Bar 좌표
     min_minutes max_minutes available_minutes axis_max
     excluded_count excluded_minutes
-    total_minutes daily_average_minutes daily_diff
+    total_minutes daily_average_minutes
     extra_minutes_needed          0이면 '없음'
     excluded_tasks[]              subject_name / title / depth / importance / minutes
 
@@ -55,9 +55,7 @@
       </div>
       <div>
         <dt>하루 평균 공부량</dt>
-        <dd class="num">{{ plan.daily_average_minutes }}분
-          {% if plan.daily_diff %}<small>({{ plan.daily_diff }})</small>{% endif %}
-        </dd>
+        <dd class="num">{{ plan.daily_average_minutes }}분</dd>
       </div>
       <div>
         <dt>추가로 필요한 시간</dt>

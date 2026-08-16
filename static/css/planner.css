@@ -276,6 +276,7 @@
 /* ===== 반응형 ===== */
 @media (max-width:1024px){
   .grid-3{grid-template-columns:repeat(2,1fr)}
+  .grid-4{grid-template-columns:repeat(2,1fr)}
   .content{padding:28px 20px 40px}
 }
 
@@ -297,6 +298,12 @@
 
   .content{padding:20px 16px 96px}
   .grid-3{grid-template-columns:1fr}
+  .grid-4{grid-template-columns:repeat(2,1fr)}
+
+  /* 모바일에서는 사이드바가 항상 하단 탭바로 고정 표시되고 접기/펼치기
+     상태 자체가 없어서(위 .side,.app.collapsed .side 규칙 참고), 펼치기
+     버튼을 눌러도 아무 변화가 없다 — 버튼 자체를 숨긴다 */
+  #openSide{display:none}
   .page-head{flex-direction:column;align-items:flex-start;gap:16px}
   .page-head h1{font-size:23px}
   .page-head .ml-auto{margin-left:0;width:100%}

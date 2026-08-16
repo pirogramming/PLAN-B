@@ -88,6 +88,35 @@ def _get_retry_daily_plan_id(today_plan):
         return None
     return today_plan.id
 
+
+def _sidebar_context(exam_period):
+    """
+    includes/sidebar.html이 필요로 하는 today_count/has_plan/pending_recovery/
+    retry_daily_plan_id를 exam_period 하나로 계산한다. dashboard·today는 이미
+    today_plan을 다른 용도로도 쓰고 있어 각자 계산하고, calendar·recovery_compare·
+    recovery_preview처럼 sidebar 값만 필요한 화면에서 이걸로 채운다 — 안 채우면
+    사이드바의 "오늘의 공부" 뱃지·복구안 배너·시험기간 박스 링크가 조용히
+    빠지거나 잘못된 값을 보여준다.
+    """
+    if exam_period is None:
+        return {
+            'has_plan': False,
+            'today_count': 0,
+            'pending_recovery': None,
+            'retry_daily_plan_id': None,
+        }
+
+    today_plan = DailyPlan.objects.filter(
+        exam_period=exam_period, date=timezone.localdate()
+    ).first()
+
+    return {
+        'has_plan': DailyPlan.objects.filter(exam_period=exam_period).exists(),
+        'today_count': today_plan.items.count() if today_plan else 0,
+        'pending_recovery': _get_pending_recovery(exam_period),
+        'retry_daily_plan_id': _get_retry_daily_plan_id(today_plan),
+    }
+
 def _remaining_task_minutes(task):
     """
     아직 안 끝난 작업의 남은 필요시간(min/max).
@@ -692,19 +721,13 @@ def calendar(request):
 
     context = {
         'exam_period': exam_period,
-        'pending_recovery': (
-            _get_pending_recovery(exam_period) if exam_period else None
-        ),
-        'has_plan': (
-            DailyPlan.objects.filter(exam_period=exam_period).exists()
-            if exam_period else False
-        ),
         'year': year,
         'month': month,
         'prev_year': prev_year,
         'prev_month': prev_month,
         'next_year': next_year,
         'next_month': next_month,
+        **_sidebar_context(exam_period),
         **calendar_context,
     }
     return render(request, 'planner/calendar.html', context)
@@ -941,7 +964,6 @@ def _build_plan_context(recovery_plan, totals, available_minutes, axis_max):
         "excluded_minutes": sum(i.remaining_minutes for i in excluded_items),
         "total_minutes": max_total,
         "daily_average_minutes": daily_average_minutes,
-        "daily_diff": None,
         "extra_minutes_needed": shortage,
         "excluded_tasks": [
             {
@@ -1039,6 +1061,7 @@ def recovery_compare(request, group_id):
         "plans": plan_contexts,
         "selected_plan": selected_plan,
         "reason": reason,
+        **_sidebar_context(exam_period),
     })
 
 def _is_preview_exam_day(date, exam_dates, after_minutes):
@@ -1159,6 +1182,7 @@ def recovery_preview(request, plan_id):
             )
             + f"?selected={recovery_plan.id}"
         ),
+        **_sidebar_context(exam_period),
     }
     return render(request, "planner/recovery_result.html", context)
 
