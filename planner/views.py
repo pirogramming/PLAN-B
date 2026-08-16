@@ -1,4 +1,6 @@
 import json
+from itertools import groupby
+from operator import attrgetter
 from django.http import JsonResponse
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, ProgressLog
 from planner.services.progress_recorder import record_progress, FinalizedDailyPlanEditError
@@ -233,31 +235,43 @@ def _build_progress(exam_period, today_plan, today_count, today_minutes):
     PARTIAL은 completion_percent 비율만큼만 인정.
     today_*는 오늘 하루, total_*는 이 시험기간에 지금까지 생성된 모든
     DailyPlanItem 누적 기준이다.
+
+    복구안 적용 시 원본 DailyPlanItem은 보존되고 남은 분량이 같은
+    study_task에 대한 새 DailyPlanItem으로 추가되므로, 단순히 모든
+    DailyPlanItem의 planned_minutes를 더하면 같은 작업의 분량이
+    총량(total)에 중복으로 잡힌다 (예: 60분 작업의 남은 30분이 재배치되면
+    60 + 30 = 90분으로 부풀려짐). study_task별로 묶어서 총량은 가장 이른
+    (원본) 아이템 것만 반영하고, 완료량은 그 작업에 속한 모든 아이템에
+    걸쳐 합산해야 "60분 중 몇 분 완료"가 정확히 나온다.
     """
     def _credit(items):
         total = 0
         done = 0
-        for item in items:
-            planned = item.planned_minutes
-            total += planned
-            log = getattr(item, 'progress_log', None)
-            if log is None:
-                continue
-            if log.progress_status == ProgressStatus.DONE:
-                done += planned
-            elif log.progress_status == ProgressStatus.PARTIAL:
-                done += planned * (log.completion_percent or 0) // 100
+
+        keyfunc = attrgetter('study_task_id')
+        for _task_id, group in groupby(sorted(items, key=keyfunc), key=keyfunc):
+            group = sorted(group, key=lambda i: i.daily_plan.date)
+            total += group[0].planned_minutes
+
+            for item in group:
+                log = getattr(item, 'progress_log', None)
+                if log is None:
+                    continue
+                if log.progress_status == ProgressStatus.DONE:
+                    done += item.planned_minutes
+                elif log.progress_status == ProgressStatus.PARTIAL:
+                    done += item.planned_minutes * (log.completion_percent or 0) // 100
         return total, done
 
     today_items = list(
-        today_plan.items.select_related('progress_log')
+        today_plan.items.select_related('progress_log', 'daily_plan')
     ) if today_plan else []
     today_total, today_done = _credit(today_items)
 
     all_items = list(
         DailyPlanItem.objects
         .filter(daily_plan__exam_period=exam_period)
-        .select_related('progress_log', 'study_task')
+        .select_related('progress_log', 'study_task', 'daily_plan')
     )
     total_total, total_done = _credit(all_items)
 
