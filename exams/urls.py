@@ -29,4 +29,5 @@ urlpatterns = [
     path('materials/<int:material_id>/delete/', views.material_delete, name='material_delete'),
     path('subjects/<int:exam_id>/tasks/create/', views.study_task_create, name='task_create'),
     path('subjects/<int:exam_id>/tasks/confirm/', views.study_task_confirm, name='task_confirm'),
+    path('periods/<int:period_id>/complete/', views.period_complete, name='period_complete'),
 ]

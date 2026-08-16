@@ -18,9 +18,20 @@
         {{ period.end_date|date:"n월 j일" }}
       </p>
     </div>
-    <a href="{% url 'exams:period_update' period.id %}" class="btn btn-secondary" style="margin-left:auto;">
-      시험 기간 수정
-    </a>
+    <div class="row" style="gap:8px;margin-left:auto">
+      <a href="{% url 'exams:period_update' period.id %}" class="btn btn-secondary">
+        기간 수정
+      </a>
+      {% if period.status == 'active' %}
+        <form method="post" action="{% url 'exams:period_complete' period.id %}"
+              onsubmit="return confirm('시험기간을 종료할까요? 종료 후에는 수정할 수 없습니다.');">
+          {% csrf_token %}
+          <button class="btn btn-ghost" type="submit">
+            시험기간 종료
+          </button>
+        </form>
+      {% endif %}
+    </div>
   </div>
 
   <div class="card card-body period-avail-card">

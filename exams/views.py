@@ -1,27 +1,32 @@
 import datetime
-from django.utils import timezone
-from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth.decorators import login_required
-from django.views.decorators.http import require_http_methods
-from django.contrib import messages
-from django.http import JsonResponse
-from django.db import transaction
+from functools import wraps
 import logging
+
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.db.models import Q
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_http_methods
+
 from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
 from core.exceptions import AIAnalysisError
-from planner.services.time_estimator import estimate_task_minutes
-from django.utils.http import url_has_allowed_host_and_scheme
-from .models import ExamPeriod, AvailableTime, Exam, StudyMaterial, StudyTask
 from planner.models import DailyPlan, RecoveryPlan
+from planner.services.time_estimator import estimate_task_minutes
+
 from .forms import (
-    ExamPeriodForm,
     AvailableTimeFormSet,
     ExamForm,
+    ExamPeriodForm,
     StudyMaterialForm,
     StudyTaskForm,
     StudyTaskFormSet,
 )
+from .models import AvailableTime, Exam, ExamPeriod, StudyMaterial, StudyTask
 from .services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
 from .services.available_time_updater import (
     save_available_time_formset,
@@ -29,14 +34,16 @@ from .services.available_time_updater import (
     AvailableTimeEditRejected,
 )
 from .services.analysis_orchestrator import (
-    analyze_and_estimate,
+    analyze_and_estimate,   # 더 이상 view에서 직접 쓰지 않지만, 다른 곳에서 참조할 수 있어 import 유지 여부는 검토
     retry_analysis,
+    claim_analysis_run,
+    run_claimed_analysis,
     get_analysis_status,
     MAX_RETRY_COUNT,
     DuplicateAnalysisRequestError,
     AnalysisNotSupportedError,
-    RetryLimitExceededError,
     AnalysisPipelineError,
+    RetryLimitExceededError,
     StaleAnalysisRunError,
 )
 
@@ -44,11 +51,271 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# 시험기간 목록 (exams:period_list) 
+# 헬퍼 함수: 소유권 검증 + Lazy Check 자동 종료
+# =====================================================================
+def _has_processing_material(period):
+    """해당 시험기간에 PDF 추출(status) 또는 AI 분석(analysis_status)이
+    PROCESSING 중인 StudyMaterial이 하나라도 있는지 확인한다.
+
+    #132의 AI/OCR 경로는 'ExamPeriod lock → PROCESSING 선점 → lock 해제 →
+    외부 OCR/AI 호출 → 결과 저장' 구조라, lock을 해제한 뒤 실제 호출이
+    끝나기 전까지는 ExamPeriod row lock만으로 진행 중 여부를 알 수 없다.
+    그 사이 시험기간을 COMPLETED로 만들어버리면(수동 종료든 lazy check든)
+    "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"이 가능해지므로,
+    종료/자동종료 판정 전에 이 함수로 반드시 확인해야 한다.
+    """
+    return StudyMaterial.objects.filter(
+        exam__exam_period=period,
+    ).filter(
+        Q(status=MaterialStatus.PROCESSING) | Q(analysis_status=MaterialStatus.PROCESSING)
+    ).exists()
+
+
+# =====================================================================
+# 헬퍼 함수: 만료된 ACTIVE 시험기간 → COMPLETED 전환 (Lazy Check)
+# period_complete()의 수동 종료와 동일하게 ExamPeriod select_for_update() 락
+# 안에서 '판정 → 저장'을 원자적으로 수행한다. 이걸 지키지 않으면
+#   1) Lazy Check가 PROCESSING 없음을 확인
+#   2) AI 요청이 ExamPeriod 락을 잡고 material을 PROCESSING으로 선점
+#   3) Lazy Check가 뒤늦게 COMPLETED로 저장
+# 하는 경쟁이 가능해져서, "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"과
+# 동일한 버그가 재발한다.
+# =====================================================================
+def _lazy_complete_expired_period_locked(period):
+    """단일 ExamPeriod에 대해 select_for_update() 락 안에서 만료+미처리 여부를
+    다시 확인하고 필요시 COMPLETED로 전환한 뒤, 잠금이 걸렸던 시점 기준 최신
+    인스턴스를 반환한다.
+
+    호출부에서 이미 얕게 조회해 둔 period가 만료 대상으로 '보이지 않으면'
+    (ACTIVE가 아니거나 아직 end_date 이전) 락을 아예 열지 않고 그대로
+    반환한다 - 대부분의 조회가 여기 해당하므로, 매 요청마다 트랜잭션을 여는
+    비용을 피하기 위한 최적화다. 이 사전 체크는 최적화일 뿐 최종 판정이
+    아니며, 만료 대상으로 보이는 경우엔 반드시 락 안에서 다시 판정한다.
+    """
+    if not (
+        period.status == ExamPeriodStatus.ACTIVE
+        and period.end_date < timezone.localdate()
+    ):
+        return period
+
+    with transaction.atomic():
+        locked = ExamPeriod.objects.select_for_update().get(id=period.id)
+        if (
+            locked.status == ExamPeriodStatus.ACTIVE
+            and locked.end_date < timezone.localdate()
+            and not _has_processing_material(locked)
+        ):
+            locked.status = ExamPeriodStatus.COMPLETED
+            locked.save(update_fields=['status'])
+        return locked
+
+
+def _lazy_complete_expired_periods_for_user(user):
+    """사용자의 만료된 ACTIVE ExamPeriod 전체를 대상으로 Lazy Check를 수행한다.
+
+    period_list/period_create가 이전에 쓰던 queryset.exclude(...).update(...)
+    일괄 처리는 '어떤 시험기간이 PROCESSING 중인지 확인하는 조회'와
+    'COMPLETED로 갱신하는 UPDATE' 사이에 락이 없어 위와 동일한 경쟁이
+    가능했다. 이를 막기 위해 만료 후보 id만 뽑은 뒤, 각 시험기간을 개별
+    트랜잭션에서 select_for_update()로 잠그고 판정한다. 시험기간 수가 많지
+    않은 도메인이라 건별 락의 비용은 무시할 만하다.
+    """
+    expired_period_ids = ExamPeriod.objects.filter(
+        user=user,
+        status=ExamPeriodStatus.ACTIVE,
+        end_date__lt=timezone.localdate(),
+    ).values_list('id', flat=True)
+
+    for period_id in expired_period_ids:
+        with transaction.atomic():
+            period = ExamPeriod.objects.select_for_update().get(id=period_id)
+            if (
+                period.status == ExamPeriodStatus.ACTIVE
+                and period.end_date < timezone.localdate()
+                and not _has_processing_material(period)
+            ):
+                period.status = ExamPeriodStatus.COMPLETED
+                period.save(update_fields=['status'])
+
+
+def _get_owned_exam_period(user, period_id):
+    """사용자의 시험기간을 조회하고, 만료된 ACTIVE 상태면 Lazy Check로 즉시
+    COMPLETED 전환을 시도한다(전환 여부 판정 자체는
+    _lazy_complete_expired_period_locked 참고)."""
+    period = get_object_or_404(ExamPeriod, id=period_id, user=user)
+    return _lazy_complete_expired_period_locked(period)
+
+
+
+# =====================================================================
+# 시험기간 잠금 데코레이터 (동시성 방어 + POST만 차단)
+# =====================================================================
+def check_exam_period_locked_by_period_id(view_func):
+    """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후
+    계획 존재 여부 검증 + view_func 실행까지 동일 트랜잭션/락 스코프 안에서 수행"""
+    @wraps(view_func)
+    def wrapped_view(request, period_id, *args, **kwargs):
+        if request.method == 'POST':
+            with transaction.atomic():
+                period = get_object_or_404(
+                    ExamPeriod.objects.select_for_update(),
+                    id=period_id,
+                    user=request.user
+                )
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                    messages.error(request, "종료된 시험기간은 수정할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간은 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+                return view_func(request, period_id, *args, **kwargs)
+        return view_func(request, period_id, *args, **kwargs)
+    return wrapped_view
+
+
+def check_exam_period_locked_by_exam_id(view_func):
+    @wraps(view_func)
+    def wrapped_view(request, exam_id, *args, **kwargs):
+        if request.method == 'POST':
+            with transaction.atomic():
+                exam = get_object_or_404(
+                    Exam.objects.select_related('exam_period'),
+                    id=exam_id,
+                    exam_period__user=request.user
+                )
+                period = ExamPeriod.objects.select_for_update().get(id=exam.exam_period_id)
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                    messages.error(request, "종료된 시험기간의 과목은 수정할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간의 과목은 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+                return view_func(request, exam_id, *args, **kwargs)
+        return view_func(request, exam_id, *args, **kwargs)
+    return wrapped_view
+
+
+def check_exam_period_locked_by_material_id(view_func):
+    @wraps(view_func)
+    def wrapped_view(request, material_id, *args, **kwargs):
+        if request.method == 'POST':
+            with transaction.atomic():
+                # 1. exam_period_id만 얻기 위한 조회. 이 시점의 status/analysis_status는
+                #    아래 판정에 절대 사용하지 않는다 - ExamPeriod 락을 기다리는 동안
+                #    다른 요청(AI 분석 등)이 먼저 락을 잡고 이 material을 PROCESSING으로
+                #    선점할 수 있기 때문이다.
+                material_ref = get_object_or_404(
+                    StudyMaterial.objects.select_related('exam__exam_period'),
+                    id=material_id,
+                    exam__exam_period__user=request.user
+                )
+                period = ExamPeriod.objects.select_for_update().get(
+                    id=material_ref.exam.exam_period_id
+                )
+
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                    messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+
+                if DailyPlan.objects.filter(exam_period=period).exists():
+                    messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                    return redirect('exams:period_detail', period_id=period.id)
+
+                # 2. ExamPeriod 락을 획득한 *이후*에 material을 다시 조회해서
+                #    최신 status/analysis_status로 판정한다. 위 1번에서 락 대기가
+                #    있었다면, 그 사이 다른 요청이 먼저 이 ExamPeriod를 잠그고
+                #    material을 PROCESSING으로 바꿔놓았을 수 있는데, 이 재조회로
+                #    그 변경 사항을 놓치지 않고 반영한다.
+                material = get_object_or_404(
+                    StudyMaterial,
+                    id=material_id,
+                    exam__exam_period__user=request.user,
+                )
+
+                if (
+                    material.status == MaterialStatus.PROCESSING
+                    or material.analysis_status == MaterialStatus.PROCESSING
+                ):
+                    messages.error(request, "현재 처리 중인 학습자료는 삭제하거나 수정할 수 없습니다.")
+                    return redirect('exams:material_detail', material_id=material_id)
+
+                return view_func(request, material_id, *args, **kwargs)
+        return view_func(request, material_id, *args, **kwargs)
+    return wrapped_view
+
+def check_exam_period_not_locked_by_material_id(claim_func=None):
+    """material_id 기준: ExamPeriod row lock 안에서
+      1) 계획 존재 여부 검증
+      2) (claim_func가 주어지면) material을 PROCESSING 등으로 원자적 선점
+    까지 마친 뒤 락을 해제하고, view_func 자체(PDF 추출/AI 분석 같은
+    장시간 외부 호출)는 트랜잭션·락 밖에서 실행한다.
+
+    claim_func(material) -> (claimed, message, level, extra)
+        claimed=False면 message/level(예: 'error'|'info')로 안내하고
+        view_func를 호출하지 않은 채 material_detail로 리다이렉트한다.
+        claimed=True면 extra는 view_func에 claim_extra 키워드 인자로
+        그대로 전달된다 (예: 분석 run_id).
+    """
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapped_view(request, material_id, *args, **kwargs):
+            if request.method == 'POST':
+                with transaction.atomic():
+                    # 1. exam_period_id만 얻기 위한 조회. 이 시점의 material은
+                    #    claim_func 판정에 절대 쓰지 않는다 - ExamPeriod 락을
+                    #    기다리는 동안 다른 요청(삭제 등)이 먼저 락을 잡고
+                    #    이 material을 지우거나 상태를 바꿀 수 있기 때문이다.
+                    material_ref = get_object_or_404(
+                        StudyMaterial.objects.select_related('exam__exam_period'),
+                        id=material_id,
+                        exam__exam_period__user=request.user
+                    )
+                    period = ExamPeriod.objects.select_for_update().get(
+                        id=material_ref.exam.exam_period_id
+                    )
+
+                    if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                        messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
+                        return redirect('exams:period_detail', period_id=period.id)
+
+                    if DailyPlan.objects.filter(exam_period=period).exists():
+                        messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
+                        return redirect('exams:period_detail', period_id=period.id)
+
+                    # 2. ExamPeriod 락 획득 이후 material을 다시 조회한다.
+                    #    락 대기 중 다른 요청이 먼저 락을 잡고 material을 삭제했거나
+                    #    상태를 바꿨을 수 있으므로, claim_func에는 이 재조회 결과만
+                    #    넘긴다. 삭제된 경우 material_detail로 안내하고 종료한다
+                    #    (500 대신 정상적인 사용자 메시지).
+                    try:
+                        material = StudyMaterial.objects.get(
+                            id=material_id,
+                            exam__exam_period__user=request.user,
+                        )
+                    except StudyMaterial.DoesNotExist:
+                        messages.error(request, "이미 삭제된 학습자료입니다.")
+                        return redirect('exams:period_detail', period_id=period.id)
+
+                    if claim_func is not None:
+                        claimed, message, level, extra = claim_func(material)
+                        if not claimed:
+                            getattr(messages, level)(request, message)
+                            return redirect('exams:material_detail', material_id=material.id)
+                        kwargs['claim_extra'] = extra
+                # atomic 블록 종료 → ExamPeriod 락 해제
+            return view_func(request, material_id, *args, **kwargs)
+        return wrapped_view
+    return decorator
+
+# =====================================================================
+# 시험기간 목록 (exams:period_list) - 일괄 Lazy Check 자동 종료 적용
 # =====================================================================
 @login_required
 @require_http_methods(["GET"])
 def period_list(request):
+    # end_date가 지난 ACTIVE 시험기간을 개별 락 기준으로 일괄 COMPLETED 처리
+    _lazy_complete_expired_periods_for_user(request.user)
+
     periods = ExamPeriod.objects.filter(user=request.user)
     ongoing_periods = periods.exclude(
         status__in=[ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED]
@@ -63,19 +330,16 @@ def period_list(request):
     }
     return render(request, 'exams/period_list.html', context)
 
-
 # =====================================================================
 # 시험기간 생성 (exams:period_create) 
 # =====================================================================
 @login_required
 @require_http_methods(["GET", "POST"])
 def period_create(request):
-    """
-    생성 전용. 수정은 period_update가 따로 담당.
-    - active 시험기간 1개 제한 (MVP 정책)
-    - 생성 성공 시 '시험기간 상세'로 이동
-    - start_date~end_date 범위의 AvailableTime을 0분으로 미리 채워둠
-    """
+    # period_list/period_detail을 거치지 않고 바로 생성 화면으로 들어오는 경우에도
+    # 동일한 Lazy Check를 먼저 수행한다.
+    _lazy_complete_expired_periods_for_user(request.user)
+
     if request.method == 'POST':
         form = ExamPeriodForm(request.POST)
         if form.is_valid():
@@ -110,6 +374,7 @@ def period_create(request):
 # 시험기간 수정 (exams:period_update) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_period_id
 @require_http_methods(["GET", "POST"])
 def period_update(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
@@ -120,12 +385,10 @@ def period_update(request, period_id):
             with transaction.atomic():
                 updated = form.save()
 
-                # 축소된 경우: 새 범위(start_date~end_date) 밖의 AvailableTime 삭제
                 AvailableTime.objects.filter(exam_period=updated).exclude(
                     date__range=(updated.start_date, updated.end_date)
                 ).delete()
 
-                # 확장된 경우: 새로 생긴 날짜만 0분으로 채움 (기존 값은 안 건드림)
                 curr_date = updated.start_date
                 while curr_date <= updated.end_date:
                     AvailableTime.objects.get_or_create(
@@ -147,17 +410,11 @@ def period_update(request, period_id):
 @require_http_methods(["POST"])
 def period_delete(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
-    
-    # 1. delete() 실행 전, 알림 메시지에 쓸 title 변수 추출 (안전성 보장)
     period_title = period.title
 
     with transaction.atomic():
-        # 2. PROTECT 조건 방해 요인인 DailyPlan / RecoveryPlan 선-삭제
-        # (CASCADE에 의해 DailyPlanItem, ProgressLog, RecoveryPlanItem이 함께 정리됨)
         DailyPlan.objects.filter(exam_period=period).delete()
         RecoveryPlan.objects.filter(exam_period=period).delete()
-        
-        # 3. ExamPeriod 삭제 (Exam, StudyTask, AvailableTime, StudyMaterial CASCADE 삭제)
         period.delete()
 
     messages.success(request, f"'{period_title}' 시험기간과 관련 학습 계획이 모두 삭제되었습니다.")
@@ -165,12 +422,49 @@ def period_delete(request, period_id):
 
 
 # =====================================================================
-# 시험기간 상세 (exams:period_detail) 
+# 시험기간 수동 종료 (exams:period_complete)
+# =====================================================================
+@login_required
+@require_http_methods(["POST"])
+def period_complete(request, period_id):
+    """
+    시험기간 수동 종료. #132의 AI/OCR 경로('ExamPeriod lock → PROCESSING 선점 →
+    lock 해제 → 외부 호출 → 결과 저장')와 동일한 기준으로 직렬화하기 위해,
+    ExamPeriod를 select_for_update()로 잠근 뒤 PROCESSING 중인 학습자료가 있으면
+    종료를 거부한다. 이렇게 하면 AI/OCR 쪽과 이 뷰 중 어느 쪽이 먼저 락을
+    잡든 같은 규칙으로 순서가 정해진다.
+    """
+    with transaction.atomic():
+        period = get_object_or_404(
+            ExamPeriod.objects.select_for_update(),
+            id=period_id,
+            user=request.user,
+        )
+
+        if period.status != ExamPeriodStatus.ACTIVE:
+            messages.info(request, "이미 완료되거나 보관 처리된 시험기간입니다.")
+            return redirect('exams:period_list')
+
+        if _has_processing_material(period):
+            messages.error(request, "PDF 추출 또는 AI 분석이 진행 중인 학습자료가 있어 시험기간을 종료할 수 없습니다. 처리가 끝난 후 다시 시도해주세요.")
+            return redirect('exams:period_list')
+
+        period.status = ExamPeriodStatus.COMPLETED
+        period.save(update_fields=['status'])
+        period_title = period.title
+    # atomic 블록 종료 → ExamPeriod 락 해제
+
+    messages.success(request, f"'{period_title}' 시험기간이 완료 처리되었습니다.")
+    return redirect('exams:period_list')
+
+
+# =====================================================================
+# 시험기간 상세 (exams:period_detail) - Lazy Check 헬퍼 호출 연결
 # =====================================================================
 @login_required
 @require_http_methods(["GET"])
 def period_detail(request, period_id):
-    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    period = _get_owned_exam_period(request.user, period_id)
     exams = period.exams.all()
     available_times = period.available_times.all()
     context = {'period': period, 'exams': exams, 'available_times': available_times}
@@ -205,28 +499,57 @@ def period_manage(request, period_id):
 @login_required
 @require_http_methods(["GET", "POST"])
 def period_manage_available_time(request, period_id):
+    """
+    계획 생성 후 전용 가용시간 수정 화면. plan_generate()와의 직렬화, 그리고
+    "종료된 시험기간은 읽기 전용" 정책을 함께 지키기 위해 available_time_update와
+    동일하게 POST 처리 전체를 ExamPeriod row lock(select_for_update) 안에서
+    수행하고, DailyPlan/상태 확인부터 저장까지 같은 트랜잭션에서 끝낸다.
+    """
+    if request.method == 'POST':
+        with transaction.atomic():
+            period = get_object_or_404(
+                ExamPeriod.objects.select_for_update(),
+                id=period_id,
+                user=request.user,
+            )
+
+            if not DailyPlan.objects.filter(exam_period=period).exists():
+                return redirect('exams:period_detail', period_id=period.id)
+
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
+                return redirect('exams:period_manage', period_id=period.id)
+
+            queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
+            formset = AvailableTimeFormSet(request.POST, queryset=queryset)
+
+            if formset.is_valid():
+                try:
+                    save_available_time_formset(formset, exam_period=period)
+                except AvailableTimeEditRejected as exc:
+                    # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
+                    # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
+                    # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
+                    for msg in blocked_date_messages(exc.blocked_dates):
+                        formset._non_form_errors.append(ValidationError(msg))
+                        messages.error(request, msg)
+                else:
+                    messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
+                    return redirect('exams:period_manage', period_id=period.id)
+        # atomic 블록 종료 → ExamPeriod 락 해제
+        return render(request, 'exams/period_manage_available_time.html', {
+            'formset': formset,
+            'period': period,
+        })
+
+    # ================================================================
+    # GET
+    # ================================================================
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     if not DailyPlan.objects.filter(exam_period=period).exists():
         return redirect('exams:period_detail', period_id=period.id)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
-
-    if request.method == 'POST':
-        formset = AvailableTimeFormSet(request.POST, queryset=queryset)
-        if formset.is_valid():
-            try:
-                save_available_time_formset(formset, exam_period=period)
-            except AvailableTimeEditRejected as exc:
-                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
-                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
-                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                for msg in blocked_date_messages(exc.blocked_dates):
-                    formset._non_form_errors.append(ValidationError(msg))
-                    messages.error(request, msg)
-            else:
-                messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
-                return redirect('exams:period_manage', period_id=period.id)
-    else:
-        formset = AvailableTimeFormSet(queryset=queryset)
+    formset = AvailableTimeFormSet(queryset=queryset)
 
     return render(request, 'exams/period_manage_available_time.html', {
         'formset': formset,
@@ -256,6 +579,7 @@ def period_manage_task_view(request, exam_id):
 # 과목 추가 (exams:subject_create) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_period_id
 @require_http_methods(["GET", "POST"])
 def subject_create(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
@@ -277,34 +601,38 @@ def subject_create(request, period_id):
 # 과목 수정 (exams:subject_update) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_period_id
 @require_http_methods(["GET", "POST"])
 def subject_update(request, period_id, exam_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     exam = get_object_or_404(Exam, id=exam_id, exam_period=period)
 
-    if request.method == 'POST':
+    if request.method == "POST":
         form = ExamForm(request.POST, instance=exam, exam_period=period)
         if form.is_valid():
             form.save()
-            return redirect('exams:period_detail', period_id=period.id)
+            return redirect("exams:period_detail", period_id=period.id)
     else:
         form = ExamForm(instance=exam, exam_period=period)
 
-    return render(request, 'exams/subject_form.html', {'form': form, 'period': period, 'exam': exam})
+    return render(request, "exams/subject_form.html", {'form': form, 'period': period, 'exam': exam})
 
 
 # =====================================================================
 # 과목 삭제 (exams:subject_delete) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_period_id
 @require_http_methods(["POST"])
 def subject_delete(request, period_id, exam_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
     exam = get_object_or_404(Exam, id=exam_id, exam_period=period)
+
     subject_name = exam.subject_name
     exam.delete()
+
     messages.success(request, f"'{subject_name}' 과목이 삭제되었습니다.")
-    return redirect('exams:period_detail', period_id=period.id)
+    return redirect("exams:period_detail", period_id=period.id)
 
 
 # =====================================================================
@@ -313,62 +641,73 @@ def subject_delete(request, period_id, exam_id):
 @login_required
 @require_http_methods(["GET", "POST"])
 def available_time_update(request, period_id):
-    period = get_object_or_404(
-        ExamPeriod,
-        id=period_id,
-        user=request.user,
-    )
+    """
+    가용시간 수정. 계획(DailyPlan) 존재 여부와 무관하게 항상 허용하되,
+    과거/마감된 날짜 차단은 save_available_time_formset()이 담당한다.
 
-    queryset = AvailableTime.objects.filter(
-        exam_period=period
-    ).order_by("date")
+    예전에는 @check_exam_period_locked_by_period_id를 적용해서 DailyPlan이
+    하나라도 있으면 POST 자체를 막았는데, 이는 "계획 생성 후에도 가용시간
+    수정은 허용한다"는 정책과 충돌해서 제거했다 (관련 논의: PR 리뷰).
 
-    # ================================================================
-    # POST
-    # ================================================================
+    plan_generate()와의 직렬화는 여전히 필요하므로, DailyPlan 존재 여부로
+    차단하는 대신 ExamPeriod row lock만 POST 처리 전체에 건다. 이렇게 하면
+    plan_generate()가 같은 ExamPeriod를 잠그고 finalized_at/가용시간을 읽는
+    동안 이 뷰가 끼어들어 값을 바꾸는 것만 막힌다.
+    """
     if request.method == "POST":
-
-        formset = AvailableTimeFormSet(
-            request.POST,
-            queryset=queryset,
-        )
-
-        next_url = (
-            request.POST.get("next")
-            or request.GET.get("next")
-            or request.META.get("HTTP_REFERER", "")
-        )
-
-        if not formset.is_valid():
-            return render(
-                request,
-                "exams/available_time_form.html",
-                {
-                    "formset": formset,
-                    "period": period,
-                    "next": next_url,
-                },
+        with transaction.atomic():
+            period = get_object_or_404(
+                ExamPeriod.objects.select_for_update(),
+                id=period_id,
+                user=request.user,
             )
 
-        try:
-            save_available_time_formset(formset, exam_period=period)
-        except AvailableTimeEditRejected as exc:
-            for msg in blocked_date_messages(exc.blocked_dates):
-                # BaseFormSet에는 Form.add_error() 같은 공개 API가 없어서,
-                # non_form_errors()가 실제로 읽는 내부 리스트에 직접 추가한다
-                # (Django formset.full_clean()이 내부적으로 쓰는 것과 동일한 패턴).
-                formset._non_form_errors.append(ValidationError(msg))
-                messages.error(request, msg)
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
+                return redirect('exams:period_detail', period_id=period.id)
 
-            return render(
-                request,
-                "exams/available_time_form.html",
-                {
-                    "formset": formset,
-                    "period": period,
-                    "next": next_url,
-                },
+            queryset = AvailableTime.objects.filter(
+                exam_period=period
+            ).order_by("date")
+
+            formset = AvailableTimeFormSet(
+                request.POST,
+                queryset=queryset,
             )
+
+            next_url = (
+                request.POST.get("next")
+                or request.GET.get("next")
+                or request.META.get("HTTP_REFERER", "")
+            )
+
+            if not formset.is_valid():
+                return render(
+                    request,
+                    "exams/available_time_form.html",
+                    {
+                        "formset": formset,
+                        "period": period,
+                        "next": next_url,
+                    },
+                )
+
+            try:
+                save_available_time_formset(formset, exam_period=period)
+            except AvailableTimeEditRejected as exc:
+                for msg in blocked_date_messages(exc.blocked_dates):
+                    formset._non_form_errors.append(ValidationError(msg))
+                    messages.error(request, msg)
+                return render(
+                    request,
+                    "exams/available_time_form.html",
+                    {
+                        "formset": formset,
+                        "period": period,
+                        "next": next_url,
+                    },
+                )
+        # atomic 블록 종료 → ExamPeriod 락 해제
 
         messages.success(request, "가용 시간이 성공적으로 저장되었습니다.")
 
@@ -379,54 +718,47 @@ def available_time_update(request, period_id):
         ):
             return redirect(next_url)
 
-        return redirect(
-            "exams:period_detail",
-            period_id=period.id,
-        )
+        return redirect("exams:period_detail", period_id=period.id)
 
     # ================================================================
     # GET
     # ================================================================
-    formset = AvailableTimeFormSet(
-        queryset=queryset,
-    )
-
-    next_url = (
-        request.GET.get("next")
-        or request.META.get("HTTP_REFERER", "")
-    )
+    period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    queryset = AvailableTime.objects.filter(exam_period=period).order_by("date")
+    formset = AvailableTimeFormSet(queryset=queryset)
+    next_url = request.GET.get("next") or request.META.get("HTTP_REFERER", "")
 
     return render(
         request,
         "exams/available_time_form.html",
-        {
-            "formset": formset,
-            "period": period,
-            "next": next_url,
-        },
+        {"formset": formset, "period": period, "next": next_url},
     )
+
 
 # =====================================================================
 # 자료 등록 (exams:material_create) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_exam_id
 @require_http_methods(["GET", "POST"])
 def material_create(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
 
-    if request.method == 'POST':
+    if request.method == "POST":
         form = StudyMaterialForm(request.POST, request.FILES)
         if form.is_valid():
             material = form.save(commit=False)
             material.exam = exam
+
             if material.material_type == MaterialType.TEXT:
                 material.status = MaterialStatus.COMPLETED
+
             material.save()
-            return redirect('exams:material_detail', material_id=material.id)
+            return redirect("exams:material_detail", material_id=material.id)
     else:
         form = StudyMaterialForm()
 
-    return render(request, 'exams/material_form.html', {'form': form, 'exam': exam})
+    return render(request, "exams/material_form.html", {"form": form, "exam": exam})
 
 
 # =====================================================================
@@ -443,43 +775,39 @@ def material_detail(request, material_id):
 # =====================================================================
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
-@login_required
-@require_http_methods(["POST"])
-def material_extract(request, material_id):
-    material = get_object_or_404(
-        StudyMaterial, id=material_id, exam__exam_period__user=request.user
-    )
-    previous_extracted_text = material.extracted_text
-
+def _claim_material_for_extraction(material):
     if material.material_type != MaterialType.PDF:
-        messages.error(request, "PDF 자료만 텍스트 추출이 가능합니다.")
-        return redirect('exams:material_detail', material_id=material.id)
-
+        return False, "PDF 자료만 텍스트 추출이 가능합니다.", "error", None
     if not material.file:
-        messages.error(request, "첨부된 PDF 파일이 없습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
+        return False, "첨부된 PDF 파일이 없습니다.", "error", None
 
-    updated_count = StudyMaterial.objects.filter(pk=material.pk).exclude(
+    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(
         status=MaterialStatus.PROCESSING
     ).exclude(
         analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
     ).update(status=MaterialStatus.PROCESSING, error_message=None)
 
-    if not updated_count:
+    if not updated:
         material.refresh_from_db(fields=['status', 'analysis_status'])
         if material.status == MaterialStatus.PROCESSING:
-            messages.info(request, "이미 PDF 텍스트를 추출 중인 자료입니다.")
-        elif material.analysis_status == MaterialStatus.PROCESSING:
-            messages.error(request, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.")
-        else:
-            messages.error(
-                request,
-                "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 "
-                "화면에서 확인해주세요.",
-            )
-        return redirect('exams:material_detail', material_id=material.id)
+            return False, "이미 PDF 텍스트를 추출 중인 자료입니다.", "info", None
+        if material.analysis_status == MaterialStatus.PROCESSING:
+            return False, "AI 분석이 진행 중인 자료는 다시 추출할 수 없습니다.", "error", None
+        return False, "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.", "error", None
 
-    material.refresh_from_db(fields=['status', 'error_message'])
+    return True, None, None, None
+
+
+@login_required
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
+@require_http_methods(["POST"])
+def material_extract(request, material_id, claim_extra=None):
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+    previous_extracted_text = material.extracted_text
+    # material_type / file / status 선점은 claim_func가 락 안에서 이미 끝냈으므로
+    # 여기서는 바로 추출을 진행한다.
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -518,41 +846,56 @@ def material_extract(request, material_id):
 # 자료 삭제 (exams:material_delete) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_material_id
 @require_http_methods(["POST"])
 def material_delete(request, material_id):
-    material = get_object_or_404(StudyMaterial, id=material_id, exam__exam_period__user=request.user)
+    material = get_object_or_404(
+        StudyMaterial,
+        id=material_id,
+        exam__exam_period__user=request.user,
+    )
+
     exam = material.exam
     period_id = exam.exam_period_id
+
     material.delete()
-    messages.success(request, "학습자료가 삭제되었습니다.")
-    return redirect('exams:period_detail', period_id=period_id)
+
+    messages.success(
+        request,
+        "학습자료가 삭제되었습니다.",
+    )
+
+    return redirect(
+        "exams:period_detail",
+        period_id=period_id,
+    )
 
 
 # =====================================================================
-# AI 분석 실행 (exams:material_analyze) - E-AI-01
+# AI 분석 실행 (exams:material_analyze)
 # =====================================================================
+def _claim_material_for_analysis(material):
+    if material.status != MaterialStatus.COMPLETED:
+        return False, "텍스트 추출이 완료된 자료만 AI 분석을 시작할 수 있습니다.", "error", None
+    try:
+        run_id = claim_analysis_run(material, is_retry=False)
+    except DuplicateAnalysisRequestError:
+        return False, "이미 분석 중이거나 처리된 자료입니다.", "info", None
+    return True, None, None, run_id
+
+
 @login_required
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_analysis)
 @require_http_methods(["POST"])
-def material_analyze(request, material_id):
+def material_analyze(request, material_id, claim_extra=None):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    if material.status != MaterialStatus.COMPLETED:
-        messages.error(request, "텍스트 추출이 완료된 자료만 AI 분석을 시작할 수 있습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
-
     try:
-        analyze_and_estimate(material)
-        # 피드백 3번 반영: 동기식이므로 "시작되었습니다" 메시지 제거하고 완료 메시지만 노출
+        run_claimed_analysis(material, claim_extra)
         messages.success(request, "AI 분석이 완료되었습니다.")
-    except DuplicateAnalysisRequestError:
-        messages.info(request, "이미 분석 중이거나 처리된 자료입니다.")
-        return redirect('exams:material_detail', material_id=material.id)
     except StaleAnalysisRunError:
-        # 리뷰 반영(#84): 이 실행이 시작은 했지만, 완료 처리 직전에 다른(더 최신)
-        # 실행에게 선점당한 경우다. 진짜 시스템 오류가 아니라 정상적인 동시성
-        # 상황이므로, DuplicateAnalysisRequestError와 같은 계열의 안내로 처리한다.
         logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
         messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
         return redirect('exams:material_detail', material_id=material.id)
@@ -567,32 +910,35 @@ def material_analyze(request, material_id):
     return redirect('exams:task_review', exam_id=material.exam_id)
 
 
+
 # =====================================================================
-# AI 분석 재시도 (exams:material_retry_analyze) - E-AI-03
+# AI 분석 재시도 (exams:material_retry_analyze)
 # =====================================================================
+def _claim_material_for_retry(material):
+    try:
+        run_id = claim_analysis_run(material, is_retry=True)
+    except DuplicateAnalysisRequestError:
+        return False, "이미 분석 중인 자료입니다.", "info", None
+    except AnalysisNotSupportedError as e:
+        return False, str(e), "error", None
+    except RetryLimitExceededError as e:
+        return False, str(e), "error", None
+    return True, None, None, run_id
+
+
 @login_required
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_retry)
 @require_http_methods(["POST"])
-def material_retry_analyze(request, material_id):
+def material_retry_analyze(request, material_id, claim_extra=None):
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
     try:
-        retry_analysis(material)
-    except DuplicateAnalysisRequestError:
-        messages.info(request, "이미 분석 중인 자료입니다.")
-        return redirect('exams:material_detail', material_id=material.id)
+        run_claimed_analysis(material, claim_extra)
     except StaleAnalysisRunError:
-        # material_analyze()와 동일한 이유 - 완료 처리 직전에 다른 실행에게
-        # 선점당한 정상적인 동시성 상황이다.
         logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
         messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except AnalysisNotSupportedError as e:
-        messages.error(request, str(e))
-        return redirect('exams:material_detail', material_id=material.id)
-    except RetryLimitExceededError as e:
-        messages.error(request, str(e))
         return redirect('exams:material_detail', material_id=material.id)
     except (AIAnalysisError, AnalysisPipelineError):
         messages.error(request, "재시도한 AI 분석도 실패했습니다.")
@@ -605,21 +951,16 @@ def material_retry_analyze(request, material_id):
     messages.success(request, "AI 분석이 완료되었습니다.")
     return redirect('exams:task_review', exam_id=material.exam_id)
 
-
 # =====================================================================
-# AI 분석 상태 조회 (exams:material_analysis_status) - E-AI-02
+# AI 분석 상태 조회 (exams:material_analysis_status)
 # =====================================================================
 @login_required
 @require_http_methods(["GET"])
 def material_analysis_status(request, material_id):
-    """
-    E-AI-02: AI 분석 및 텍스트 추출 진행 상태 조회 (폴링용 JSON 엔드포인트).
-    """
     material = get_object_or_404(
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    # get_analysis_status(material) 호출 복원
     analysis_data = get_analysis_status(material)
 
     extraction_status = material.status
@@ -629,48 +970,30 @@ def material_analysis_status(request, material_id):
     analysis_error = analysis_data["error_message"]
     retry_count = analysis_data["retry_count"]
     retry_remaining = analysis_data["retry_remaining"]
-    # 재시도 버튼을 켜고 끄면 되도록 서버가 판단한 결과를 그대로 내려준다.
     can_retry = analysis_data["can_retry"]
     retry_after_seconds = analysis_data["retry_after_seconds"]
-    # 리뷰 반영(#84): stage="ANALYZING"만으로는 "정상적으로 진행 중"인지
-    # "5분 넘게 멈춘 좀비인데 재시도 횟수까지 소진돼 더 이상 손쓸 수 없는 상태"인지
-    # FE가 구분할 수 없었다. is_stale을 같이 내려줘서, is_stale=True인데
-    # can_retry=False면 "재시도 불가, 직접 작업 추가 안내"로 구분할 수 있게 한다.
     is_stale = analysis_data["is_stale"]
 
-    # 1. 전체 stage 판정 로직 (작성하신 추출 우선 stage 판정 유지)
     failed_stage = None
 
-    # ① 재추출 진행 중이면 이전 분석 실패보다 최우선으로 "EXTRACTING"
     if extraction_status == MaterialStatus.PROCESSING:
         stage = "EXTRACTING"
-
-    # ② 추출 자체가 실패한 경우
     elif extraction_status == MaterialStatus.FAILED:
         stage = "FAILED"
         failed_stage = "EXTRACTION"
-
-    # ③ 분석 진행 중인 경우
     elif analysis_status == MaterialStatus.PROCESSING:
         stage = "ANALYZING"
-
-    # ④ 분석이 실패한 경우
     elif analysis_status == MaterialStatus.FAILED:
         stage = "FAILED"
         failed_stage = "ANALYSIS"
-
-    # ⑤ 둘 다 완료된 경우
     elif (
         extraction_status == MaterialStatus.COMPLETED
         and analysis_status == MaterialStatus.COMPLETED
     ):
         stage = "COMPLETED"
-
-    # ⑥ 아무것도 안 한 PENDING 상태
     else:
         stage = "PENDING"
 
-    # 2. 약속된 JSON 응답 스펙 반환
     return JsonResponse({
         "stage": stage,
         "extraction_status": extraction_status,
@@ -692,17 +1015,27 @@ def material_analysis_status(request, material_id):
 # AI 작업 검토 (exams:task_review) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_exam_id
 @require_http_methods(["GET", "POST"])
 def task_review(request, exam_id):
-    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    exam = get_object_or_404(
+        Exam,
+        id=exam_id,
+        exam_period__user=request.user,
+    )
+
     queryset = StudyTask.objects.filter(exam=exam)
 
-    if request.method == 'POST':
-        action = request.POST.get('action')
-        formset = StudyTaskFormSet(request.POST, queryset=queryset)
+    if request.method == "POST":
+        action = request.POST.get("action")
+        formset = StudyTaskFormSet(
+            request.POST,
+            queryset=queryset,
+        )
 
         if formset.is_valid():
             instances = formset.save(commit=False)
+
             for instance in instances:
                 instance.exam = exam
                 instance.is_user_modified = True
@@ -712,6 +1045,7 @@ def task_review(request, exam_id):
                     difficulty=instance.difficulty,
                     speed_factor=exam.speed_factor,
                 )
+
                 instance.estimated_min_minutes = estimated_min
                 instance.estimated_max_minutes = estimated_max
 
@@ -719,43 +1053,49 @@ def task_review(request, exam_id):
 
             for obj in formset.deleted_objects:
                 obj.delete()
-
             if action in ('confirm', 'confirm_and_next'):
-                exam.study_tasks.filter(is_confirmed=False).update(is_confirmed=True)
-
-                # #99 근본 수정 전까지 FE에서 임시로 처리: 같은 시험기간의 다른 과목 중
-                # 아직 미확정 작업이 남아있는 과목이 있으면 그 과목으로 계속 이동시키고,
-                # 전부 확정됐을 때만 feasibility로 넘어간다.
-                next_exam = Exam.objects.filter(
-                    exam_period_id=exam.exam_period_id,
-                    study_tasks__is_confirmed=False,
-                ).exclude(id=exam.id).order_by('exam_date').distinct().first()
-
-                if next_exam:
-                    return redirect('exams:task_review', exam_id=next_exam.id)
-
+                # '모든 과목 저장하고 다음으로' 버튼: 이름 그대로 동작하도록,
+                # 지금 보고 있는 과목뿐 아니라 같은 시험기간의 모든 과목의
+                # 미확정 학습 작업을 한 번에 확정 처리한 뒤 바로 feasibility로 이동한다.
+                StudyTask.objects.filter(
+                    exam__exam_period_id=exam.exam_period_id,
+                    is_confirmed=False,
+                ).update(is_confirmed=True)
                 return redirect('planner:feasibility', period_id=exam.exam_period_id)
-                
-            return redirect('exams:task_review', exam_id=exam.id)
-    else:
-        formset = StudyTaskFormSet(queryset=queryset)
 
-    return render(request, 'exams/task_review.html', {
-        'formset': formset,
-        'exam': exam,
-    })
+            return redirect('exams:task_review', exam_id=exam.id)
+            
+    else:
+        formset = StudyTaskFormSet(
+            queryset=queryset,
+        )
+
+    return render(
+        request,
+        "exams/task_review.html",
+        {
+            "formset": formset,
+            "exam": exam,
+        },
+    )
 
 
 # =====================================================================
 # 학습 작업 직접 추가 (exams:task_create) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_exam_id
 @require_http_methods(["GET", "POST"])
 def study_task_create(request, exam_id):
-    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    exam = get_object_or_404(
+        Exam,
+        id=exam_id,
+        exam_period__user=request.user,
+    )
 
-    if request.method == 'POST':
+    if request.method == "POST":
         form = StudyTaskForm(request.POST)
+
         if form.is_valid():
             task = form.save(commit=False)
             task.exam = exam
@@ -765,34 +1105,68 @@ def study_task_create(request, exam_id):
                 difficulty=task.difficulty,
                 speed_factor=exam.speed_factor,
             )
+
             task.estimated_min_minutes = estimated_min
             task.estimated_max_minutes = estimated_max
-
             task.is_user_modified = True
             task.save()
-            return redirect('exams:task_review', exam_id=exam.id)
+
+            return redirect(
+                "exams:task_review",
+                exam_id=exam.id,
+            )
     else:
         form = StudyTaskForm()
 
-    return render(request, 'exams/task_form.html', {'form': form, 'exam': exam})  
+    return render(
+        request,
+        "exams/task_form.html",
+        {
+            "form": form,
+            "exam": exam,
+        },
+    )
 
 
 # =====================================================================
 # 학습 작업 확정 (exams:task_confirm) 
 # =====================================================================
 @login_required
+@check_exam_period_locked_by_exam_id
 @require_http_methods(["POST"])
 def study_task_confirm(request, exam_id):
-    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
-    tasks = StudyTask.objects.filter(exam=exam, is_confirmed=False)
+    exam = get_object_or_404(
+        Exam,
+        id=exam_id,
+        exam_period__user=request.user,
+    )
+
+    tasks = StudyTask.objects.filter(
+        exam=exam,
+        is_confirmed=False,
+    )
 
     if not tasks.exists():
-        messages.warning(request, "확정할 학습 작업이 없습니다. 먼저 작업을 검토해주세요.")
-        return redirect('exams:task_review', exam_id=exam.id)
+        messages.warning(
+            request,
+            "확정할 학습 작업이 없습니다. 먼저 작업을 검토해주세요.",
+        )
+
+        return redirect(
+            "exams:task_review",
+            exam_id=exam.id,
+        )
 
     for task in tasks:
         task.is_confirmed = True
-        task.save()  
+        task.save()
 
-    messages.success(request, f"{tasks.count()}개 학습 작업이 확정되었습니다.")
-    return redirect('planner:feasibility', period_id=exam.exam_period.id)
+    messages.success(
+        request,
+        f"{tasks.count()}개 학습 작업이 확정되었습니다.",
+    )
+
+    return redirect(
+        "planner:feasibility",
+        period_id=exam.exam_period.id,
+    )
