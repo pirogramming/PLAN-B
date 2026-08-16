@@ -793,9 +793,9 @@ def _claim_material_for_extraction(material):
     run_id = uuid.uuid4()
 
     updated = StudyMaterial.objects.filter(pk=material.pk).exclude(
-        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
     ).filter(
-        Q(status__in=[MaterialStatus.PENDING, MaterialStatus.FAILED])
+        Q(status__in=[MaterialStatus.PENDING, MaterialStatus.FAILED, MaterialStatus.COMPLETED])
         | Q(status=MaterialStatus.PROCESSING, extraction_started_at__lt=stale_cutoff)
         | Q(status=MaterialStatus.PROCESSING, extraction_started_at__isnull=True)
     ).update(
@@ -803,7 +803,7 @@ def _claim_material_for_extraction(material):
         error_message=None,
         extraction_started_at=now,
         extraction_run_id=run_id,
-    )
+    )   
 
     if not updated:
         material.refresh_from_db(fields=['status', 'analysis_status'])

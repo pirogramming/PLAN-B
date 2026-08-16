@@ -3625,6 +3625,22 @@ class MaterialExtractStaleTests(TestCase):
         self.assertEqual(material.status, MaterialStatus.PROCESSING)
         self.assertEqual(material.extraction_run_id, old_run_id)
         mock_extract.assert_not_called()
+        
+    @patch('exams.views.extract_text_from_pdf')
+    def test_completed_material_can_be_re_extracted(self, mock_extract):
+        mock_extract.return_value = "재추출된 새 텍스트"
+        material = self._make_pdf_material(
+            status=MaterialStatus.COMPLETED,
+            extracted_text="예전 텍스트",
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        mock_extract.assert_called_once()
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "재추출된 새 텍스트") 
 
     # -----------------------------------------------------------------
     # 3. 5분 초과 PROCESSING -> 재선점 허용
