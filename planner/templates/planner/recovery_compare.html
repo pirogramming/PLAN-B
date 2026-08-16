@@ -62,34 +62,25 @@
         </div>
       </div>
  
-      {% if plans %}
-        <div class="rec-grid">
-          {% for p in plans %}
-            {% include "planner/includes/recovery_card.html" with plan=p selected=p.is_selected %}
-          {% endfor %}
-        </div>
-      {% else %}
-        {% url 'planner:dashboard' as dashboard_url %}
-        <div class="card">
-          {% include "planner/includes/empty_state.html" with icon="i-alert" title="현재 남은 가용시간으로 적용 가능한 복구안을 만들 수 없습니다." btn_label="대시보드로 돌아가기" btn_url=dashboard_url %}
-        </div>
-      {% endif %}
+      <div class="rec-grid">
+        {% for p in plans %}
+          {% include "planner/includes/recovery_card.html" with plan=p selected=p.is_selected %}
+        {% endfor %}
+      </div>
     </div>
 
-    {% if plans %}
-      <div class="bottom-bar">
-        <div>
-          <div class="info">선택한 복구안 · <span id="recLabel">{{ selected_plan.type_label }}</span></div>
-          <div class="desc">적용하면 내일부터의 계획만 바뀝니다. 오늘까지의 기록은 그대로입니다.</div>
-        </div>
-        <div class="row ml-auto" style="gap:8px">
-          <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
-          <a class="btn btn-accent btn-lg" href="{{ selected_plan.preview_url }}" id="previewBtn" data-plan-id="{{ selected_plan.id }}">
-            미리보기<svg class="ico"><use href="#i-arrow-right"/></svg>
-          </a>
-        </div>
+    <div class="bottom-bar">
+      <div>
+        <div class="info">선택한 복구안 · <span id="recLabel">{{ selected_plan.type_label }}</span></div>
+        <div class="desc">적용하면 내일부터의 계획만 바뀝니다. 오늘까지의 기록은 그대로입니다.</div>
       </div>
-    {% endif %}
+      <div class="row ml-auto" style="gap:8px">
+        <a class="btn btn-ghost" href="{% url 'planner:dashboard' %}">나중에 결정</a>
+        <a class="btn btn-accent btn-lg" href="{{ selected_plan.preview_url }}" id="previewBtn" data-plan-id="{{ selected_plan.id }}">
+          미리보기<svg class="ico"><use href="#i-arrow-right"/></svg>
+        </a>
+      </div>
+    </div>
   </div>
 </div>
  
