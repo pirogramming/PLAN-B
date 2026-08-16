@@ -276,6 +276,7 @@
 /* ===== 반응형 ===== */
 @media (max-width:1024px){
   .grid-3{grid-template-columns:repeat(2,1fr)}
+  .grid-4{grid-template-columns:repeat(2,1fr)}
   .content{padding:28px 20px 40px}
 }
 
@@ -297,6 +298,12 @@
 
   .content{padding:20px 16px 96px}
   .grid-3{grid-template-columns:1fr}
+  .grid-4{grid-template-columns:repeat(2,1fr)}
+
+  /* 모바일에서는 사이드바가 항상 하단 탭바로 고정 표시되고 접기/펼치기
+     상태 자체가 없어서(위 .side,.app.collapsed .side 규칙 참고), 펼치기
+     버튼을 눌러도 아무 변화가 없다 — 버튼 자체를 숨긴다 */
+  #openSide{display:none}
   .page-head{flex-direction:column;align-items:flex-start;gap:16px}
   .page-head h1{font-size:23px}
   .page-head .ml-auto{margin-left:0;width:100%}
@@ -588,8 +595,8 @@
          font-size:10.5px;font-weight:650;letter-spacing:.02em;color:var(--neutral7)}
 .cal-dow.sun{color:var(--judge3)}
 
-.cal-day{display:flex;flex-direction:column;background:var(--neutral1);min-height:84px;padding:8px 8px 9px;
-         text-align:left;position:relative;transition:background .16s ease;width:100%}
+.cal-day{display:flex;flex-direction:column;background:var(--neutral1);height:134px;padding:8px 8px 9px;
+         text-align:left;position:relative;transition:background .16s ease;width:100%;overflow:hidden}
 .cal-day:not(.out):hover{background:var(--neutral2)}
 .cal-day.out{background:var(--neutral2);cursor:default}
 .cal-day.out .cal-num{color:var(--neutral6)}
@@ -697,7 +704,7 @@
   .cal-head h1{font-size:15px;min-width:0;flex:1}
   .cal-legend{display:none}
   .cal-dow{padding:9px 0;font-size:10px}
-  .cal-day{min-height:60px;padding:6px 4px}
+  .cal-day{height:60px;padding:6px 4px}
   .cal-num{width:20px;height:20px;font-size:11px;margin-bottom:4px}
   .cal-tasks,.cal-more{display:none}
   .cal-exam{position:absolute;top:6px;right:6px;padding:0;width:6px;height:6px;
