@@ -4112,6 +4112,81 @@ class DashboardContextTests(TestCase):
         # available_minutes는 occupied 차감 없이 AvailableTime 원본 총량(180)이어야 한다
         self.assertEqual(overall["available_minutes"], 180)
 
+    def test_progress_total_does_not_double_count_recovery_item(self):
+        """
+        같은 StudyTask의 남은 분량이 복구 후 새 DailyPlanItem으로 생겨도
+        전체 계획량에 중복 합산되지 않아야 한다.
+        """
+        from planner.models import DailyPlan, DailyPlanItem
+
+        recovery_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
+            planned_minutes=20,
+        )
+
+        DailyPlanItem.objects.create(
+            daily_plan=recovery_plan,
+            study_task=self.task_a,
+            planned_minutes=20,
+            order=1,
+        )
+
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # 기존 총량:
+        # task_a 40 + task_b 40 + task_c 40 = 120
+        #
+        # task_a의 복구 아이템 20분이 추가되어도
+        # 같은 study_task이므로 총량은 140이 아니라 120이어야 한다.
+        self.assertEqual(progress["total_minutes"], 120)
+        self.assertEqual(progress["total_done_minutes"], 60)
+        self.assertEqual(progress["total_percent"], 50)
+
+
+    def test_progress_done_sums_original_and_recovery_items(self):
+        """
+        원본 아이템의 PARTIAL 진행분과 복구 아이템의 완료분은
+        같은 StudyTask의 완료량으로 합산하되 총량은 중복되지 않아야 한다.
+        """
+        from planner.models import DailyPlan, DailyPlanItem, ProgressLog
+
+        recovery_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period,
+            date=self.today + timedelta(days=1),
+            available_minutes=60,
+            planned_minutes=20,
+        )
+
+        recovery_item = DailyPlanItem.objects.create(
+            daily_plan=recovery_plan,
+            study_task=self.task_b,
+            planned_minutes=20,
+            order=1,
+        )
+
+        ProgressLog.objects.create(
+            daily_plan_item=recovery_item,
+            progress_status="done",
+            actual_minutes=20,
+            completion_percent=100,
+        )
+
+        response = self._get_dashboard()
+        progress = response.context["progress"]
+
+        # 기존 완료량:
+        # task_a DONE = 40
+        # task_b PARTIAL 50% = 20
+        #
+        # 복구된 task_b 20분 DONE = +20
+        # 따라서 80 / 120 = 66.67% -> round() = 67
+        self.assertEqual(progress["total_minutes"], 120)
+        self.assertEqual(progress["total_done_minutes"], 80)
+        self.assertEqual(progress["total_percent"], 67)
+
 
 class CalendarServiceYearMonthValidationTests(TestCase):
     """
