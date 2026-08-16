@@ -899,80 +899,29 @@
   font-size: 12.5px;
   color: var(--neutral7);
   text-align: center;
-}
-.feasibility-subject-section {
+}.feasibility-subject-section {
   margin-top: 24px;
 }
 .feasibility-subject-title {
   font-size: 13px;
   font-weight: 700;
-  color: var(--neutral10);
+  color: var(--neutral9);
   margin-bottom: 10px;
 }
 .feasibility-subject-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .feasibility-subject-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--neutral4);
-  border-radius: 14px;
-}
-.feasibility-subject-name {
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--neutral10);
-}
-.feasibility-subject-meta {
-  font-size: 11.5px;
-  color: var(--neutral7);
-  margin-top: 3px;
-}
-.feasibility-subject-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.feasibility-subject-minutes {
-  font-size: 12px;
-  color: var(--neutral8);
-}
-@media (max-width: 640px) {
-  .feasibility-subject-row {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .feasibility-subject-right {
-    align-self: stretch;
-    justify-content: space-between;
-  }
-}
-
-.feasibility-subject-list {
-  margin-top: 24px;
-}
-.feasibility-subject-heading {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--neutral9);
-  margin-bottom: 10px;
-}
-.feasibility-subject-card {
-  padding: 18px 20px;
-  margin-bottom: 10px;
-}
-.feasibility-subject-top {
-  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
+  background: var(--neutral1);
+  border: 2px solid var(--neutral4);
+  border-radius: 16px;
+  padding: 16px 20px;
 }
 .feasibility-subject-name {
   font-size: 14px;
@@ -982,9 +931,15 @@
 .feasibility-subject-meta {
   font-size: 12px;
   color: var(--neutral7);
-  margin-bottom: 4px;
+  margin-top: 3px;
 }
-.feasibility-subject-req {
+.feasibility-subject-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.feasibility-subject-minutes {
   font-size: 12.5px;
   color: var(--neutral8);
 }

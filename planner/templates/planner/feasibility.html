@@ -97,11 +97,7 @@
     {% endif %}
   </div>
   {% else %}
-  {# can_generate=True라 위 버튼은 안 뜨지만, 계획 생성 시 시험일/날짜별 가능시간
-     제약으로 일부 작업을 배치하지 못해(UnallocatedTasksError) 다시 이 화면으로
-     돌아올 수 있다. 그때 가용시간을 고치러 갈 방법이 없으면 막히니, 별도
-     에러 신호 없이도 항상 접근 가능하게 ghost 버튼 하나만 조용히 둔다
-     (.feasibility-action-row는 버튼에 flex:1을 줘서 꽉 차 보이므로 여기선 안 씀). #}
+  
   <div style="margin-top:14px; text-align:right;">
     <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가용시간 수정하기
