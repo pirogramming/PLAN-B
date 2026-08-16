@@ -775,17 +775,28 @@ def material_detail(request, material_id):
 # =====================================================================
 # PDF 텍스트 추출 (exams:material_extract) 
 # =====================================================================
+STALE_EXTRACTION_TIMEOUT_SECONDS = 300  # 5분, AI 분석 쪽(PROCESSING_TIMEOUT_SECONDS)과 동일 기준
+
+
 def _claim_material_for_extraction(material):
     if material.material_type != MaterialType.PDF:
         return False, "PDF 자료만 텍스트 추출이 가능합니다.", "error", None
     if not material.file:
         return False, "첨부된 PDF 파일이 없습니다.", "error", None
 
-    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(
-        status=MaterialStatus.PROCESSING
-    ).exclude(
-        analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
-    ).update(status=MaterialStatus.PROCESSING, error_message=None)
+    now = timezone.now()
+    stale_cutoff = now - timezone.timedelta(seconds=STALE_EXTRACTION_TIMEOUT_SECONDS)
+
+    updated = StudyMaterial.objects.filter(pk=material.pk).exclude(analysis_status__in=[MaterialStatus.PROCESSING, MaterialStatus.COMPLETED]
+    ).filter(
+        Q(status__in=[MaterialStatus.PENDING, MaterialStatus.FAILED])
+        | Q(status=MaterialStatus.PROCESSING, extraction_started_at__lt=stale_cutoff)
+        | Q(status=MaterialStatus.PROCESSING, extraction_started_at__isnull=True)
+    ).update(
+        status=MaterialStatus.PROCESSING,
+        error_message=None,
+        extraction_started_at=now,
+    )
 
     if not updated:
         material.refresh_from_db(fields=['status', 'analysis_status'])
@@ -796,7 +807,6 @@ def _claim_material_for_extraction(material):
         return False, "이미 AI 분석이 완료된 자료입니다. 다시 추출하려면 먼저 작업 검토 화면에서 확인해주세요.", "error", None
 
     return True, None, None, None
-
 
 @login_required
 @check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
