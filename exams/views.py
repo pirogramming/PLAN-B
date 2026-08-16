@@ -779,7 +779,7 @@ def material_detail(request, material_id):
 class StaleExtractionRunError(Exception):
     """이 실행(extraction_run_id)이 결과를 저장하기 전에 이미 다른(더 최신) 실행이 이어받음."""
     pass
-STALE_EXTRACTION_TIMEOUT_SECONDS = 200
+STALE_EXTRACTION_TIMEOUT_SECONDS = 300
 
 
 def _claim_material_for_extraction(material):
