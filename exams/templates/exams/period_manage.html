@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}{{ period.title }} · PLAN B{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{% static 'css/planner.css' %}">
+{% endblock %}
+
+{% block body %}
+<div class="app">
+
+  {% include "exams/_sidebar.html" with nav="period_manage" period=period %}
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="openSide" type="button" aria-label="메뉴">
+        <svg class="ico"><use href="#i-menu"/></svg>
+      </button>
+      <h2>시험기간 관리</h2>
+    </header>
+
+    <div class="content">
+
+      <div class="page-head">
+        <div>
+          <h1>{{ period.title }}</h1>
+          <div class="sub">{{ period.start_date|date:"n월 j일" }} ~ {{ period.end_date|date:"n월 j일" }}</div>
+        </div>
+        <form class="ml-auto" method="post" action="{% url 'exams:period_complete' period.id %}"
+              onsubmit="return confirm('시험기간을 종료할까요? 종료 후에는 수정할 수 없습니다.');">
+          {% csrf_token %}
+          <button class="btn btn-ghost" type="submit" style="font-weight:400">
+            시험기간 종료
+          </button>
+        </form>
+      </div>
+
+      <div class="card" style="margin-bottom:22px">
+        <div class="card-body row" style="justify-content:space-between">
+          <div>
+            <div style="font-size:15px;font-weight:650;color:var(--neutral10)">날짜별 공부 가능시간</div>
+            <div class="sub" style="margin-top:6px">총 <span class="num">{{ available_times|length }}</span>일 등록됨</div>
+          </div>
+          <a class="btn btn-ghost btn-sm" href="{% url 'exams:period_manage_available_time' period.id %}">
+            가능시간 수정<svg class="ico"><use href="#i-chevron-right"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h3>과목 ({{ exams|length }})</h3>
+      </div>
+
+      <div class="card" style="margin-bottom:22px">
+        {% for exam in exams %}
+          <div class="subject-card">
+            <div class="info">
+              <div class="name">{{ exam.subject_name }}</div>
+              <div class="date">시험 {{ exam.exam_date|date:"n월 j일" }} · 우선순위 {{ exam.get_priority_display }}</div>
+            </div>
+            <a class="btn btn-ghost btn-sm" href="{% url 'exams:period_manage_task_view' exam.id %}">
+              학습 작업 확인<svg class="ico"><use href="#i-chevron-right"/></svg>
+            </a>
+          </div>
+        {% endfor %}
+      </div>
+
+    </div>
+  </div>
+</div>
+
+{% include "includes/icons.html" %}
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{% static 'js/planner.js' %}"></script>
+{% endblock %}

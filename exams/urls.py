@@ -8,6 +8,9 @@ urlpatterns = [
     path('periods/', views.period_list, name='period_list'),
     path('periods/create/', views.period_create, name='period_create'),
     path('periods/<int:period_id>/', views.period_detail, name='period_detail'),
+    path('periods/<int:period_id>/manage/', views.period_manage, name='period_manage'),
+    path('periods/<int:period_id>/manage/available-time/', views.period_manage_available_time, name='period_manage_available_time'),
+    path('subjects/<int:exam_id>/tasks/view/', views.period_manage_task_view, name='period_manage_task_view'),
     path('periods/<int:period_id>/subjects/create/', views.subject_create, name='subject_create'),
     path('periods/<int:period_id>/available-time/', views.available_time_update, name='available_time_update'),
     path('subjects/<int:exam_id>/materials/create/', views.material_create, name='material_create'),
@@ -26,4 +29,5 @@ urlpatterns = [
     path('materials/<int:material_id>/delete/', views.material_delete, name='material_delete'),
     path('subjects/<int:exam_id>/tasks/create/', views.study_task_create, name='task_create'),
     path('subjects/<int:exam_id>/tasks/confirm/', views.study_task_confirm, name='task_confirm'),
+    path('periods/<int:period_id>/complete/', views.period_complete, name='period_complete'),
 ]

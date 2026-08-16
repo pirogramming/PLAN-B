@@ -20,7 +20,7 @@
 <body>
 
   {% if messages %}
-  <div class="site-messages">
+  <div class="site-messages" id="siteMessages">
     {% for message in messages %}
     <div class="site-message site-message-{{ message.tags }}">
       {{ message }}

@@ -1,0 +1,80 @@
+{% extends "exams/_exam_base.html" %}
+{% load exam_extras %}
+{% block title %}
+학습 작업 확인 - PLAN B
+{% endblock %}
+{% block page_heading %}학습 작업 확인{% endblock %}
+
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="period_manage_task_view" exam=exam %}
+{% endblock %}
+
+{% block exam_content %}
+{% get_period_exams exam.exam_period_id as period_exams %}
+
+<div class="task-review-wrap pmtask-wrap">
+  <div class="page-head">
+    <div>
+      <h1 style="font-size:24px;">학습 작업 확인</h1>
+      <p class="sub">
+        {{ exam.subject_name }} · 총 {{ tasks|length }}개
+      </p>
+    </div>
+  </div>
+
+  <div class="task-review-body">
+    <div class="task-nav-col">
+      <div class="card card-body task-nav-card">
+        <div class="task-nav-title">과목</div>
+        {% for e in period_exams %}
+        <a href="{% url 'exams:period_manage_task_view' e.id %}"
+           class="nav-row-link{% if e.id == exam.id %} active{% endif %}">
+          <span>{{ e.subject_name }}</span>
+          <span class="num" style="color:var(--neutral7);">
+            {{ e.study_tasks.count }}개
+          </span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="task-list-col">
+      {% if not tasks %}
+      <div class="card card-body task-empty-card">
+        아직 학습 작업이 없어요.
+      </div>
+      {% endif %}
+
+      {% for task in tasks %}
+      <div class="card card-body task-item-card">
+        <div class="task-item-top">
+          <div class="task-unit-label">
+            {{ task.unit_name|default:"단원 미지정" }}
+          </div>
+          {% if task.is_confirmed %}
+          <span class="badge badge-ok">확정됨</span>
+          {% endif %}
+        </div>
+
+        <div class="task-title-row">{{ task.title }}</div>
+
+        <div class="task-tag-row">
+          <span class="tag">{{ task.get_task_type_display }}</span>
+          <span class="tag">중요도 {{ task.get_importance_display }}</span>
+          <span class="tag">깊이 {{ task.get_depth_display }}</span>
+          <span class="tag">난이도 {{ task.get_difficulty_display }}</span>
+        </div>
+
+        <div class="task-item-footer">
+          <div class="task-footer-left">
+            <span class="task-time-pill num">
+              예상 {{ task.estimated_min_minutes }}~{{ task.estimated_max_minutes }}분
+            </span>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -3,16 +3,20 @@ import io
 import json
 import logging
 import uuid
+import shutil
+import tempfile
 from unittest.mock import patch
 
 import pypdfium2 as pdfium
-
+from django.db import transaction
+from django.conf import settings
 from django.db import connection
 from django.test import TestCase, TransactionTestCase, override_settings, Client
 from django.urls import reverse
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import ProtectedError
 
 from .models import ExamPeriod, Exam, AvailableTime, StudyMaterial, StudyTask
 from core.choices import (
@@ -23,6 +27,10 @@ from core.choices import (
     TaskDifficulty,
     PriorityLevel,
     TaskDepth,
+    RecoveryActionType,
+    RecoveryPlanStatus,
+    RecoveryType,
+    DailyPlanStatus
 )
 from core.exceptions import AICallFailedError, AIResponseValidationError
 from exams.services.analysis_orchestrator import (
@@ -44,9 +52,10 @@ from exams.services.analysis_orchestrator import (
 
 from exams.services import task_extractor
 from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
-
+from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanItem
 User = get_user_model()
 logger = logging.getLogger(__name__)
+TEMP_MEDIA_ROOT = tempfile.mkdtemp()
 
 
 class OwnershipTests(TestCase):
@@ -1702,12 +1711,13 @@ class AvailableTimeUpdateRedirectTests(TestCase):
         return data
 
     def _invalid_formset_data(self):
-        # date 없이 보내서 formset invalid 유도
+    # date는 disabled 필드이므로 date 누락이 아니라
+    # hours 값을 잘못 보내서 formset invalid 유도
         data = self._management_form_data()
         data.update({
             'form-0-id': str(self.available_time.id),
-            'form-0-date': '',
-            'form-0-hours': '2',
+            'form-0-date': '2026-09-01',
+            'form-0-hours': '-1',
             'form-0-minutes': '30',
         })
         return data
@@ -1753,6 +1763,211 @@ class AvailableTimeUpdateRedirectTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'name="next" value="/some/page/"')
+
+
+class PeriodManageTests(TestCase):
+    """
+    시험기간 관리 허브(period_manage 계열) 접근 제어 + 가용시간 저장 정책
+    (과거/마감 날짜 서버단 차단, DailyPlan.available_minutes 동기화, 시험일
+    입력 허용) 확인.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='pm_owner@example.com', email='pm_owner@example.com', password='pass1234!'
+        )
+        self.other = User.objects.create_user(
+            username='pm_other@example.com', email='pm_other@example.com', password='pass1234!'
+        )
+        self.today = timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.owner, title='관리허브테스트',
+            start_date=self.today, end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name='신호및시스템',
+            exam_date=self.today + datetime.timedelta(days=5),
+        )
+        for i in range(6):
+            AvailableTime.objects.create(
+                exam_period=self.period,
+                date=self.today + datetime.timedelta(days=i),
+                available_minutes=100,
+            )
+
+    def _make_plan(self):
+        from planner.models import DailyPlan, DailyPlanItem
+
+        study_task = StudyTask.objects.create(
+            exam=self.exam, title='1장', estimated_min_minutes=20, estimated_max_minutes=40,
+        )
+        daily_plan = DailyPlan.objects.create(
+            exam_period=self.period, date=self.today,
+            available_minutes=100, planned_minutes=40,
+        )
+        DailyPlanItem.objects.create(
+            daily_plan=daily_plan, study_task=study_task, planned_minutes=40, order=1,
+        )
+        return daily_plan
+
+    def _management_form_data(self, rows):
+        data = {
+            'form-TOTAL_FORMS': str(len(rows)),
+            'form-INITIAL_FORMS': str(len(rows)),
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+        }
+        for i, at in enumerate(rows):
+            data[f'form-{i}-id'] = str(at.id)
+            data[f'form-{i}-date'] = str(at.date)
+            data[f'form-{i}-hours'] = '3'
+            data[f'form-{i}-minutes'] = '0'
+        return data
+
+    # ---- 접근 제어 ----
+
+    def test_period_manage_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_available_time_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_task_view_redirects_when_no_plan(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage_task_view', kwargs={'exam_id': self.exam.id})
+        )
+        self.assertRedirects(
+            response, reverse('exams:period_detail', kwargs={'period_id': self.period.id})
+        )
+
+    def test_period_manage_accessible_after_plan_generated(self):
+        self._make_plan()
+        self.client.force_login(self.owner)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_other_user_cannot_access_period_manage(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_other_user_cannot_access_period_manage_available_time(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_other_user_cannot_access_period_manage_task_view(self):
+        self._make_plan()
+        self.client.force_login(self.other)
+        response = self.client.get(
+            reverse('exams:period_manage_task_view', kwargs={'exam_id': self.exam.id})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    # ---- 가용시간 저장 정책 ----
+
+    def test_past_date_edit_rejected_server_side(self):
+        self._make_plan()
+        past_at = AvailableTime.objects.create(
+            exam_period=self.period, date=self.today - datetime.timedelta(days=1),
+            available_minutes=50,
+        )
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        idx = rows.index(past_at)
+        data[f'form-{idx}-hours'] = '5'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertEqual(response.status_code, 200)  # 리다이렉트 안 됨 = 거부됨
+        past_at.refresh_from_db()
+        self.assertEqual(past_at.available_minutes, 50)
+
+    def test_finalized_date_edit_rejected_server_side(self):
+        daily_plan = self._make_plan()
+        daily_plan.finalized_at = timezone.now()
+        daily_plan.save(update_fields=['finalized_at'])
+
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
+        idx = rows.index(today_at)
+        data[f'form-{idx}-hours'] = '5'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertEqual(response.status_code, 200)
+        today_at.refresh_from_db()
+        self.assertEqual(today_at.available_minutes, 100)
+
+    def test_available_time_edit_syncs_daily_plan(self):
+        daily_plan = self._make_plan()
+        self.client.force_login(self.owner)
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        today_at = AvailableTime.objects.get(exam_period=self.period, date=self.today)
+        idx = rows.index(today_at)
+        data[f'form-{idx}-hours'] = '2'
+        data[f'form-{idx}-minutes'] = '0'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertRedirects(
+            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        daily_plan.refresh_from_db()
+        self.assertEqual(daily_plan.available_minutes, 120)
+
+    def test_exam_day_is_editable(self):
+        """스케줄러는 '그 과목 자신의 시험일'만 배치 금지라, 시험일도
+        가용시간 입력은 가능해야 한다 (다른 과목 공부에 쓸 수 있음)."""
+        self._make_plan()
+        exam_day_at = AvailableTime.objects.get(exam_period=self.period, date=self.exam.exam_date)
+        self.client.force_login(self.owner)
+
+        rows = list(AvailableTime.objects.filter(exam_period=self.period).order_by('date'))
+        data = self._management_form_data(rows)
+        idx = rows.index(exam_day_at)
+        data[f'form-{idx}-hours'] = '1'
+        data[f'form-{idx}-minutes'] = '30'
+
+        url = reverse('exams:period_manage_available_time', kwargs={'period_id': self.period.id})
+        response = self.client.post(url, data)
+
+        self.assertRedirects(
+            response, reverse('exams:period_manage', kwargs={'period_id': self.period.id})
+        )
+        exam_day_at.refresh_from_db()
+        self.assertEqual(exam_day_at.available_minutes, 90)
+
+
 class SourcePagesTestCase(TestCase):
     """
     PDF 페이지 번호 추적 기능 (pdf_extractor.py가 "--- 페이지 N ---" 경계
@@ -1994,3 +2209,1238 @@ startxref
         tasks = task_extractor.fetch_extracted_tasks(self.exam, "--- 페이지 4 --- 1장 내용")
 
         self.assertEqual(tasks[0].source_pages, [4])
+
+
+def make_file(name='sample.pdf'):
+    return SimpleUploadedFile(name, b'dummy pdf content', content_type='application/pdf')
+ 
+ 
+@override_settings(MEDIA_ROOT=TEMP_MEDIA_ROOT)
+class StudyMaterialFileDeleteSignalTests(TestCase):
+    """
+    StudyMaterial.file이 post_delete 시그널을 통해
+    (단독 삭제 / CASCADE / QuerySet 대량삭제 모든 경로에서) 정리되는지 검증.
+    """
+ 
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
+ 
+    def setUp(self):
+        self.user = User.objects.create_user(username='tester', password='pw')
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title='2026 2학기 중간고사',
+            start_date='2026-10-01',
+            end_date='2026-10-10',
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name='자료구조',
+            exam_date='2026-10-05',
+        )
+ 
+    def _create_material_with_file(self, filename='sample.pdf'):
+        material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title='1단원 요약',
+            file=make_file(filename),
+        )
+        self.assertTrue(material.file.storage.exists(material.file.name))
+        return material
+ 
+    def test_delete_study_material_directly_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_delete_exam_cascades_and_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            self.exam.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_delete_exam_period_cascades_and_removes_file(self):
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            self.exam_period.delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_bulk_queryset_delete_removes_file(self):
+        """QuerySet.delete()로 대량삭제해도 post_delete 시그널이 걸려서 파일이 지워져야 함"""
+        material = self._create_material_with_file()
+        file_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            StudyMaterial.objects.filter(pk=material.pk).delete()
+ 
+        self.assertFalse(storage.exists(file_path))
+ 
+    def test_material_without_file_deletes_without_error(self):
+        material = StudyMaterial.objects.create(exam=self.exam, title='텍스트만 있는 자료')
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.delete()  # 에러 없이 통과해야 함
+ 
+    def test_replacing_file_deletes_old_file(self):
+        material = self._create_material_with_file('old.pdf')
+        old_path = material.file.name
+        storage = material.file.storage
+ 
+        with self.captureOnCommitCallbacks(execute=True):
+            material.file = make_file('new.pdf')
+            material.save()
+ 
+        self.assertFalse(storage.exists(old_path))
+        self.assertTrue(storage.exists(material.file.name))
+ 
+ 
+@override_settings(MEDIA_ROOT=TEMP_MEDIA_ROOT)
+class StudyMaterialFileDeleteRollbackTests(TransactionTestCase):
+    """
+    실제 트랜잭션 커밋/롤백이 필요한 테스트라 TransactionTestCase 사용.
+    (TestCase는 매 테스트를 롤백하는 방식이라 on_commit이 실제로 발생하지 않음)
+    """
+ 
+    def tearDown(self):
+        shutil.rmtree(TEMP_MEDIA_ROOT, ignore_errors=True)
+ 
+    def test_rollback_does_not_delete_file(self):
+        user = User.objects.create_user(username='tester2', password='pw')
+        exam_period = ExamPeriod.objects.create(
+            user=user, title='기말고사', start_date='2026-12-01', end_date='2026-12-10'
+        )
+        exam = Exam.objects.create(
+            exam_period=exam_period, subject_name='알고리즘', exam_date='2026-12-05'
+        )
+        material = StudyMaterial.objects.create(exam=exam, title='요약', file=make_file())
+        material_pk = material.pk  # delete() 호출 시 material.pk가 None으로 바뀌므로 미리 저장
+        file_path = material.file.name
+        storage = material.file.storage
+        self.assertTrue(storage.exists(file_path))
+ 
+        class RollbackTriggered(Exception):
+            pass
+ 
+        try:
+            with transaction.atomic():
+                material.delete()
+                raise RollbackTriggered('의도적으로 롤백 발생')
+        except RollbackTriggered:
+            pass
+ 
+        # 트랜잭션이 롤백됐으므로 DB row도, 파일도 그대로 남아 있어야 함
+        self.assertTrue(StudyMaterial.objects.filter(pk=material_pk).exists())
+        self.assertTrue(storage.exists(file_path))
+
+class PeriodDeleteWithPlanTests(TestCase):
+    def setUp(self):
+        # 1. 고유한 email과 함께 유저 생성
+        self.user = User.objects.create_user(
+            username='tester',
+            email='tester@example.com',
+            password='pass1234'
+        )
+        # 2. client.force_login으로 세션 유지
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title='중간고사',
+            start_date=datetime.date(2026, 8, 1),
+            end_date=datetime.date(2026, 8, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        
+        # 3. Exam 필수 필드(exam_date) 포함
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name='알고리즘',
+            exam_date=datetime.date(2026, 8, 5),
+        )
+        
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            title='탐색 알고리즘',
+        )
+
+        # 4. 계획 생성 상태 재현 (DailyPlan + DailyPlanItem)
+        self.plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=datetime.date(2026, 8, 1),
+            available_minutes=120,
+            planned_minutes=60,
+        )
+        self.plan_item = DailyPlanItem.objects.create(
+            daily_plan=self.plan,
+            study_task=self.task,
+            planned_minutes=60,
+            order=1,
+        )
+
+    def test_direct_orm_delete_raises_protected_error(self):
+        """
+        회귀 방지: PROTECT 제약이 여전히 살아있는지 확인.
+        (ExamPeriod를 거치지 않고 StudyTask만 바로 지우면 막혀야 함)
+        """
+        with self.assertRaises(ProtectedError):
+            self.task.delete()
+
+    def test_period_delete_view_cascades_successfully(self):
+        """
+        버그 수정 검증: 계획(DailyPlan, RecoveryPlan)이 생성된 시험기간을 뷰로 삭제 시 
+        500(ProtectedError) 없이 관련 플랜 및 ExamPeriod가 정상적으로 모두 연쇄 삭제되어야 함.
+        """
+        # RecoveryPlan 및 RecoveryPlanItem 생성하여 복구안 연쇄 삭제 경로도 함께 재현
+        recovery_plan = RecoveryPlan.objects.create(
+            exam_period=self.period,
+            source_daily_plan=self.plan,
+            recovery_type=RecoveryType.MAINTAIN_VOLUME,
+            status=RecoveryPlanStatus.PENDING,
+        )
+        recovery_plan_item = RecoveryPlanItem.objects.create(
+            recovery_plan=recovery_plan,
+            study_task=self.task,
+            action_type=RecoveryActionType.RESCHEDULE,
+        )
+
+        period_id = self.period.id
+        recovery_plan_id = recovery_plan.id
+        recovery_plan_item_id = recovery_plan_item.id
+        study_task_id = self.task.id
+
+        url = reverse('exams:period_delete', args=[period_id])
+        response = self.client.post(url)
+
+        # 302 리다이렉트 및 목록 화면으로 이동 확인
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+        # ExamPeriod, DailyPlan, RecoveryPlan 및 연결된 Item/Task 연쇄 삭제 확인
+        self.assertFalse(ExamPeriod.objects.filter(id=period_id).exists())
+        self.assertFalse(DailyPlan.objects.filter(exam_period=period_id).exists())
+        self.assertFalse(DailyPlanItem.objects.filter(study_task_id=study_task_id).exists())
+        self.assertFalse(RecoveryPlan.objects.filter(id=recovery_plan_id).exists())
+        self.assertFalse(RecoveryPlanItem.objects.filter(id=recovery_plan_item_id).exists())
+        self.assertFalse(StudyTask.objects.filter(id=study_task_id).exists())
+
+    def test_period_delete_without_plan_still_works(self):
+        """
+        회귀 방지: 계획이 없는 일반적인 경우도 그대로 잘 지워지는지 확인.
+        """
+        period2 = ExamPeriod.objects.create(
+            user=self.user,
+            title='기말고사',
+            start_date=datetime.date(2026, 12, 1),
+            end_date=datetime.date(2026, 12, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        url = reverse('exams:period_delete', args=[period2.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ExamPeriod.objects.filter(id=period2.id).exists())
+
+    def test_other_users_period_cannot_be_deleted(self):
+        """
+        권한 체크 회귀 방지: 다른 유저의 ExamPeriod 삭제 시 404가 발생해야 함.
+        """
+        other_user = User.objects.create_user(
+            username='other',
+            email='other@example.com',
+            password='pass1234'
+        )
+        other_period = ExamPeriod.objects.create(
+            user=other_user,
+            title='남의 시험',
+            start_date=datetime.date(2026, 9, 1),
+            end_date=datetime.date(2026, 9, 5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        url = reverse('exams:period_delete', args=[other_period.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(ExamPeriod.objects.filter(id=other_period.id).exists())
+
+def _minutes_to_hm(total_minutes):
+    return divmod(total_minutes, 60)
+
+
+class AvailableTimeUpdatePastOrFinalizedBlockTest(TestCase):
+    """
+    정책:
+    - 미래 날짜: 자유롭게 수정 가능
+    - 과거 날짜 또는 이미 마감된(DailyPlan.finalized_at 존재) 날짜: 수정 차단
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester3",
+            email="tester3@test.com",
+            password="pw12345!",
+        )
+
+        login_result = self.client.login(
+            email="tester3@test.com",
+            password="pw12345!",
+        )
+
+
+        self.today = timezone.localdate()
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="쪽지시험",
+            start_date=self.today - datetime.timedelta(days=2),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        self.past_date = self.today - datetime.timedelta(days=1)
+        self.finalized_future_date = self.today + datetime.timedelta(days=1)
+        self.open_future_date = self.today + datetime.timedelta(days=3)
+
+        self.at_past = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.past_date,
+            available_minutes=30,
+        )
+
+        self.at_finalized_future = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.finalized_future_date,
+            available_minutes=60,
+        )
+
+        self.at_open_future = AvailableTime.objects.create(
+            exam_period=self.period,
+            date=self.open_future_date,
+            available_minutes=60,
+        )
+
+        self.finalized_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=self.finalized_future_date,
+            available_minutes=60,
+            planned_minutes=60,
+            finalized_at=timezone.now(),
+        )
+
+        self.open_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=self.open_future_date,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+
+        self.url = reverse(
+            "exams:available_time_update",
+            args=[self.period.id],
+        )
+    def _build_data(self, overrides=None):
+        overrides = overrides or {}
+        queryset = AvailableTime.objects.filter(
+            exam_period=self.period
+        ).order_by("date")
+
+        overrides_by_id = {}
+        for at_obj, new_minutes in overrides.items():
+            at_obj.refresh_from_db()
+            overrides_by_id[at_obj.id] = new_minutes
+
+        data = {
+            "form-TOTAL_FORMS": str(queryset.count()),
+            "form-INITIAL_FORMS": str(queryset.count()),
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+        }
+
+        for i, obj in enumerate(queryset):
+            target_minutes = overrides_by_id.get(
+                obj.id, obj.available_minutes
+            )
+            hours, minutes = _minutes_to_hm(target_minutes)
+
+            data[f"form-{i}-id"] = str(obj.id)
+            data[f"form-{i}-date"] = obj.date.isoformat()
+            data[f"form-{i}-hours"] = str(hours)
+            data[f"form-{i}-minutes"] = str(minutes)
+
+        return data
+
+
+
+    def test_open_future_date_is_freely_editable(self):
+        data = self._build_data({self.at_open_future: 100})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 302)
+
+        self.at_open_future.refresh_from_db()
+        self.assertEqual(self.at_open_future.available_minutes, 100)
+
+        self.open_plan.refresh_from_db()
+        self.assertEqual(self.open_plan.available_minutes, 100)
+
+    def test_finalized_future_date_is_blocked(self):
+        original_minutes = self.at_finalized_future.available_minutes
+        data = self._build_data({self.at_finalized_future: 999})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 200)
+
+        formset = response.context["formset"]
+        self.assertTrue(formset.non_form_errors())
+
+        self.at_finalized_future.refresh_from_db()
+        self.assertEqual(self.at_finalized_future.available_minutes, original_minutes)
+
+        self.finalized_plan.refresh_from_db()
+        self.assertEqual(self.finalized_plan.available_minutes, 60)
+
+    def test_past_date_is_blocked(self):
+        original_minutes = self.at_past.available_minutes
+        data = self._build_data({self.at_past: 999})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 200)
+
+        self.at_past.refresh_from_db()
+        self.assertEqual(self.at_past.available_minutes, original_minutes)
+
+    def test_finalized_date_blocks_entire_submission(self):
+        data = self._build_data({
+            self.at_finalized_future: 999,
+            self.at_open_future: 100,
+        })
+        self.client.post(self.url, data)
+
+        self.at_open_future.refresh_from_db()
+        self.assertEqual(self.at_open_future.available_minutes, 60)
+
+    def test_future_date_without_daily_plan_is_editable(self):
+        no_plan_date = self.today + datetime.timedelta(days=4)
+        at_no_plan = AvailableTime.objects.create(
+            exam_period=self.period, date=no_plan_date, available_minutes=30
+        )
+        data = self._build_data({at_no_plan: 45})
+        response = self.client.post(self.url, data)
+
+        self.assertEqual(response.status_code, 302)
+
+        at_no_plan.refresh_from_db()
+        self.assertEqual(at_no_plan.available_minutes, 45)
+
+
+class ExamPeriodProgressPercentTests(TestCase):
+    """ExamPeriod.progress_percent (사이드바 진행률 바) 날짜 경과율 계산 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='progress_tester@example.com',
+            email='progress_tester@example.com', password='pass1234!'
+        )
+        self.today = timezone.localdate()
+
+    def test_midway_through_period(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='진행률 테스트',
+            start_date=self.today - datetime.timedelta(days=2),
+            end_date=self.today + datetime.timedelta(days=2),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        # 4일 중 2일 경과 -> 50%
+        self.assertEqual(period.progress_percent, 50)
+
+    def test_before_start_date_is_zero(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='시작 전',
+            start_date=self.today + datetime.timedelta(days=1),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 0)
+
+    def test_after_end_date_is_full(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='종료 후',
+            start_date=self.today - datetime.timedelta(days=10),
+            end_date=self.today - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+        self.assertEqual(period.progress_percent, 100)
+
+    def test_start_equals_end_date_is_full(self):
+        period = ExamPeriod.objects.create(
+            user=self.user, title='당일 시작=종료',
+            start_date=self.today, end_date=self.today,
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 100)
+
+    def test_future_single_day_period_is_zero(self):
+        """total_days<=0 체크가 today<start_date 검사보다 먼저 실행되면,
+        미래의 하루짜리 시험기간도 시작 전인데 100%로 잘못 나온다."""
+        period = ExamPeriod.objects.create(
+            user=self.user, title='미래 하루짜리',
+            start_date=self.today + datetime.timedelta(days=5),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.assertEqual(period.progress_percent, 0)
+
+
+class ExamPeriodLockValidationTests(TestCase):
+    """계획이 생성된 시험기간에 대한 서버단 수정/삭제/Task/AI 경로 방어 락 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            email="test@example.com",
+            password="password123",
+        )
+
+        self.client.login(
+            email="test@example.com",
+            password="password123",
+        )
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            start_date=datetime.date(2026, 5, 1),
+            end_date=datetime.date(2026, 5, 10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="알고리즘",
+            exam_date=datetime.date(2026, 5, 5),
+            priority=PriorityLevel.HIGH,
+        )
+
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="1주차 자료",
+            material_type=MaterialType.TEXT,
+            extracted_text="테스트 내용",
+            status=MaterialStatus.COMPLETED,
+        )
+
+        self.task = StudyTask.objects.create(
+            exam=self.exam,
+            study_material=self.material,
+            unit_name="1장",
+            title="그래프 탐색",
+            task_type=TaskType.CONCEPT,
+            difficulty=TaskDifficulty.NORMAL,
+            estimated_min_minutes=30,
+            estimated_max_minutes=60,
+        )
+
+        # 계획이 이미 생성된 시험기간 (DailyPlan + DailyPlanItem으로 PROTECT 제약 관계 형성)
+        self.daily_plan = DailyPlan.objects.create(
+            exam_period=self.period,
+            date=datetime.date(2026, 5, 1),
+            available_minutes=120,
+            planned_minutes=120,
+            status=DailyPlanStatus.PLANNED,
+        )
+
+        self.plan_item = DailyPlanItem.objects.create(
+            daily_plan=self.daily_plan,
+            study_task=self.task,
+            planned_minutes=60,
+            order=1,
+            status=DailyPlanStatus.PLANNED,
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - GET 요청 허용 검증 (피드백 2번)
+    # ============================================================
+
+    def test_get_requests_allowed_when_plan_exists(self):
+        """계획이 생성되어 있어도 조회 목적의 GET 요청은 리다이렉트 없이 200 OK 응답해야 한다."""
+        urls = [
+            reverse("exams:period_update", args=[self.period.id]),
+            reverse("exams:subject_create", args=[self.period.id]),
+            reverse("exams:subject_update", args=[self.period.id, self.exam.id]),
+            reverse("exams:material_create", args=[self.exam.id]),
+            reverse("exams:task_review", args=[self.exam.id]),
+            reverse("exams:task_create", args=[self.exam.id]),
+        ]
+
+        for url in urls:
+            response = self.client.get(url)
+            self.assertEqual(
+                response.status_code, 200,
+                f"GET 요청이 차단됨: {url}"
+            )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 시험기간 POST 차단
+    # ============================================================
+
+    def test_period_update_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간은 수정할 수 없다."""
+        url = reverse("exams:period_update", args=[self.period.id])
+
+        response = self.client.post(
+            url,
+            {
+                "title": "수정된 중간고사",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-10",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.period.refresh_from_db()
+        self.assertEqual(self.period.title, "중간고사")
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 과목 POST 차단
+    # ============================================================
+
+    def test_subject_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 새로운 과목을 추가할 수 없다."""
+        url = reverse("exams:subject_create", args=[self.period.id])
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "자료구조",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            Exam.objects.filter(exam_period=self.period, subject_name="자료구조").exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    def test_subject_update_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 과목은 수정할 수 없다."""
+        url = reverse("exams:subject_update", args=[self.period.id, self.exam.id])
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "수정된 알고리즘",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.exam.refresh_from_db()
+        self.assertEqual(self.exam.subject_name, "알고리즘")
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    def test_subject_delete_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 과목은 삭제할 수 없다."""
+        url = reverse("exams:subject_delete", args=[self.period.id, self.exam.id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Exam.objects.filter(id=self.exam.id).exists())
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    # ============================================================
+    # 계획이 존재하는 경우 - 학습자료 POST 차단
+    # ============================================================
+
+    def test_material_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 학습자료를 추가할 수 없다."""
+        url = reverse("exams:material_create", args=[self.exam.id])
+
+        response = self.client.post(
+            url,
+            {
+                "title": "새로운 자료",
+                "material_type": MaterialType.TEXT,
+                "extracted_text": "새로운 테스트 내용",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            StudyMaterial.objects.filter(exam=self.exam, title="새로운 자료").exists()
+        )
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    def test_material_delete_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 학습자료는 삭제할 수 없다."""
+        url = reverse("exams:material_delete", args=[self.material.id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(StudyMaterial.objects.filter(id=self.material.id).exists())
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    # ============================================================
+    # 피드백 3번 반영 - Task 관련 잠금 및 ProtectedError 방지 검증
+    # ============================================================
+
+    def test_task_review_formset_delete_blocked_and_protected_error_prevented(self):
+        """
+        DailyPlanItem에 연결된 StudyTask를 task_review formset에서 삭제 시도할 때:
+        1. 500(ProtectedError) 없이 302 리다이렉트된다.
+        2. StudyTask 및 DailyPlanItem이 삭제되지 않고 유지된다.
+        """
+        url = reverse("exams:task_review", args=[self.exam.id])
+        post_data = {
+            "form-TOTAL_FORMS": "1",
+            "form-INITIAL_FORMS": "1",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-id": str(self.task.id),
+            "form-0-unit_name": self.task.unit_name,
+            "form-0-title": self.task.title,
+            "form-0-task_type": self.task.task_type,
+            "form-0-difficulty": self.task.difficulty,
+            "form-0-DELETE": "on",  # formset 삭제 요청
+            "action": "save",
+        }
+
+        response = self.client.post(url, post_data)
+
+        # 500이 터지지 않고 정상 리다이렉트
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse("exams:period_detail", args=[self.period.id]))
+
+        # StudyTask와 DailyPlanItem이 안전하게 남아있는지 확인
+        self.assertTrue(StudyTask.objects.filter(id=self.task.id).exists())
+        self.assertTrue(DailyPlanItem.objects.filter(id=self.plan_item.id).exists())
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
+
+    def test_study_task_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 새로운 학습 작업을 직접 추가할 수 없다."""
+        url = reverse("exams:task_create", args=[self.exam.id])
+        post_data = {
+            "unit_name": "2장",
+            "title": "DFS 구현",
+            "task_type": TaskType.CONCEPT,
+            "importance": PriorityLevel.MEDIUM,
+            "depth": TaskDepth.BASIC,
+            "difficulty": TaskDifficulty.NORMAL,
+        }
+
+        response = self.client.post(url, post_data)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse("exams:period_detail", args=[self.period.id]))
+        self.assertFalse(StudyTask.objects.filter(title="DFS 구현").exists())
+
+    def test_study_task_confirm_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 학습 작업 확정 POST 요청은 차단된다."""
+        url = reverse("exams:task_confirm", args=[self.exam.id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse("exams:period_detail", args=[self.period.id]))
+
+    # ============================================================
+    # 피드백 4번 반영 - AI 분석 관련 POST 경로 잠금 검증
+    # ============================================================
+
+    def test_ai_analysis_post_routes_blocked_when_plan_exists(self):
+        """
+        계획 생성 후 material_extract, material_analyze, material_retry_analyze 
+        POST 요청 시 데코레이터에 의해 차단되는지 검증
+        """
+        pdf_material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="PDF 자료",
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.COMPLETED,
+            extracted_text="PDF 내용",
+        )
+
+        routes = [
+            reverse("exams:material_extract", args=[pdf_material.id]),
+            reverse("exams:material_analyze", args=[pdf_material.id]),
+            reverse("exams:material_retry_analyze", args=[pdf_material.id]),
+        ]
+
+        for url in routes:
+            response = self.client.post(url)
+            self.assertEqual(
+                response.status_code, 302,
+                f"AI 경로가 차단되지 않음: {url}"
+            )
+            self.assertRedirects(response, reverse("exams:period_detail", args=[self.period.id]))
+
+    # ============================================================
+    # 계획이 없는 경우 - 기존 동작 유지
+    # ============================================================
+
+    def test_subject_update_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 과목은 기존처럼 수정할 수 있다."""
+        self.daily_plan.delete()
+
+        url = reverse("exams:subject_update", args=[self.period.id, self.exam.id])
+
+        response = self.client.post(
+            url,
+            {
+                "subject_name": "수정된 알고리즘",
+                "exam_date": "2026-05-06",
+                "priority": PriorityLevel.HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.exam.refresh_from_db()
+        self.assertEqual(self.exam.subject_name, "수정된 알고리즘")
+
+    def test_subject_delete_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 과목은 기존처럼 삭제할 수 있다."""
+        self.daily_plan.delete()
+        exam_id = self.exam.id
+
+        url = reverse("exams:subject_delete", args=[self.period.id, exam_id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Exam.objects.filter(id=exam_id).exists())
+
+    def test_material_delete_allowed_when_plan_does_not_exist(self):
+        """계획이 없는 시험기간의 학습자료는 기존처럼 삭제할 수 있다."""
+        self.daily_plan.delete()
+        material_id = self.material.id
+
+        url = reverse("exams:material_delete", args=[material_id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(StudyMaterial.objects.filter(id=material_id).exists())
+
+class ExamPeriodCompletionTests(TestCase):
+    """시험기간 수동/자동(Lazy Check) 종료 기능 검증"""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='tester@example.com', email='tester@example.com', password='pass1234!'
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+
+    def test_manual_period_complete_success(self):
+        """'시험기간 종료' POST 요청 시 status가 COMPLETED로 전환되는지 검증"""
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title='2026 1학기 중간고사',
+            start_date=self.today - datetime.timedelta(days=5),
+            end_date=self.today + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_complete', args=[period.id])
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_lazy_check_auto_completes_expired_period_on_detail_view(self):
+        """end_date가 지난 ACTIVE 시험기간을 조회하면 자동으로 COMPLETED 전환되는지 검증"""
+        expired_period = ExamPeriod.objects.create(
+            user=self.user,
+            title='지난 시험고사',
+            start_date=self.today - datetime.timedelta(days=10),
+            end_date=self.today - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_detail', args=[expired_period.id])
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        expired_period.refresh_from_db()
+        self.assertEqual(expired_period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_new_period_creation_allowed_after_previous_period_completed(self):
+        """기존 시험기간이 COMPLETED 상태가 되면 새로운 ACTIVE 시험기간을 생성할 수 있는지 검증"""
+        ExamPeriod.objects.create(
+            user=self.user,
+            title='이전 시험',
+            start_date=self.today - datetime.timedelta(days=20),
+            end_date=self.today - datetime.timedelta(days=10),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+
+        url = reverse('exams:period_create')
+        post_data = {
+            'title': '새 시험기간',
+            'start_date': str(self.today),
+            'end_date': str(self.today + datetime.timedelta(days=10)),
+        }
+        response = self.client.post(url, post_data)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            ExamPeriod.objects.filter(user=self.user, title='새 시험기간', status=ExamPeriodStatus.ACTIVE).exists()
+        )
+
+    def test_new_period_creation_rejected_when_active_period_exists(self):
+        ExamPeriod.objects.create(
+            user=self.user,
+            title='진행 중인 시험',
+            start_date=self.today,
+            end_date=self.today + datetime.timedelta(days=10),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        url = reverse('exams:period_create')
+        post_data = {
+            'title': '새 시험기간',
+            'start_date': str(self.today),
+            'end_date': str(self.today + datetime.timedelta(days=10)),
+        }
+
+        response = self.client.post(url, post_data)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            ExamPeriod.objects.filter(user=self.user, title='새 시험기간').exists()
+        )
+
+    def test_period_create_lazy_expires_active_before_check(self):
+        expired_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="지난 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=30),
+            end_date=timezone.localdate() - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+
+        response = self.client.post(reverse('exams:period_create'), {
+            'title': '새 시험기간',
+            'start_date': timezone.localdate(),
+            'end_date': timezone.localdate() + datetime.timedelta(days=14),
+        })
+
+        expired_period.refresh_from_db()
+        self.assertEqual(expired_period.status, ExamPeriodStatus.COMPLETED)
+
+        self.assertTrue(
+            ExamPeriod.objects.filter(
+                user=self.user, status=ExamPeriodStatus.ACTIVE
+            ).exclude(id=expired_period.id).exists()
+        )
+        self.assertEqual(response.status_code, 302)
+
+    def _available_time_formset_post_data(self, available_time, new_hours, new_minutes):
+        return {
+            'form-TOTAL_FORMS': '1',
+            'form-INITIAL_FORMS': '1',
+            'form-MIN_NUM_FORMS': '0',
+            'form-MAX_NUM_FORMS': '1000',
+            'form-0-id': str(available_time.id),
+            'form-0-date': available_time.date.isoformat(),  # disabled 필드라 무시되지만 형식상 포함
+            'form-0-hours': str(new_hours),
+            'form-0-minutes': str(new_minutes),
+        }
+
+
+    def test_period_manage_available_time_blocked_when_completed_with_plan(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="종료된 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+        Exam.objects.create(
+            exam_period=period,
+            subject_name="수학",
+            exam_date=period.end_date,
+        )
+        at = AvailableTime.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60,
+        )
+        DailyPlan.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60, planned_minutes=0,
+        )
+
+        response = self.client.post(
+            reverse('exams:period_manage_available_time', args=[period.id]),
+            self._available_time_formset_post_data(at, new_hours=2, new_minutes=0),
+        )
+
+        at.refresh_from_db()
+        self.assertEqual(at.available_minutes, 60)
+        self.assertRedirects(response, reverse('exams:period_manage', args=[period.id]))
+
+
+
+    def test_period_update_blocked_when_completed_without_plan(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="계획 없이 종료된 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse('exams:period_update', args=[period.id]),
+            {
+                'title': '수정 시도',
+                'start_date': period.start_date,
+                'end_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.title, "계획 없이 종료된 시험기간")  # 변경되지 않음
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+
+    def test_period_complete_preserves_related_records(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="진행 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(
+            exam_period=period,
+            subject_name="영어",
+            exam_date=period.end_date,
+        )
+        material = StudyMaterial.objects.create(
+            exam=exam, material_type=MaterialType.TEXT, status=MaterialStatus.COMPLETED,
+        )
+        task = StudyTask.objects.create(exam=exam, title="영단어 암기")
+        plan = DailyPlan.objects.create(
+            exam_period=period, date=timezone.localdate(), available_minutes=60, planned_minutes=0,
+        )
+
+        self.client.post(reverse('exams:period_complete', args=[period.id]))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertTrue(Exam.objects.filter(id=exam.id).exists())
+        self.assertTrue(StudyMaterial.objects.filter(id=material.id).exists())
+        self.assertTrue(StudyTask.objects.filter(id=task.id).exists())
+        self.assertTrue(DailyPlan.objects.filter(id=plan.id).exists())
+
+    def test_period_complete_blocked_while_ai_analysis_processing(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="AI 분석 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="수학", exam_date=period.end_date)
+        material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.TEXT,
+            status=MaterialStatus.COMPLETED,
+            analysis_status=MaterialStatus.PROCESSING,
+        )
+
+        response = self.client.post(reverse('exams:period_complete', args=[period.id]))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+
+    def test_period_complete_blocked_while_pdf_extraction_processing(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="PDF 추출 중 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=10),
+            end_date=timezone.localdate() + datetime.timedelta(days=5),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="영어", exam_date=period.end_date)
+        material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
+
+        response = self.client.post(reverse('exams:period_complete', args=[period.id]))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertRedirects(response, reverse('exams:period_list'))
+
+
+    def test_lazy_check_skips_expired_period_with_processing_material(self):
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="만료됐지만 처리 중인 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=30),
+            end_date=timezone.localdate() - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="과학", exam_date=period.end_date)
+        StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
+
+        self.client.get(reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_lazy_check_skips_expired_period_with_processing_material_on_detail_view(self):
+        """period_detail() GET 조회 시에도 PROCESSING 중인 학습자료가 있는 만료
+        ACTIVE 시험기간은 COMPLETED로 전환되지 않고 ACTIVE로 유지되어야 한다.
+
+        (회귀 방지: _get_owned_exam_period()가 한때 중복 정의되어, 뒤에 정의된
+        non-lock 버전이 앞의 lock 기반 버전을 덮어쓰는 바람에 이 케이스가
+        검증되지 않고 있었다)
+        """
+        period = ExamPeriod.objects.create(
+            user=self.user,
+            title="만료됐지만 처리 중인 시험기간",
+            start_date=timezone.localdate() - datetime.timedelta(days=30),
+            end_date=timezone.localdate() - datetime.timedelta(days=1),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        exam = Exam.objects.create(exam_period=period, subject_name="과학", exam_date=period.end_date)
+        StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.PROCESSING,
+        )
+
+        response = self.client.get(reverse('exams:period_detail', args=[period.id]))
+
+        self.assertEqual(response.status_code, 200)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        
+class ConcurrencyDefenseAndRaceConditionTests(TestCase):
+    """AI 분석/추출 간 경쟁 상태 및 처리 중 자료 삭제 방어 검증"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="concurrency_tester@example.com",
+            email="concurrency_tester@example.com",
+            password="pass1234!",
+        )
+        self.client.force_login(self.user)
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="동시성 테스트 기간",
+            start_date=datetime.date(2026, 8, 1),
+            end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="운영체제",
+            exam_date=datetime.date(2026, 8, 15),
+        )
+        self.material = StudyMaterial.objects.create(
+            exam=self.exam,
+            title="동시성 테스트 자료",
+            material_type=MaterialType.TEXT,
+            extracted_text="프로세스 스케줄링 내용",
+            status=MaterialStatus.COMPLETED,
+            analysis_status=MaterialStatus.PENDING,
+        )
+
+    def test_material_delete_blocked_when_processing(self):
+        """처리 중인 학습자료는 삭제할 수 없다."""
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        url = reverse("exams:material_delete", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(StudyMaterial.objects.filter(id=self.material.id).exists())
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("현재 처리 중인" in str(m) for m in messages_list))
+
+    def test_material_delete_blocked_when_analysis_processing(self):
+        """AI 분석 중인 학습자료는 삭제할 수 없다."""
+        self.material.analysis_status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["analysis_status"])
+
+        url = reverse("exams:material_delete", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(StudyMaterial.objects.filter(id=self.material.id).exists())
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("현재 처리 중인" in str(m) for m in messages_list))
+
+    def test_material_analyze_blocked_when_extraction_not_completed(self):
+        """추출이 완료되지 않은 상태에서는 AI 분석을 시작할 수 없다."""
+        self.material.status = MaterialStatus.PROCESSING
+        self.material.save(update_fields=["status"])
+
+        url = reverse("exams:material_analyze", args=[self.material.id])
+        response = self.client.post(url, follow=True)
+
+        self.material.refresh_from_db()
+        self.assertNotEqual(self.material.analysis_status, MaterialStatus.PROCESSING)
+        messages_list = list(response.context['messages'])
+        self.assertTrue(any("텍스트 추출이 완료된 자료만" in str(m) or "추출이 진행 중" in str(m) for m in messages_list))

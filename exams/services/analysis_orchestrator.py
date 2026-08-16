@@ -459,54 +459,36 @@ def _start_processing(study_material: StudyMaterial, *, is_retry: bool) -> uuid.
     return None
 
 
-def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
+def claim_analysis_run(study_material: StudyMaterial, *, is_retry: bool) -> uuid.UUID:
     """
-    E-AI-01 진입점. 텍스트 추출(status)이 COMPLETED이고 analysis_status가
-    PENDING일 때만 분석을 시작한다. (좀비 PROCESSING 구제는 retry_analysis() 전용)
+    analyze_and_estimate()/retry_analysis()의 앞부분(선점 단계)만 분리한 함수.
+    ExamPeriod 락을 쥔 채로 호출해서, planner.plan_generate()가 같은 락
+    기준으로 'PROCESSING 자료가 있는지'를 확인할 수 있게 한다
+    (exams.views의 check_exam_period_not_locked_by_material_id 참고).
 
-    Raises:
-        DuplicateAnalysisRequestError: 시작 조건이 안 맞아 시작 못 함
-        AIAnalysisError 계열, AIResponseValidationError: 분석 자체가 실패함
+    _start_processing()과 동일한 원자적 조건부 UPDATE를 사용하며, 실패
+    조건별로 기존 analyze_and_estimate()/retry_analysis()가 던지던 것과
+    동일한 예외를 그대로 던진다. 성공하면 run_id만 반환하고, 실제 AI 호출
+    (run_claimed_analysis)은 호출부가 락 밖에서 별도로 실행해야 한다.
     """
-    run_id = _start_processing(study_material, is_retry=False)
-    if run_id is None:
-        study_material.refresh_from_db(fields=["status", "analysis_status"])
-        if study_material.status != MaterialStatus.COMPLETED:
-            raise DuplicateAnalysisRequestError(
-                "텍스트 추출이 진행 중이라 지금은 분석을 시작할 수 없습니다."
-            )
-        raise DuplicateAnalysisRequestError(
-            f"분석을 시작할 수 없는 상태입니다 (현재 analysis_status: "
-            f"{study_material.analysis_status})."
-        )
-    return _execute_analysis(study_material, run_id)
-
-
-def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
-    """
-    E-AI-03 진입점. 텍스트 추출(status)이 COMPLETED이고, 재시도 횟수가 남아있으며
-    아래 중 하나일 때 재시도한다.
-        - analysis_status가 FAILED
-        - analysis_status가 PROCESSING이고 타임아웃을 넘긴 "좀비" 상태
-
-    Raises:
-        DuplicateAnalysisRequestError: 추출이 진행 중이거나, 타임아웃 전인 진짜
-            진행 중(PROCESSING)이라 중복 요청인 경우
-        AnalysisNotSupportedError: COMPLETED 상태라 MVP 기준 재분석 미지원인 경우
-        RetryLimitExceededError: 재시도 횟수(2회)를 이미 다 쓴 경우 (FAILED든 좀비든 동일)
-        AIAnalysisError 계열, AIResponseValidationError: 재시도한 분석 자체가 실패함
-    """
-    run_id = _start_processing(study_material, is_retry=True)
+    run_id = _start_processing(study_material, is_retry=is_retry)
     if run_id is not None:
-        return _execute_analysis(study_material, run_id)
+        return run_id
 
     study_material.refresh_from_db(
         fields=["status", "analysis_status", "analysis_retry_count", "analysis_started_at"]
     )
 
     if study_material.status != MaterialStatus.COMPLETED:
+        action = "재시도" if is_retry else "분석"
         raise DuplicateAnalysisRequestError(
-            "텍스트 추출이 진행 중이라 지금은 재시도를 시작할 수 없습니다."
+            f"텍스트 추출이 진행 중이라 지금은 {action}을 시작할 수 없습니다."
+        )
+
+    if not is_retry:
+        raise DuplicateAnalysisRequestError(
+            f"분석을 시작할 수 없는 상태입니다 (현재 analysis_status: "
+            f"{study_material.analysis_status})."
         )
 
     status = study_material.analysis_status
@@ -517,25 +499,6 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
             "결과를 수정하려면 작업 검토 화면에서 직접 수정해주세요."
         )
 
-    # 리뷰 반영(#84): PROCESSING 상태를 "진짜 진행 중"인지 "좀비인데 재시도
-    # 횟수까지 소진되어 더는 손쓸 수 없는 상태"인지 구분해서 진단한다.
-    #
-    # 마지막 재시도(예: retry_count=1, MAX=2) 자리를 두 요청이 동시에 노리는
-    # 경쟁 상태를 생각해보자 - 이긴 요청이 retry_count를 2로 올리고 방금 막
-    # PROCESSING을 차지했다(신선함, is_stale=False). 진 요청이 재조회하면
-    # retry_count=2(이미 최대치), analysis_status=PROCESSING을 보게 되는데,
-    # retry_count부터 확인하면 "재시도 횟수를 다 썼다"고 잘못 안내하게 된다 -
-    # 실제로는 "지금 막 다른 요청이 처리를 시작했다"는 게 진짜 이유인데도.
-    #
-    # 반대로, PROCESSING이 5분 넘게 멈춘 좀비이고 retry_count도 이미 MAX라면
-    # (예: test_retry_rejected_when_retry_count_maxed_even_if_zombie), 이건
-    # "누군가 지금 활발히 처리 중"이 아니라 "예전에 멈춘 채로 방치됐고 더 이상
-    # 아무도 구제할 수 없는" 상태이므로, DuplicateAnalysisRequestError보다
-    # RetryLimitExceededError(재시도 횟수 소진, 직접 추가하라)가 정확한 안내다.
-    #
-    # 그래서 is_stale까지 같이 확인해서: "좀비 + 재시도 소진"만 RetryLimitExceededError로
-    # 먼저 걸러내고, 그 외 PROCESSING(신선하거나, 좀비여도 재시도 여지가 남아있는
-    # 경우)은 DuplicateAnalysisRequestError로 처리한다.
     if status == MaterialStatus.PROCESSING:
         analysis_data = get_analysis_status(study_material)
         if analysis_data["is_stale"] and study_material.analysis_retry_count >= MAX_RETRY_COUNT:
@@ -552,6 +515,33 @@ def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
     raise DuplicateAnalysisRequestError(
         f"재시도할 수 없는 상태입니다 (현재 analysis_status: {status})."
     )
+
+
+def run_claimed_analysis(study_material: StudyMaterial, run_id: uuid.UUID) -> list[StudyTask]:
+    """
+    claim_analysis_run()이 이미 PROCESSING으로 선점한(run_id 발급) material에
+    대해 실제 AI 분석(외부 네트워크 호출 포함)을 수행한다. claim 단계와
+    분리한 이유는 claim은 ExamPeriod 락 안에서, 이 함수는 락 밖에서 실행해야
+    하기 때문이다 (claim → lock 해제 → 외부 작업 순서).
+    """
+    return _execute_analysis(study_material, run_id)
+
+
+def analyze_and_estimate(study_material: StudyMaterial) -> list[StudyTask]:
+    """
+    E-AI-01 진입점 (claim + 실행을 한 번에). ExamPeriod 락 기준 선점이 필요
+    없는 호출부(예: 유닛 테스트)를 위해 기존 시그니처를 그대로 유지한다.
+    View에서 락 기준 선점이 필요하면 claim_analysis_run()/run_claimed_analysis()를
+    따로 호출한다.
+    """
+    run_id = claim_analysis_run(study_material, is_retry=False)
+    return run_claimed_analysis(study_material, run_id)
+
+
+def retry_analysis(study_material: StudyMaterial) -> list[StudyTask]:
+    """E-AI-03 진입점 (claim + 실행을 한 번에). 위와 동일한 이유로 유지."""
+    run_id = claim_analysis_run(study_material, is_retry=True)
+    return run_claimed_analysis(study_material, run_id)
 
 
 def get_analysis_status(study_material: StudyMaterial) -> dict:
