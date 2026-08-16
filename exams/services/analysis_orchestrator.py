@@ -100,7 +100,7 @@ MAX_RETRY_COUNT = 2
 
 # PROCESSING 상태가 이 시간(초)보다 오래 지속되면 "좀비 상태"로 간주하고,
 # 재시도 요청이 이 자리를 대신 차지할 수 있게 허용한다.
-PROCESSING_TIMEOUT_SECONDS = 300  # 5분
+PROCESSING_TIMEOUT_SECONDS = 300  
 
 
 class DuplicateAnalysisRequestError(Exception):

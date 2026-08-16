@@ -147,6 +147,8 @@ class StudyMaterial(models.Model):
         verbose_name="텍스트 추출 상태"
     )
     error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
+    extraction_started_at = models.DateTimeField(null=True, blank=True, verbose_name="PDF 추출 시작 시각")
+    extraction_run_id = models.UUIDField(null=True, blank=True, verbose_name="PDF 추출 실행 식별자")
 
     # 리뷰 확정 사항: 텍스트 추출 성공 여부와 AI 분석 성공 여부는 서로 다른 단계라 분리한다.
     analysis_status = models.CharField(
