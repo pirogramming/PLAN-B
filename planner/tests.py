@@ -4754,3 +4754,107 @@ class RecoveryOrderPreservationTests(TestCase):
         # future_plan_1에는 원래 자료구조(30) + 2-1(30) = 60이었는데,
         # 2-1이 제외됐으니 30만 남아야 한다.
         self.assertEqual(self.future_plan_1.planned_minutes, 30)
+
+    def test_apply_rejects_when_carry_along_source_deleted(self):
+        """
+        복구안 생성 후, 적용 전에 원본(2-1) DailyPlanItem이 삭제되면
+        (예: 다른 복구안이 먼저 적용되면서), is_carry_along=True인데
+        source_daily_plan_item이 SET_NULL로 None이 된 상태다.
+
+        이 경우 "원래 실패 작업이었던 것"처럼 조용히 새로 만들면 안 되고
+        RecoveryPlanStaleError로 거부해야 한다.
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 원본 2-1을 미리 삭제 -> source_daily_plan_item이 SET_NULL로 None이 됨
+        self.item_2_1.delete()
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(maintain_volume)
+
+        # 신규 DailyPlanItem이 생성되지 않았어야 한다.
+        self.assertFalse(
+            DailyPlanItem.objects.filter(
+                study_task=self.task_2_1,
+                daily_plan__date__gt=self.source_plan.date,
+            ).exists()
+        )
+
+    def test_core_focus_exclusion_frees_capacity_for_actual_use(self):
+        """
+        핵심집중형에서 2-1이 EXCLUDE되면, 2-1이 원래 차지하던 시간이
+        재배치에 실제로 사용될 수 있어야 한다. (용량을 EXCLUDE 시점에
+        반환하지 않으면, 충분히 가능한 배치도 가용시간 부족으로
+        실패한다.)
+        """
+        from planner.services.time_estimator import estimate_task_minutes
+
+        _min, per_task_minutes = estimate_task_minutes(
+            self.task_1_2.task_type, self.task_1_2.difficulty, self.exam.speed_factor
+        )
+        d1 = self.today + timedelta(days=1)
+        d2 = self.today + timedelta(days=2)
+
+        # d1에는 2-1이 이미 차지 중인 딱 그만큼만, d2도 2-2가 차지 중인
+        # 딱 그만큼만 가용시간을 준다. 즉 2-1이 EXCLUDE로 빠져야만
+        # 1-2가 d1에 들어갈 여유가 생긴다.
+        AvailableTime.objects.filter(
+            exam_period=self.exam_period, date__gt=d2,
+        ).update(available_minutes=0)
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d1,
+            defaults={'available_minutes': per_task_minutes},  # 2-1 자리만큼만
+        )
+        AvailableTime.objects.update_or_create(
+            exam_period=self.exam_period, date=d2,
+            defaults={'available_minutes': per_task_minutes},  # 2-2 자리만큼만
+        )
+        # future_plan_1/2의 available_minutes도 위와 동기화 (occupied 계산에
+        # 영향 없지만 일관성 유지 차원).
+
+        self.task_2_1.importance = "low"
+        self.task_2_1.depth = "optional"
+        self.task_2_1.save(update_fields=["importance", "depth"])
+
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        core_focus = result['core_focus']
+        self.assertIsNotNone(core_focus, result['core_focus_failure_reason'])
+
+        # 2-1이 실제로 EXCLUDE됐는지 확인
+        self.assertTrue(
+            core_focus.items.filter(
+                study_task=self.task_2_1, action_type=RecoveryActionType.EXCLUDE
+            ).exists()
+        )
+        # 1-2가 배치될 자리를 확보했는지 확인 (2-1이 빠진 d1에 들어감)
+        item_1_2_recovery = core_focus.items.get(
+            study_task=self.task_1_2, action_type=RecoveryActionType.RESCHEDULE
+        )
+        self.assertEqual(item_1_2_recovery.changed_date, d1)
+
+    def test_apply_rejects_when_source_already_moved_by_other_recovery(self):
+        """
+        같은 미래 작업(2-1)을 참조하는 복구안이 생성된 후, 다른 경로로
+        2-1이 이미 다른 날짜로 이동됐다면(다른 복구안 적용 등), 이
+        복구안을 나중에 적용하려 하면 "원본이 다른 곳으로 이미 이동됨"
+        으로 거부돼야 한다. 그렇지 않으면 이미 이동된 작업을 또
+        엉뚱하게 옮겨버릴 수 있다.
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_1_2])
+        maintain_volume = result['maintain_volume']
+        self.assertIsNotNone(maintain_volume)
+
+        # 다른 경로로 2-1이 이미 다른 날짜로 옮겨졌다고 가정
+        # (원본 daily_plan.date를 바꿔서 재현).
+        moved_date = self.today + timedelta(days=10)
+        moved_plan, _ = DailyPlan.objects.get_or_create(
+            exam_period=self.exam_period, date=moved_date,
+            defaults={'available_minutes': 60, 'planned_minutes': 0},
+        )
+        self.item_2_1.daily_plan = moved_plan
+        self.item_2_1.save(update_fields=['daily_plan'])
+
+        with self.assertRaises(RecoveryPlanStaleError):
+            apply_recovery_plan(maintain_volume)

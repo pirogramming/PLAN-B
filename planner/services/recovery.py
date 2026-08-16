@@ -217,6 +217,7 @@ def _create_recovery_plan(
             action_type=RecoveryActionType.RESCHEDULE,
             remaining_minutes=remaining,
             source_daily_plan_item=item if is_carry_along else None,
+            is_carry_along=is_carry_along,
             reason=(
                 "학습 순서 유지를 위해 함께 이동"
                 if is_carry_along else "재배치: 가용시간 내 재계산"
@@ -234,6 +235,7 @@ def _create_recovery_plan(
             action_type=RecoveryActionType.EXCLUDE,
             remaining_minutes=remaining,
             source_daily_plan_item=item if is_carry_along else None,
+            is_carry_along=is_carry_along,
             reason=(
                 "학습 순서 보존 대상이었으나 핵심 집중형에서 함께 제외됨"
                 if is_carry_along else
@@ -362,6 +364,12 @@ def _try_core_focus_exclusion_ordered(exam_period, from_date, items_with_remaini
     _try_core_focus_exclusion()과 동일한 EXCLUSION_TIERS 기반 단계적 제외
     로직을 쓰되, 배치 시도만 _allocate_with_order_preserved()로 바꾼
     버전. 후속 작업(carry-along)이 있을 때만 이 함수를 쓴다.
+
+    RESCHEDULE되는 carry-along뿐 아니라 EXCLUDE되는 carry-along도
+    apply 시 원래 자리에서 실제로 삭제되므로, 원래 점유량은 둘 다
+    용량 계산에서 반환해야 한다 (제외됐다고 그 자리를 여전히 점유
+    중이라고 계산하면, 실제로는 가능한 복구안도 가용시간 부족으로
+    잘못 실패한다).
     """
     remaining_items = list(items_with_remaining)
     excluded_items = []
@@ -387,12 +395,16 @@ def _try_core_focus_exclusion_ordered(exam_period, from_date, items_with_remaini
             if not remaining_items:
                 return None
 
-            still_carry_along_ids = {
+            # 남아서 재배치될 carry-along과, 제외돼서 실제로 삭제될
+            # carry-along 둘 다 원래 점유량을 반환 대상으로 넘긴다.
+            all_freed_carry_along_ids = {
                 item.id for item, _ in remaining_items if item.id in carry_along_ids
+            } | {
+                item.id for item in excluded_items if item.id in carry_along_ids
             }
             result = _allocate_with_order_preserved(
                 exam_period, from_date, remaining_items,
-                exclude_item_ids=still_carry_along_ids,
+                exclude_item_ids=all_freed_carry_along_ids,
             )
             if result['success']:
                 allocation_result = {
@@ -727,7 +739,15 @@ def apply_recovery_plan(recovery_plan) -> dict:
                     f"{item.study_task}의 remaining_minutes가 {item.remaining_minutes}로 "
                     f"유효하지 않습니다. 복구안 생성 로직을 확인해야 합니다."
                 )
-            if item.source_daily_plan_item_id is not None:
+            if item.is_carry_along:
+                # carry-along인데 source가 SET_NULL로 이미 None이 됐다면
+                # 원본이 삭제된 것이므로, "원래 실패 작업이었던 것처럼"
+                # 조용히 새로 만들면 안 되고 명시적으로 거부해야 한다.
+                if item.source_daily_plan_item_id is None:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 삭제되어 복구안을 "
+                        f"다시 생성해야 합니다."
+                    )
                 try:
                     source_item = DailyPlanItem.objects.select_for_update().get(
                         id=item.source_daily_plan_item_id
@@ -752,10 +772,23 @@ def apply_recovery_plan(recovery_plan) -> dict:
                         f"{item.study_task}에 이미 진행 기록이 생겼습니다. "
                         f"복구안을 다시 생성해주세요."
                     )
+                if source_item.daily_plan.date != item.original_date:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획이 다른 복구안에 의해 "
+                        f"이미 이동되었습니다. 복구안을 다시 생성해주세요."
+                    )
+                if source_item.planned_minutes != item.remaining_minutes:
+                    raise RecoveryPlanStaleError(
+                        f"{item.study_task}의 원본 계획 분량이 변경되었습니다. "
+                        f"복구안을 다시 생성해주세요."
+                    )
             items_by_date[item.changed_date].append(item)
 
         moving_source_ids = {
             item.source_daily_plan_item_id for item in reschedule_items
+            if item.source_daily_plan_item_id is not None
+        } | {
+            item.source_daily_plan_item_id for item in excluded_carry_along_items
             if item.source_daily_plan_item_id is not None
         }
         _validate_not_stale(target.exam_period, items_by_date, exclude_item_ids=moving_source_ids)
@@ -823,16 +856,35 @@ def apply_recovery_plan(recovery_plan) -> dict:
         # 안 됨 - 화면과 실제 데이터가 어긋나는 버그)
         excluded_plan_ids = set()
         for exc_item in excluded_carry_along_items:
+            if exc_item.source_daily_plan_item_id is None:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 삭제되어 복구안을 "
+                    f"다시 생성해야 합니다."
+                )
             try:
                 source_item = DailyPlanItem.objects.select_for_update().get(
                     id=exc_item.source_daily_plan_item_id
                 )
             except DailyPlanItem.DoesNotExist:
-                continue
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 더 이상 존재하지 않습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
             if source_item.daily_plan.finalized_at is not None:
-                continue
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 이미 마감되었습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
             if hasattr(source_item, 'progress_log') and source_item.progress_log is not None:
-                continue
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}에 이미 진행 기록이 생겼습니다. "
+                    f"복구안을 다시 생성해주세요."
+                )
+            if source_item.daily_plan.date != exc_item.original_date:
+                raise RecoveryPlanStaleError(
+                    f"{exc_item.study_task}의 원본 계획이 다른 복구안에 의해 "
+                    f"이미 변경되었습니다. 복구안을 다시 생성해주세요."
+                )
             excluded_plan_ids.add(source_item.daily_plan_id)
             source_item.delete()
 
