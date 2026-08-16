@@ -6,7 +6,7 @@
 {% block page_heading %}시험범위 등록하기{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="material" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -18,6 +18,10 @@
       <h1>시험범위 등록하기</h1>
       <p class="sub">과목별 시험범위를 알려주세요</p>
     </div>
+  </div>
+  <div class="form-notice-box">
+    <svg class="ico"><use href="#i-alert"/></svg>
+    계획 생성 후에는 수정하거나 삭제할 수 없어요.
   </div>
 
   <div class="tabbar">
@@ -141,10 +145,33 @@
 
   var fileInput = document.getElementById('{{ form.file.id_for_label }}');
   var uploadText = document.querySelector('.material-upload-text');
+  var uploadBox = document.querySelector('.material-upload-box');
+
+  function setFileName() {
+    if (fileInput.files[0] && uploadText) {
+      uploadText.textContent = fileInput.files[0].name;
+    }
+  }
+
   if (fileInput) {
-    fileInput.addEventListener('change', function () {
-      if (fileInput.files[0] && uploadText) {
-        uploadText.textContent = fileInput.files[0].name;
+    fileInput.addEventListener('change', setFileName);
+  }
+
+  if (uploadBox && fileInput) {
+    uploadBox.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      uploadBox.classList.add('drag-over');
+    });
+    uploadBox.addEventListener('dragleave', function () {
+      uploadBox.classList.remove('drag-over');
+    });
+    uploadBox.addEventListener('drop', function (e) {
+      e.preventDefault();
+      uploadBox.classList.remove('drag-over');
+      var dropped = e.dataTransfer.files;
+      if (dropped.length > 0) {
+        fileInput.files = dropped;
+        setFileName();
       }
     });
   }

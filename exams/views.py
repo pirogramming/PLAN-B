@@ -361,7 +361,9 @@ def period_create(request):
                 )
                 curr_date += datetime.timedelta(days=1)
 
-            return redirect('exams:period_detail', period_id=period.id)
+            # FE1(신예원): 시험기간 생성 직후에는 허브(시험기간 홈)로 보내지 않고
+            # 피그마 3→4페이지 순서 그대로 '과목 등록'으로 바로 이어지게 한다.
+            return redirect('exams:subject_create', period_id=period.id)
     else:
         form = ExamPeriodForm()
 
@@ -588,7 +590,7 @@ def subject_create(request, period_id):
             exam = form.save(commit=False)
             exam.exam_period = period
             exam.save()
-            return redirect('exams:period_detail', period_id=period.id)
+            return redirect('exams:subject_create', period_id=period.id)
     else:
         form = ExamForm(exam_period=period)
 
@@ -1051,22 +1053,18 @@ def task_review(request, exam_id):
 
             for obj in formset.deleted_objects:
                 obj.delete()
-
-            if action in ("confirm", "confirm_and_next"):
-                exam.study_tasks.filter(
-                    is_confirmed=False
+            if action in ('confirm', 'confirm_and_next'):
+                # '모든 과목 저장하고 다음으로' 버튼: 이름 그대로 동작하도록,
+                # 지금 보고 있는 과목뿐 아니라 같은 시험기간의 모든 과목의
+                # 미확정 학습 작업을 한 번에 확정 처리한 뒤 바로 feasibility로 이동한다.
+                StudyTask.objects.filter(
+                    exam__exam_period_id=exam.exam_period_id,
+                    is_confirmed=False,
                 ).update(is_confirmed=True)
+                return redirect('planner:feasibility', period_id=exam.exam_period_id)
 
-                return redirect(
-                    "planner:feasibility",
-                    period_id=exam.exam_period_id,
-                )
-
-            return redirect(
-                "exams:task_review",
-                exam_id=exam.id,
-            )
-
+            return redirect('exams:task_review', exam_id=exam.id)
+            
     else:
         formset = StudyTaskFormSet(
             queryset=queryset,

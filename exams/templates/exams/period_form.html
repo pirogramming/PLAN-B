@@ -7,7 +7,7 @@
 {% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="periods" %}
+{% include "exams/_sidebar.html" with nav="period_form" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -20,6 +20,12 @@
       <p class="sub">이 기간 동안의 계획을 세울게요</p>
     </div>
   </div>
+  {% if not period %}
+  <div class="form-notice-box">
+    <svg class="ico"><use href="#i-alert"/></svg>
+    계획 생성 후에는 수정하거나 삭제할 수 없어요.
+  </div>
+  {% endif %}
 
   {% if form.non_field_errors %}
   <div class="form-error-box">

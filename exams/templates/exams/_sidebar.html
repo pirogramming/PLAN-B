@@ -1,5 +1,5 @@
 {% load static exam_extras %}
-{# 사용법: {% include "exams/_sidebar.html" with nav="periods" %} #}
+{% get_wizard_context period exam as wiz %}
 
 <aside class="side">
   <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
@@ -51,32 +51,48 @@
       </div>
       {% endif %}
     {% else %}
-    <a class="nav-i {% if nav == 'periods' %}on{% endif %}"
-       href="{% url 'exams:period_list' %}">
-      <svg class="ico"><use href="#i-graduation"/></svg>내 시험기간
-    </a>
-    {% if period %}
+    {% if wiz.period_id %}
     <a class="nav-i {% if nav == 'period_detail' %}on{% endif %}"
-       href="{% url 'exams:period_detail' period.id %}">
-      <svg class="ico"><use href="#i-dashboard"/></svg>시험기간 홈
-    </a>
-    {% elif exam %}
-    <a class="nav-i {% if nav == 'period_detail' %}on{% endif %}"
-       href="{% url 'exams:period_detail' exam.exam_period_id %}">
+       href="{% url 'exams:period_detail' wiz.period_id %}">
       <svg class="ico"><use href="#i-dashboard"/></svg>시험기간 홈
     </a>
     {% endif %}
     {% endif %}
   </nav>
 
-  {% if period %}
-  <div class="side-label">시험기간</div>
-  <div class="side-box">
-    <h4>{{ period.title }}</h4>
-    <p class="num">
-      {{ period.start_date|date:"m.d" }} ~ {{ period.end_date|date:"m.d" }}
-    </p>
-  </div>
+  {% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %}
+  <div class="side-label">시험 준비 단계</div>
+  <nav class="nav-steps">
+    <a class="nav-i nav-step {% if nav == 'period_form' %}on{% endif %}"
+       href="{% if wiz.period_id %}{% url 'exams:period_update' wiz.period_id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
+      <span class="step-num">1</span>시험기간 등록
+    </a>
+
+    <a class="nav-i nav-step {% if nav == 'subject_create' %}on{% endif %}{% if not wiz.period_id %} off{% endif %}"
+       href="{% if wiz.period_id %}{% url 'exams:subject_create' wiz.period_id %}{% else %}#{% endif %}">
+      <span class="step-num">2</span>과목 등록
+    </a>
+
+    <a class="nav-i nav-step {% if nav == 'available_time' %}on{% endif %}{% if not wiz.period_id %} off{% endif %}"
+       href="{% if wiz.period_id %}{% url 'exams:available_time_update' wiz.period_id %}{% else %}#{% endif %}">
+      <span class="step-num">3</span>공부 가능 시간 등록
+    </a>
+
+    <a class="nav-i nav-step {% if nav == 'material' %}on{% endif %}{% if not wiz.first_exam_id %} off{% endif %}"
+       href="{% if wiz.first_exam_id %}{% url 'exams:material_create' wiz.first_exam_id %}{% else %}#{% endif %}">
+      <span class="step-num">4</span>시험범위 등록
+    </a>
+
+    <a class="nav-i nav-step {% if nav == 'task_review' %}on{% endif %}{% if not wiz.first_exam_id %} off{% endif %}"
+       href="{% if wiz.first_exam_id %}{% url 'exams:task_review' wiz.first_exam_id %}{% else %}#{% endif %}">
+      <span class="step-num">5</span>학습 작업 확인
+    </a>
+
+    <a class="nav-i nav-step {% if nav == 'feasibility' %}on{% endif %}{% if not wiz.period_id %} off{% endif %}"
+       href="{% if wiz.period_id %}{% url 'planner:feasibility' wiz.period_id %}{% else %}#{% endif %}">
+      <span class="step-num">6</span>계획 가능성 판단
+    </a>
+  </nav>
   {% endif %}
 
   <div class="side-foot">

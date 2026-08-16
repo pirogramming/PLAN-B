@@ -12,7 +12,13 @@
 <div class="auth-wrap">
   <div class="card auth-card" style="text-align:center;">
     <div class="page-title-sm">
+      {% if account.account.provider == 'google' %}
+      구글 계정으로 로그인할까요?
+      {% elif account.account.provider == 'naver' %}
+      네이버 계정으로 로그인할까요?
+      {% else %}
       {{ account.get_provider.name }} 계정으로 로그인할까요?
+      {% endif %}
     </div>
     <div class="page-sub">
       {% if account.account.extra_data.email %}

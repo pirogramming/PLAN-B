@@ -43,6 +43,12 @@
   background:var(--judge3-bg); border:1px solid var(--judge3-line); color:var(--judge3);
   border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
 }
+.form-notice-box{
+  background:var(--brand1); border:1px solid var(--brand3); color:var(--neutral9);
+  border-radius:10px; padding:10px 14px; font-size:12.5px; margin-bottom:16px;
+  display:flex; align-items:center; gap:8px;
+}
+.form-notice-box .ico{ width:15px; height:15px; flex:none; color:var(--brand4); }
 
 .page-title{ font-size:34px; font-weight:700; color:var(--neutral11); margin-bottom:8px; }
 .page-sub{ font-size:14px; color:var(--neutral7); margin-bottom:22px; }
@@ -66,6 +72,15 @@
 .priority-dot.priority-high{ background:var(--brand4); color:var(--neutral1); }
 .priority-dot.priority-medium{ background:var(--brand3); color:var(--neutral10); }
 .priority-dot.priority-low{ background:var(--brand2); color:var(--neutral9); }
+
+/* 사이드바 '시험기간 홈' 아래 1~6단계 내비게이션 (exams/_sidebar.html) */
+.nav-steps{ display:flex; flex-direction:column; gap:2px; }
+.nav-step .step-num{
+  width:18px; height:18px; border-radius:50%; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:800; background:var(--neutral4); color:var(--neutral8);
+}
+.nav-step.on .step-num{ background:var(--neutral1); color:var(--neutral11); }
 
 /* 탭바 — 실제로는 페이지 이동 링크(<a>)지만 시각적으로는 탭처럼 보이게 */
 .tabbar{ display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
@@ -226,11 +241,12 @@
 }
 .task-action-row {
   display: flex;
+  flex-direction: column;
   gap: 10px;
   margin-top: 4px;
 }
 .task-action-row .btn {
-  flex: 1;
+  width: 100%;
 }
 .task-confirm-btn {
   background: var(--neutral11);
@@ -284,6 +300,10 @@
   border-radius: 14px;
   background: var(--neutral2);
   cursor: pointer;
+}
+.material-upload-box.drag-over {
+  border-color: var(--brand4);
+  background: var(--brand1);
 }
 .material-upload-icon {
   font-size: 30px;
@@ -430,13 +450,8 @@
   cursor: pointer;
   position: relative;
 }
-/* 시험일도 다른 과목 공부에는 쓸 수 있어서(스케줄러는 "그 과목 자신의
-   시험일"만 배치 금지) 입력을 막지 않는다 — 시험일이라는 표시만 옅은
-   빨간 톤으로 남기고, 값이 있으면 .has-value/.value-set이 덮어써서
-   보인다 (스타일시트에서 이 규칙 다음에 오므로). */
 .avail-day.exam-day {
-  background: var(--judge3-bg);
-  color: var(--judge3);
+  border: 1.5px solid var(--judge3);
 }
 .avail-day.past-day {
   background: var(--neutral2);
@@ -495,6 +510,9 @@
 }
 .avail-save-btn {
   margin-top: 14px;
+}
+.avail-side-input::placeholder {
+  color: var(--neutral6);
 }
 .avail-next-btn {
   margin-top: 18px;
@@ -881,59 +899,49 @@
   font-size: 12.5px;
   color: var(--neutral7);
   text-align: center;
-}
-.feasibility-subject-section {
+}.feasibility-subject-section {
   margin-top: 24px;
 }
 .feasibility-subject-title {
   font-size: 13px;
   font-weight: 700;
-  color: var(--neutral10);
+  color: var(--neutral9);
   margin-bottom: 10px;
 }
 .feasibility-subject-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .feasibility-subject-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--neutral4);
-  border-radius: 14px;
+  background: var(--neutral1);
+  border: 2px solid var(--neutral4);
+  border-radius: 16px;
+  padding: 16px 20px;
 }
 .feasibility-subject-name {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--neutral10);
 }
 .feasibility-subject-meta {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--neutral7);
   margin-top: 3px;
 }
 .feasibility-subject-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 .feasibility-subject-minutes {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--neutral8);
-}
-@media (max-width: 640px) {
-  .feasibility-subject-row {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .feasibility-subject-right {
-    align-self: stretch;
-    justify-content: space-between;
-  }
 }
 
 /* 좀비(is_stale) 분석 상태 UI */

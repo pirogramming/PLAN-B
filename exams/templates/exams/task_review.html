@@ -6,7 +6,7 @@
 {% block page_heading %}학습 작업{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="task_review" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -20,9 +20,18 @@
         {{ exam.subject_name }} · 총 {{ formset.forms|length }}개
       </p>
     </div>
-    <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-secondary">
-      + 작업 추가하기
-    </a>
+    <div class="row" style="gap:8px;">
+      <a href="{% url 'exams:material_create' exam.id %}" class="btn btn-secondary">
+        + 이 과목 자료 추가
+      </a>
+      <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-secondary">
+        + 작업 추가하기
+      </a>
+    </div>
+  </div>
+  <div class="form-notice-box">
+    <svg class="ico"><use href="#i-alert"/></svg>
+    계획 생성 후에는 수정하거나 삭제할 수 없어요.
   </div>
 
   <div class="task-review-body">
@@ -30,6 +39,7 @@
       <div class="card card-body task-nav-card">
         <div class="task-nav-title">과목</div>
         {% for e in period_exams %}
+        {% if e.study_materials.exists %}
         <a href="{% url 'exams:task_review' e.id %}"
            class="nav-row-link{% if e.id == exam.id %} active{% endif %}">
           <span>{{ e.subject_name }}</span>
@@ -37,6 +47,14 @@
             {{ e.study_tasks.count }}개
           </span>
         </a>
+        {% else %}
+        <a href="{% url 'exams:material_create' e.id %}" class="nav-row-link">
+          <span>{{ e.subject_name }}</span>
+          <span class="num" style="color:var(--judge3);">
+            시험범위 등록
+          </span>
+        </a>
+        {% endif %}
         {% endfor %}
       </div>
     </div>
@@ -139,19 +157,18 @@
           <button
             type="submit"
             name="action"
-            value="confirm"
-            class="btn btn-primary btn-lg task-primary-btn"
+            value="save_subject"
+            class="btn btn-secondary btn-lg task-primary-btn"
           >
-            저장하고 다음으로
+            이 과목 저장
           </button>
           <button
             type="submit"
             name="action"
-            value="save"
-            class="btn btn-secondary btn-sm task-secondary-btn"
-            id="save-action-btn"
+            value="confirm"
+            class="btn btn-primary btn-lg task-primary-btn"
           >
-            임시 저장
+            모든 과목 저장하고 다음으로
           </button>
         </div>
         {% endif %}

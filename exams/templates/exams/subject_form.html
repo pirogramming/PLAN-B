@@ -6,7 +6,7 @@
 {% block page_heading %}과목 등록하기{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="subject_create" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -18,6 +18,10 @@
       <h1>과목 등록하기</h1>
       <p class="sub">시험일과 우선순위를 입력하세요</p>
     </div>
+  </div>
+  <div class="form-notice-box">
+    <svg class="ico"><use href="#i-alert"/></svg>
+    계획 생성 후에는 수정하거나 삭제할 수 없어요.
   </div>
 
   {% if form.non_field_errors %}
@@ -63,7 +67,7 @@
         </div>
 
         <button type="submit" class="btn btn-secondary" style="width:100%; margin-top:24px;">
-          + 과목 추가
+          + 과목 등록
         </button>
       </form>
     </div>
@@ -92,7 +96,8 @@
     </div>
   </div>
 
-  <a href="{% url 'exams:available_time_update' period.id %}" class="btn btn-primary btn-lg"
+  <a href="{% url 'exams:available_time_update' period.id %}?next={% if period_exams %}{% url 'exams:material_create' period_exams.0.id %}{% endif %}"
+     class="btn btn-primary btn-lg"
      style="margin-top:20px; {% if not period_exams %}pointer-events:none; opacity:.5;{% endif %}">
     다음
   </a>

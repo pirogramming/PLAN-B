@@ -274,7 +274,123 @@ class TaskReviewFormSubmitTest(TestCase):
         self.assertEqual(self.task.title, "수정된 제목 (저장+확정)")
         self.assertTrue(self.task.is_confirmed)
 
+class MultiSubjectConfirmTests(TestCase):
+    """
+    #133 리뷰 대응: '모든 과목 저장하고 다음으로' 버튼이 현재 과목만이 아니라
+    같은 시험기간의 모든 과목을 confirm 처리하도록 바뀐 것에 대한 회귀 테스트.
+    """
 
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(
+            username="multitest", password="password123"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="2026 2학기 기말고사",
+            start_date="2026-12-01",
+            end_date="2026-12-15",
+        )
+        self.exam1 = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date="2026-12-05",
+            speed_factor=1.0,
+        )
+        self.exam2 = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="운영체제",
+            exam_date="2026-12-10",
+            speed_factor=1.0,
+        )
+
+    def test_confirm_on_one_subject_confirms_all_subjects_tasks(self):
+        """
+        exam1 화면에서 confirm 액션을 보내면, exam1뿐 아니라 같은
+        시험기간의 exam2(아직 그 화면을 열어본 적 없는 과목)의 미확정
+        StudyTask도 함께 is_confirmed=True로 바뀌어야 한다.
+        """
+        task1 = StudyTask.objects.create(
+            exam=self.exam1,
+            title="1장 개념 정리",
+            task_type=TaskType.CONCEPT,
+            importance=PriorityLevel.MEDIUM,
+            depth=TaskDepth.BASIC,
+            difficulty=TaskDifficulty.NORMAL,
+            is_confirmed=False,
+        )
+        task2 = StudyTask.objects.create(
+            exam=self.exam2,
+            title="프로세스 개념 정리",
+            task_type=TaskType.CONCEPT,
+            importance=PriorityLevel.MEDIUM,
+            depth=TaskDepth.BASIC,
+            difficulty=TaskDifficulty.NORMAL,
+            is_confirmed=False,
+        )
+
+        url = reverse("exams:task_review", kwargs={"exam_id": self.exam1.id})
+        post_data = {
+            "form-TOTAL_FORMS": "1",
+            "form-INITIAL_FORMS": "1",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-id": task1.id,
+            "form-0-unit_name": "1장",
+            "form-0-title": task1.title,
+            "form-0-task_type": TaskType.CONCEPT,
+            "form-0-importance": PriorityLevel.MEDIUM,
+            "form-0-depth": TaskDepth.BASIC,
+            "form-0-difficulty": TaskDifficulty.NORMAL,
+            "action": "confirm",
+        }
+
+        response = self.client.post(url, post_data)
+
+        self.assertRedirects(
+            response,
+            reverse("planner:feasibility", kwargs={"period_id": self.period.id}),
+        )
+
+        task1.refresh_from_db()
+        task2.refresh_from_db()
+        self.assertTrue(task1.is_confirmed)
+        self.assertTrue(
+            task2.is_confirmed,
+            "exam2의 작업은 화면을 연 적이 없어도 같은 시험기간이므로 함께 확정되어야 함",
+        )
+
+    def test_readiness_blocked_when_other_subject_has_no_tasks(self):
+        """
+        exam1은 학습 작업이 확정돼 있어도, 같은 시험기간의 exam2에
+        학습 작업이 하나도 없으면 계획 생성이 막혀야 한다
+        (_validate_task_readiness의 '확정되지 않은 과목' 분기 회귀 테스트).
+        """
+        StudyTask.objects.create(
+            exam=self.exam1,
+            title="1장 개념 정리",
+            task_type=TaskType.CONCEPT,
+            importance=PriorityLevel.MEDIUM,
+            depth=TaskDepth.BASIC,
+            difficulty=TaskDifficulty.NORMAL,
+            is_confirmed=True,
+            estimated_min_minutes=30,
+            estimated_max_minutes=60,
+        )
+        # exam2에는 의도적으로 StudyTask를 하나도 만들지 않는다.
+
+        url = reverse("planner:feasibility", kwargs={"period_id": self.period.id})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            response.context["can_generate"],
+            "학습 작업이 없는 과목이 있으면 can_generate는 False여야 함",
+        )
+        self.assertIsNotNone(response.context["readiness_error"])
+        
 class MaterialCreateTests(TestCase):
     """자료 등록 시 입력 유형별 status 처리"""
 

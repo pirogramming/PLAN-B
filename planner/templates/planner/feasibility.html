@@ -1,19 +1,20 @@
-{% extends "base.html" %}
+{% extends "exams/_exam_base.html" %}
 {% load static %}
+{% load exam_extras %}
+
 {% block title %}
 가능성 판정 - PLAN B
 {% endblock %}
 
-{% block extra_css %}
-<link rel="stylesheet" href="{% static 'css/components.css' %}">
+{% block sidebar %}
+{% include "exams/_sidebar.html" with nav="feasibility" period=exam_period %}
 {% endblock %}
 
-{% block content %}
-<div class="container feasibility-wrap">
-  <div class="crumb-text">
-    PLAN B &nbsp;›&nbsp; 가능성 판정
-  </div>
+{% block page_heading %}계획 가능성 판단{% endblock %}
 
+{% block exam_content %}
+{% get_wizard_context period=exam_period as wiz %}
+<div class="feasibility-wrap">
   <div class="feasibility-header">
     <div class="page-title" style="margin-bottom:0;">
       계획이 가능한지 확인해볼게요
@@ -89,16 +90,14 @@
     <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가능시간 수정
     </a>
-    <a href="{% url 'exams:period_detail' exam_period.id %}" class="btn btn-ghost">
+    {% if wiz.first_exam_id %}
+    <a href="{% url 'exams:task_review' wiz.first_exam_id %}" class="btn btn-ghost">
       학습작업 수정
     </a>
+    {% endif %}
   </div>
   {% else %}
-  {# can_generate=True라 위 버튼은 안 뜨지만, 계획 생성 시 시험일/날짜별 가능시간
-     제약으로 일부 작업을 배치하지 못해(UnallocatedTasksError) 다시 이 화면으로
-     돌아올 수 있다. 그때 가용시간을 고치러 갈 방법이 없으면 막히니, 별도
-     에러 신호 없이도 항상 접근 가능하게 ghost 버튼 하나만 조용히 둔다
-     (.feasibility-action-row는 버튼에 flex:1을 줘서 꽉 차 보이므로 여기선 안 씀). #}
+  
   <div style="margin-top:14px; text-align:right;">
     <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
       가용시간 수정하기
@@ -128,6 +127,7 @@
       등록된 과목이 없습니다.
     </div>
     {% endif %}
+  </div>
   </div>
 </div>
 {% endblock %}

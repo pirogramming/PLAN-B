@@ -1,12 +1,12 @@
 {% extends "exams/_exam_base.html" %}
 {% load exam_extras %}
 {% block title %}
-가용시간 입력 - PLAN B
+공부 가능 시간 등록 - PLAN B
 {% endblock %}
-{% block page_heading %}가용시간 입력하기{% endblock %}
+{% block page_heading %}공부 가능 시간 등록{% endblock %}
 
 {% block sidebar %}
-{% include "exams/_sidebar.html" with nav="period_detail" %}
+{% include "exams/_sidebar.html" with nav="available_time" %}
 {% endblock %}
 
 {% block exam_content %}
@@ -15,7 +15,7 @@
 <div class="avail-wrap" style="max-width:960px; margin:0 auto;">
   <div class="page-head">
     <div>
-      <h1>가용시간 입력하기</h1>
+      <h1>공부 가능 시간 등록</h1>
       <p class="sub">하루 전체에서 공부 가능한 시간을 날짜별로 입력해주세요</p>
     </div>
   </div>
@@ -85,19 +85,20 @@
         </div>
         <div class="avail-side-caption">선택한 날짜</div>
 
-        <div class="field-label">전체 가용 시간</div>
-        <input type="number" min="0" step="10"
-               class="form-control num"
-               id="side-panel-minutes"
-               placeholder="240">
+        <div class="field-label">전체 공부 가능 시간</div>
+        <input type="number" min="0" step="10" class="form-control num avail-side-input" id="side-panel-minutes"
+          placeholder="예) 240">
         <div class="avail-side-hint">분 단위로 입력</div>
 
         <button type="button"
                 class="btn btn-primary avail-save-btn"
                 style="width:100%;"
                 id="side-panel-save">
-          저장
+          입력 반영
         </button>
+        <div class="avail-side-hint" style="margin-top:8px; color:var(--judge2);">
+          아래 "다음" 버튼을 눌러야 최종 저장됩니다
+        </div>
       </div>
     </div>
 
@@ -110,50 +111,81 @@
 
 {% block exam_extra_js %}
 <script>
-(function () {
-  var sidePanel = document.getElementById('side-panel');
-  var dateLabel = document.getElementById('side-panel-date');
-  var minutesInput = document.getElementById('side-panel-minutes');
-  var saveBtn = document.getElementById('side-panel-save');
-  var currentDay = null;
+  (function () {
+    var sidePanel = document.getElementById('side-panel');
+    var dateLabel = document.getElementById('side-panel-date');
+    var minutesInput = document.getElementById('side-panel-minutes');
+    var saveBtn = document.getElementById('side-panel-save');
+    var currentDay = null;
 
-  function selectDay(dayBtn) {
-    document.querySelectorAll('.avail-day').forEach(function (d) {
-      d.classList.remove('sel');
-    });
-    dayBtn.classList.add('sel');
-    currentDay = dayBtn;
-    sidePanel.classList.remove('disabled');
-    dateLabel.textContent = dayBtn.dataset.date;
-
-    var row = document.querySelector(
-      '[data-formset-row="' + dayBtn.dataset.index + '"]'
-    );
-    var hoursInput = row.querySelector('input[name$="-hours"]');
-    var minInput = row.querySelector('input[name$="-minutes"]');
-    var total = (parseInt(hoursInput.value || 0, 10) * 60) +
-                parseInt(minInput.value || 0, 10);
-    minutesInput.value = total || '';
-  }
-
-  document.querySelectorAll('.avail-day:not(.past-day)').forEach(
-    function (btn) {
-      btn.addEventListener('click', function () {
-        selectDay(btn);
+    function selectDay(dayBtn) {
+      document.querySelectorAll('.avail-day').forEach(function (d) {
+        d.classList.remove('sel');
       });
-    }
-  );
+      dayBtn.classList.add('sel');
+      currentDay = dayBtn;
+      sidePanel.classList.remove('disabled');
+      dateLabel.textContent = dayBtn.dataset.date;
 
-  saveBtn.addEventListener('click', function () {
-    if (!currentDay) return;
-    var total = parseInt(minutesInput.value || 0, 10);
-    var row = document.querySelector(
-      '[data-formset-row="' + currentDay.dataset.index + '"]'
+      var row = document.querySelector(
+        '[data-formset-row="' + dayBtn.dataset.index + '"]'
+      );
+      var hoursInput = row.querySelector('input[name$="-hours"]');
+      var minInput = row.querySelector('input[name$="-minutes"]');
+      var total = (parseInt(hoursInput.value || 0, 10) * 60) +
+        parseInt(minInput.value || 0, 10);
+      minutesInput.value = total || '';
+    }
+
+    document.querySelectorAll('.avail-day:not(.past-day)').forEach(
+      function (btn) {
+        btn.addEventListener('click', function () {
+          selectDay(btn);
+        });
+      }
     );
-    row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
-    row.querySelector('input[name$="-minutes"]').value = total % 60;
-    currentDay.classList.toggle('has-value', total > 0);
-  });
-})();
+
+    // 현재 선택된 날짜에 입력한 분을 저장한다. 입력값이 없으면(빈칸) 0분으로 저장.
+    function saveCurrentDay() {
+      if (!currentDay) return;
+      var total = parseInt(minutesInput.value || 0, 10);
+      var row = document.querySelector(
+        '[data-formset-row="' + currentDay.dataset.index + '"]'
+      );
+      row.querySelector('input[name$="-hours"]').value = Math.floor(total / 60);
+      row.querySelector('input[name$="-minutes"]').value = total % 60;
+      currentDay.classList.toggle('has-value', total > 0);
+    }
+
+    // 캘린더에서 currentDay 바로 다음 날짜(지나간 날짜는 제외) 버튼을 찾아 선택 상태로 전환한다.
+    function goToNextDay() {
+      var days = Array.prototype.slice.call(
+        document.querySelectorAll('.avail-day:not(.past-day)')
+      );
+      var idx = days.indexOf(currentDay);
+      if (idx === -1 || idx === days.length - 1) return; // 마지막 날이면 그대로 둠
+      selectDay(days[idx + 1]);
+      minutesInput.focus();
+    }
+
+    // 저장하고 다음 날로 이동 (엔터, 저장 버튼 공통 동작)
+    function saveAndAdvance() {
+      saveCurrentDay();
+      goToNextDay();
+    }
+
+    saveBtn.addEventListener('click', function () {
+      saveAndAdvance();
+    });
+
+    minutesInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        // 폼 전체 제출(시험범위 등록 페이지로 바로 넘어가는 것) 막고,
+        // 이 페이지에서 다음 날짜로만 이동시킨다.
+        e.preventDefault();
+        saveAndAdvance();
+      }
+    });
+  })();
 </script>
 {% endblock %}
