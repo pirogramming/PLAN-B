@@ -827,6 +827,13 @@ def material_extract(request, material_id, claim_extra=None):
         material.save(update_fields=['status', 'error_message'])
         messages.error(request, "PDF 텍스트 추출에 실패했습니다.")
         return redirect('exams:material_detail', material_id=material.id)
+    except Exception:
+        logger.exception(f"PDF 추출 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        material.status = MaterialStatus.FAILED
+        material.error_message = "알 수 없는 오류로 추출에 실패했습니다."
+        material.save(update_fields=['status', 'error_message'])
+        messages.error(request, "PDF 추출 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
+        return redirect('exams:material_detail', material_id=material.id)
 
     if not extracted:
         material.status = MaterialStatus.FAILED
