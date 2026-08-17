@@ -4217,3 +4217,48 @@ class MaterialCreateBulkTests(TestCase):
         else:
             # 뷰에서 폼 실패 시 302 리다이렉트 처리하는 구조라면 status_code 검증
             self.assertIn(response.status_code, [200, 302])
+
+class ExamPeriodTest(TestCase):
+    def setUp(self):
+        # 1. 사용자 생성 및 로그인
+        self.user = User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="testpass123",
+        )
+        self.client.force_login(self.user)
+
+        # 2. 테스트용 기본 ExamPeriod 생성
+        today = datetime.date.today()
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="2026년 2학기 중간고사",
+            start_date=today,
+            end_date=today + datetime.timedelta(days=7),
+        )
+
+    def test_period_update_blocks_when_exam_date_falls_outside_new_range(self):
+        # 현재 기간의 마지막 날 시험 과목 생성
+        exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="수학",
+            exam_date=self.period.end_date,
+        )
+        # 시험일보다 앞당긴 종료일 설정
+        new_end = self.period.end_date - datetime.timedelta(days=3)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": self.period.start_date,
+                "end_date": new_end,
+            },
+        )
+
+        self.period.refresh_from_db()
+        
+        # 검증
+        self.assertEqual(response.status_code, 200)  # 저장 실패 후 폼 재렌더링
+        self.assertNotEqual(self.period.end_date, new_end)  # DB 값이 변경되지 않았는지 확인
+        self.assertIn("수학", response.content.decode())  # 에러 메시지에 과목명이 포함되었는지 확인
