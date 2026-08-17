@@ -1,7 +1,7 @@
 {% load static exam_extras %}
 {% get_wizard_context period exam as wiz %}
 
-<aside class="side{% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %} side-wizard{% endif %}"></aside>
+<aside class="side{% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %} side-wizard{% endif %}">
   <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
     <span class="brand-logo"><img src="{% static 'images/logo-lockup.png' %}" alt="PLAN B"></span>
   </button>
