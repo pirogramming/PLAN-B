@@ -24,7 +24,7 @@ from core.choices import ExamPeriodStatus, MaterialStatus
 from ..models import ExamPeriod, StudyMaterial
 
 
-def _has_processing_material(period):
+def has_processing_material(period):
     """해당 시험기간에 PDF 추출(status) 또는 AI 분석(analysis_status)이
     PROCESSING 중인 StudyMaterial이 하나라도 있는지 확인한다.
 
@@ -34,6 +34,9 @@ def _has_processing_material(period):
     그 사이 시험기간을 COMPLETED로 만들어버리면(수동 종료든 lazy check든)
     "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"이 가능해지므로,
     종료/자동종료 판정 전에 이 함수로 반드시 확인해야 한다.
+
+    exams/views.py의 period_complete()도 동일한 판정 기준이 필요해 이
+    서비스 모듈에서 public 함수로 함께 제공한다.
     """
     return StudyMaterial.objects.filter(
         exam__exam_period=period,
@@ -64,7 +67,7 @@ def complete_expired_period(period):
         if (
             locked.status == ExamPeriodStatus.ACTIVE
             and locked.end_date < timezone.localdate()
-            and not _has_processing_material(locked)
+            and not has_processing_material(locked)
         ):
             locked.status = ExamPeriodStatus.COMPLETED
             locked.save(update_fields=['status'])
@@ -93,7 +96,7 @@ def complete_expired_periods_for_user(user):
             if (
                 period.status == ExamPeriodStatus.ACTIVE
                 and period.end_date < timezone.localdate()
-                and not _has_processing_material(period)
+                and not has_processing_material(period)
             ):
                 period.status = ExamPeriodStatus.COMPLETED
                 period.save(update_fields=['status'])

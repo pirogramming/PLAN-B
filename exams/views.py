@@ -51,7 +51,7 @@ from .services.analysis_orchestrator import (
 from .services.exam_period import (
     complete_expired_period,
     complete_expired_periods_for_user,
-    _has_processing_material,
+    has_processing_material,
 )
 
 logger = logging.getLogger(__name__)
@@ -466,7 +466,7 @@ def period_complete(request, period_id):
             messages.info(request, "이미 완료되거나 보관 처리된 시험기간입니다.")
             return redirect('exams:period_list')
 
-        if _has_processing_material(period):
+        if has_processing_material(period):
             messages.error(request, "PDF 추출 또는 AI 분석이 진행 중인 학습자료가 있어 시험기간을 종료할 수 없습니다. 처리가 끝난 후 다시 시도해주세요.")
             return redirect('exams:period_list')
 
