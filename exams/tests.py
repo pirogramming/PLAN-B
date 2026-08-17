@@ -58,6 +58,10 @@ logger = logging.getLogger(__name__)
 TEMP_MEDIA_ROOT = tempfile.mkdtemp()
 from django.contrib.messages import get_messages
 from exams.forms import StudyMaterialForm
+from .services.exam_period import (
+    complete_expired_period,
+    complete_expired_periods_for_user,
+)
 
 
 class OwnershipTests(TestCase):
@@ -4302,3 +4306,281 @@ class ExamPeriodTest(TestCase):
         self.period.refresh_from_db()
         self.assertEqual(response.status_code, 302)  # 성공 시 상세보기 페이지 등으로 리다이렉트
         self.assertEqual(self.period.end_date, new_end)  # DB 변경 성공
+
+
+def _make_user(username="tester"):
+    """User.USERNAME_FIELD가 'email'이고 email이 unique=True라서, 여러
+    테스트 유저를 만들 때 username마다 다른 email을 명시적으로 지정해야
+    한다 (안 그러면 두 번째 유저부터 빈 문자열 email unique 충돌 발생)."""
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password="pw12345!",
+    )
+
+def _make_period(user, *, status=ExamPeriodStatus.ACTIVE, days_ago_end=1, days_length=7, title="테스트 시험기간"):
+    """end_date가 오늘로부터 days_ago_end일 전(기본 1일 전=만료)인 ExamPeriod 생성.
+    days_ago_end가 음수면 아직 만료되지 않은(미래 종료) 시험기간이 된다."""
+    today = timezone.localdate()
+    end_date = today - datetime.timedelta(days=days_ago_end)
+    start_date = end_date - datetime.timedelta(days=days_length)
+    return ExamPeriod.objects.create(
+        user=user,
+        title=title,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+    )
+
+
+def _make_exam(period, *, subject_name="테스트 과목", days_offset=0):
+    exam_date = period.end_date - datetime.timedelta(days=days_offset)
+    return Exam.objects.create(
+        exam_period=period,
+        subject_name=subject_name,
+        exam_date=exam_date,
+    )
+
+
+def _make_material(exam, *, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.COMPLETED):
+    return StudyMaterial.objects.create(
+        exam=exam,
+        material_type=MaterialType.TEXT,
+        title="테스트 자료",
+        status=status,
+        analysis_status=analysis_status,
+    )
+
+
+# =====================================================================
+# 서비스 함수 단위 테스트
+# =====================================================================
+class CompleteExpiredPeriodServiceTests(TestCase):
+    def setUp(self):
+        self.user = _make_user()
+
+    def test_expired_active_period_without_processing_material_is_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_non_expired_active_period_is_left_unchanged(self):
+        period = _make_period(self.user, days_ago_end=-3)  # end_date가 미래
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_already_completed_period_is_left_unchanged(self):
+        period = _make_period(
+            self.user, status=ExamPeriodStatus.COMPLETED, days_ago_end=5
+        )
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+
+    def test_archived_period_is_left_unchanged(self):
+        period = _make_period(
+            self.user, status=ExamPeriodStatus.ARCHIVED, days_ago_end=5
+        )
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ARCHIVED)
+
+    def test_expired_period_with_processing_extraction_material_is_not_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING, analysis_status=MaterialStatus.PENDING)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_expired_period_with_processing_analysis_material_is_not_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.PROCESSING)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+
+    def test_expired_period_with_only_completed_materials_is_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.COMPLETED)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+
+
+class CompleteExpiredPeriodsForUserServiceTests(TestCase):
+    def setUp(self):
+        self.user = _make_user("user_a")
+        self.other_user = _make_user("user_b")
+
+    def test_completes_all_expired_active_periods_for_the_user(self):
+        expired1 = _make_period(self.user, days_ago_end=1, title="만료1")
+        expired2 = _make_period(self.user, days_ago_end=10, title="만료2")
+        # 동시에 ACTIVE 시험기간은 하나만 허용된다는 제약이 있을 수 있으므로
+        # 서비스 함수 자체는 그 제약을 모르는 상태로도 동작해야 한다(선/후행
+        # 검증은 뷰 레벨 책임). 여기서는 서비스 단위 동작만 확인한다.
+        expired2.status = ExamPeriodStatus.ACTIVE
+        expired2.save(update_fields=['status'])
+
+        complete_expired_periods_for_user(self.user)
+
+        expired1.refresh_from_db()
+        expired2.refresh_from_db()
+        self.assertEqual(expired1.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(expired2.status, ExamPeriodStatus.COMPLETED)
+
+    def test_does_not_touch_other_users_periods(self):
+        other_expired = _make_period(self.other_user, days_ago_end=1, title="다른유저")
+
+        complete_expired_periods_for_user(self.user)
+
+        other_expired.refresh_from_db()
+        self.assertEqual(other_expired.status, ExamPeriodStatus.ACTIVE)
+
+    def test_skips_period_with_processing_material(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING)
+
+        complete_expired_periods_for_user(self.user)
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_non_expired_period_is_not_touched(self):
+        period = _make_period(self.user, days_ago_end=-3)
+
+        complete_expired_periods_for_user(self.user)
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+
+# =====================================================================
+# 뷰 레벨 통합 테스트: period_list / period_create / period_detail /
+# period_manage가 동일하게 Lazy Check를 적용하는지 (화면별 표시 불일치 회귀 방지)
+# =====================================================================
+class LazyCompleteViewConsistencyTests(TestCase):
+    def setUp(self):
+        self.user = _make_user()
+        self.client.force_login(self.user)
+
+    def test_period_list_completes_expired_active_period(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        self.client.get(reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_create_get_completes_expired_active_period(self):
+        # period_create GET은 폼만 보여주지만, 뷰 진입 시점에 항상 Lazy Check가
+        # 먼저 실행되어야 한다 (period_list/period_detail을 거치지 않고 바로
+        # 생성 화면으로 들어오는 경우 대비).
+        period = _make_period(self.user, days_ago_end=1)
+
+        self.client.get(reverse('exams:period_create'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_detail_completes_expired_active_period(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        response = self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        # 화면에 렌더링되는 context의 period도 최신 상태여야 한다
+        # (같은 요청 안에서 오래된 인스턴스를 그대로 보여주면 안 됨).
+        self.assertEqual(response.context['period'].status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_detail_does_not_complete_period_with_processing_material(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING)
+
+        self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_period_manage_completes_expired_active_period_when_plan_exists(self):
+        """period_manage는 DailyPlan이 있어야 period_detail로 리다이렉트되지
+        않고 화면 자체를 보여주므로, Lazy Check 검증을 위해 DailyPlan을 먼저
+        만들어둔다.
+
+        DailyPlan 필수 필드는 exam_period 외에 프로젝트마다 다를 수 있어
+        최소 필드로 생성했다. 실제 모델과 다르면 이 부분만 조정하면 된다.
+        """
+        period = _make_period(self.user, days_ago_end=1)
+        DailyPlan.objects.create(
+            exam_period=period,
+            date=period.start_date,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(response.status_code, 200)
+
+    def test_period_manage_redirects_to_detail_without_plan_regardless_of_lazy_check(self):
+        # 계획이 없으면 원래 로직대로 period_detail로 리다이렉트된다.
+        # (Lazy Check 추가가 기존 리다이렉트 동작을 깨지 않는지 회귀 확인)
+        period = _make_period(self.user, days_ago_end=1)
+
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': period.id})
+        )
+
+        self.assertRedirects(
+            response,
+            reverse('exams:period_detail', kwargs={'period_id': period.id}),
+        )
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_visiting_order_does_not_affect_final_status(self):
+        """재현 시나리오 회귀 테스트: period_list를 거쳤는지 여부와 무관하게
+        같은 시험기간이 동일한 최종 상태로 수렴해야 한다."""
+        period_a = _make_period(self.user, days_ago_end=1, title="A")
+        # period_detail을 먼저 방문
+        self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period_a.id})
+        )
+        period_a.refresh_from_db()
+
+        other_user = _make_user("user_c")
+        self.client.force_login(other_user)
+        period_b = _make_period(other_user, days_ago_end=1, title="B")
+        # period_list를 먼저 방문
+        self.client.get(reverse('exams:period_list'))
+        period_b.refresh_from_db()
+
+        self.assertEqual(period_a.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(period_b.status, ExamPeriodStatus.COMPLETED)
