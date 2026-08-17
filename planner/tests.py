@@ -5133,3 +5133,50 @@ class FeasibilityDeadlineAwareTests(TestCase):
         context = self._feasibility_context()
 
         self.assertEqual(context['result']['status'], RISKY)
+
+    def test_subject_card_status_matches_cumulative_judgement(self):
+        """
+        _build_subject_results()(과목별 카드)도 전체 판정과 동일한
+        누적 min/max 추적 방식을 써야 한다. 같은 반례로 검증:
+
+        과목 A: min20/max100, A 시험일 이전 가용 50
+        과목 B: min80/max80, B 시험일 이전 누적 가용 120
+
+        예전(consumed -= max) 방식이면 B과목 카드가 '불가능'으로 잘못
+        뜬다. 올바른 누적 판정이면 B과목도 '위험'이어야 한다.
+        """
+        from exams.models import Exam, StudyTask
+
+        exam_a = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="A과목",
+            exam_date=self.today + timedelta(days=3),
+            speed_factor=1.0,
+        )
+        exam_b = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="B과목",
+            exam_date=self.today + timedelta(days=6),
+            speed_factor=1.0,
+        )
+        StudyTask.objects.create(
+            exam=exam_a, title="A 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=100, is_confirmed=True,
+        )
+        StudyTask.objects.create(
+            exam=exam_b, title="B 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=80, estimated_max_minutes=80, is_confirmed=True,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=50,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=4),
+            available_minutes=70,
+        )
+
+        context = self._feasibility_context()
+        subject_results = {s['subject_name']: s for s in context['subject_results']}
+
+        self.assertEqual(subject_results['A과목']['status'], RISKY)
+        self.assertEqual(subject_results['B과목']['status'], RISKY)

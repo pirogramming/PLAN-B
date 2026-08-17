@@ -307,13 +307,12 @@ def _available_times(exam_period):
     ).order_by('date')
 
 
-def _calculate_feasibility_for_period(exam_period):
+def _calculate_feasibility_for_period(exam_period, available_times=None):
     """
     전체 실현가능성 판정. _build_subject_results()와 같은 원리로 시험일
     순서 누적 검증을 쓴다 - 단순 합계는 시험 당일 가용시간까지 포함시켜서
     실제 스케줄러(시험 당일엔 그 과목 작업을 배치 안 함)보다 낙관적으로
     판정한다.
-
     상태(가능/위험/불가능)는 이 누적 검증 결과를 쓰지만, 필요/가용 시간
     숫자 자체(total_min_minutes 등 화면 표시용)는 기존처럼 전체 합계를
     그대로 보여준다 - "총 필요시간 300분 중 총 가용시간 280분" 같은
@@ -322,20 +321,60 @@ def _calculate_feasibility_for_period(exam_period):
     tasks = list(_confirmed_tasks(exam_period))
     required_min = sum(t.estimated_min_minutes for t in tasks)
     required_max = sum(t.estimated_max_minutes for t in tasks)
-    available = sum(at.available_minutes for at in _available_times(exam_period))
+    if available_times is None:
+        available_times = list(_available_times(exam_period))
+    available = sum(at.available_minutes for at in available_times)
 
     display_result = calculate_feasibility(required_min, required_max, available)
 
-    available_times = list(_available_times(exam_period))
     cumulative_min = 0
     cumulative_max = 0
     worst_status = POSSIBLE
     status_order = {POSSIBLE: 0, RISKY: 1, IMPOSSIBLE: 2}
-
     for exam in exam_period.exams.all().order_by('exam_date'):
         subject_tasks = [task for task in tasks if task.exam_id == exam.id]
         cumulative_min += sum(task.estimated_min_minutes for task in subject_tasks)
         cumulative_max += sum(task.estimated_max_minutes for task in subject_tasks)
+        capacity_until_exam = sum(
+            at.available_minutes for at in available_times
+            if at.date < exam.exam_date
+        )
+        checkpoint_result = calculate_feasibility(
+            cumulative_min, cumulative_max, capacity_until_exam
+        )
+        if status_order[checkpoint_result['status']] > status_order[worst_status]:
+            worst_status = checkpoint_result['status']
+    display_result['status'] = worst_status
+    return display_result, tasks
+
+
+def _build_subject_results(exam_period, tasks, available_times=None):
+    """
+    과목별 카드 표시용 데이터 + 시험일 순서 누적 검증 기반 실현가능성 판정.
+
+    _calculate_feasibility_for_period()(전체 판정)와 동일한 방식(누적 min/max를
+    각각 추적)을 쓴다 - 이전 과목의 max만큼 무조건 소비했다고 가정하고 빼는
+    방식은 min/max 폭이 좁은 뒤 과목을 실제보다 비관적으로 판정하는 오판이
+    있었다 (#167/#169).
+
+    카드에 표시되는 required_min/max는 그 과목 단독 필요시간(화면에서
+    "이 과목에 필요한 시간"이라는 개별 의미로 쓰이므로)을 그대로 두고,
+    status/status_label만 누적 판정 기준으로 계산한다.
+    """
+    status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
+    if available_times is None:
+        available_times = list(_available_times(exam_period))
+    subject_results = []
+    cumulative_min = 0
+    cumulative_max = 0
+
+    for exam in exam_period.exams.all().order_by('exam_date'):
+        subject_tasks = [task for task in tasks if task.exam_id == exam.id]
+
+        required_min = sum(task.estimated_min_minutes for task in subject_tasks)
+        required_max = sum(task.estimated_max_minutes for task in subject_tasks)
+        cumulative_min += required_min
+        cumulative_max += required_max
 
         capacity_until_exam = sum(
             at.available_minutes for at in available_times
@@ -345,41 +384,6 @@ def _calculate_feasibility_for_period(exam_period):
         checkpoint_result = calculate_feasibility(
             cumulative_min, cumulative_max, capacity_until_exam
         )
-        if status_order[checkpoint_result['status']] > status_order[worst_status]:
-            worst_status = checkpoint_result['status']
-
-    display_result['status'] = worst_status
-    return display_result, tasks
-
-def _build_subject_results(exam_period, tasks):
-    """
-    과목별 카드 표시용 데이터 + 시험일 순서 누적 검증 기반 실현가능성 판정.
-
-    실제 스케줄러가 "시험일 빠른 과목 우선 배치" 정책을 쓰는 것과 같은 원리로,
-    각 과목 시험일 이전까지의 가용시간에서 앞선 과목들이 이미 쓴 만큼을 뺀
-    나머지를 그 과목의 가용시간으로 보고 판정한다. 완벽한 정답(실제 빈 패킹
-    시뮬레이션)은 아니지만, 합계만 보던 기존 방식보다 훨씬 정확하다.
-    """
-    status_label_map = {POSSIBLE: "가능", RISKY: "위험", IMPOSSIBLE: "불가능"}
-    available_times = list(_available_times(exam_period))
-    subject_results = []
-    consumed = 0
-
-    for exam in exam_period.exams.all().order_by('exam_date'):
-        subject_tasks = [task for task in tasks if task.exam_id == exam.id]
-
-        required_min = sum(task.estimated_min_minutes for task in subject_tasks)
-        required_max = sum(task.estimated_max_minutes for task in subject_tasks)
-
-        capacity_until_exam = sum(
-            at.available_minutes for at in available_times
-            if at.date < exam.exam_date
-        )
-        available_for_subject = max(capacity_until_exam - consumed, 0)
-
-        feasibility_result = calculate_feasibility(
-            required_min, required_max, available_for_subject
-        )
 
         subject_results.append({
             'exam_id': exam.id,
@@ -388,11 +392,9 @@ def _build_subject_results(exam_period, tasks):
             'task_count': len(subject_tasks),
             'required_min_minutes': required_min,
             'required_recommended_minutes': required_max,
-            'status': feasibility_result['status'],
-            'status_label': status_label_map[feasibility_result['status']],
+            'status': checkpoint_result['status'],
+            'status_label': status_label_map[checkpoint_result['status']],
         })
-
-        consumed += required_max
 
     return subject_results
 
@@ -427,23 +429,20 @@ def _validate_task_readiness(exam_period):
 @require_http_methods(["GET"])
 def feasibility(request, period_id):
     exam_period = _get_owned_exam_period(request.user, period_id)
-
     is_ready, readiness_error = _validate_task_readiness(exam_period)
-    result, tasks = _calculate_feasibility_for_period(exam_period)
-
-    subject_results = _build_subject_results(exam_period, tasks)
-
+    available_times = list(_available_times(exam_period))
+    result, tasks = _calculate_feasibility_for_period(exam_period, available_times)
+    subject_results = _build_subject_results(exam_period, tasks, available_times)
     can_generate = is_ready and result['status'] == POSSIBLE
     if can_generate:
         # 누적 판정은 통과해도, 작업을 쪼개지 않는 실제 스케줄러 특성상
         # 파편화 때문에 못 들어가는 경우가 있을 수 있다. 저장 없이
         # dry-run으로 한 번 더 확인한다.
         dry_run_result = allocate_tasks_to_days(
-            _to_task_inputs(tasks),
-            _to_available_time_inputs(_available_times(exam_period)),
+            tasks=_to_task_inputs(tasks),
+            available_times=_to_available_time_inputs(available_times),
         )
         can_generate = not dry_run_result['unallocated_tasks']
-
     context = {
         'exam_period': exam_period,
         'result': result,
