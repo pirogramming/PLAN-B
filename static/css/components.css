@@ -998,3 +998,118 @@
   .task-select-row { flex-wrap: wrap; }
   .task-select-item { flex: 1 1 calc(50% - 5px); }
 }
+
+/* ===== FE1 위저드 반응형 (모바일 375px까지) ===== */
+@media (max-width: 767px) {
+  /* 사이드바(1~6단계)는 하단 고정 탭바 대신, 가로로 스크롤되는 칩 형태로 */
+  .app .side.side-wizard {
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px 10px 10px;
+    gap: 4px;
+  }
+  .side.side-wizard nav {
+    display: flex;
+    flex: none;
+    gap: 4px;
+  }
+  .side.side-wizard .nav-i {
+    flex: none;
+    flex-direction: row;
+    gap: 6px;
+    height: auto;
+    padding: 8px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .side.side-wizard .nav-i .ico {
+    width: 15px;
+    height: 15px;
+  }
+  .side.side-wizard .nav-step .step-num {
+    width: 16px;
+    height: 16px;
+    font-size: 9px;
+  }
+
+  /* 2열 레이아웃(과목 등록 폼+리스트 등) 세로로 쌓기 */
+  .two-col {
+    flex-direction: column;
+  }
+
+  /* 계획 가능성 판단 - 헤더/통계 그리드 */
+  .feasibility-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .feasibility-header form,
+  .feasibility-header .btn {
+    width: 100%;
+  }
+  .feasibility-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    row-gap: 16px;
+  }
+  .feasibility-stat:nth-child(2n) {
+    border-right: none;
+  }
+  .feasibility-stat:nth-child(1),
+  .feasibility-stat:nth-child(2) {
+    border-bottom: 1px solid var(--neutral4);
+    padding-bottom: 14px;
+  }
+  .feasibility-action-row {
+    flex-direction: column;
+  }
+  .feasibility-subject-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .feasibility-subject-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  /* 페이지 큰 타이틀 축소 (34px는 모바일에 너무 큼) */
+  .page-title {
+    font-size: 24px;
+  }
+
+  /* 학습 작업 카드 여백 축소 */
+  .task-item-card {
+    padding: 18px 16px;
+  }
+
+  /* 시험범위 등록 업로드 박스 높이 축소 */
+  .material-upload-box {
+    min-height: 180px;
+  }
+}
+
+/* 좁은 폰(375px 등) 추가 조정 */
+@media (max-width: 480px) {
+  .avail-cal-grid {
+    gap: 5px;
+  }
+  .avail-day {
+    height: 38px;
+    font-size: 11px;
+    padding: 4px;
+  }
+  .avail-weekday {
+    font-size: 10px;
+  }
+  .feasibility-stat-num {
+    font-size: 18px;
+  }
+  .segment {
+    flex-wrap: wrap;
+  }
+  .segment .opt {
+    flex: 1 1 calc(33.333% - 4px);
+  }
+}
