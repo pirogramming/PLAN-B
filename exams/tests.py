@@ -423,9 +423,8 @@ class MaterialCreateTests(TestCase):
         pdf_file = SimpleUploadedFile("dummy.pdf", b"%PDF-1.4 dummy content", content_type="application/pdf")
 
         response = self.client.post(reverse('exams:material_create', args=[self.exam.id]), {
-            'title': 'PDF 자료',
             'material_type': MaterialType.PDF,
-            'file': pdf_file,
+            'files': [pdf_file],
         })
         self.assertEqual(response.status_code, 302)
         material = StudyMaterial.objects.get(exam=self.exam)
@@ -3560,3 +3559,575 @@ class ConcurrencyDefenseAndRaceConditionTests(TestCase):
         self.assertNotEqual(self.material.analysis_status, MaterialStatus.PROCESSING)
         messages_list = list(response.context['messages'])
         self.assertTrue(any("텍스트 추출이 완료된 자료만" in str(m) or "추출이 진행 중" in str(m) for m in messages_list))
+
+from exams.views import StaleExtractionRunError, STALE_EXTRACTION_TIMEOUT_SECONDS
+
+
+class MaterialExtractStaleTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='u5@example.com', email='u5@example.com', password='pass1234!'
+        )
+        self.client.force_login(self.user)
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title='기간',
+            start_date=datetime.date(2026, 10, 1), end_date=datetime.date(2026, 10, 10),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name='과목',
+            exam_date=datetime.date(2026, 10, 5),
+        )
+
+    def _make_pdf_material(self, **overrides):
+        dummy_pdf = SimpleUploadedFile(
+            "dummy.pdf", b"%PDF-1.4 dummy content", content_type="application/pdf"
+        )
+        defaults = dict(
+            exam=self.exam, title='자료', material_type=MaterialType.PDF,
+            file=dummy_pdf, status=MaterialStatus.PENDING,
+        )
+        defaults.update(overrides)
+        return StudyMaterial.objects.create(**defaults)
+
+    # -----------------------------------------------------------------
+    # 1. 예상 못 한 Exception -> FAILED
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_unexpected_exception_marks_failed(self, mock_extract):
+        mock_extract.side_effect = ValueError("예상 못 한 내부 오류")
+        material = self._make_pdf_material()
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.FAILED)
+        self.assertIn("알 수 없는 오류", material.error_message)
+
+    # -----------------------------------------------------------------
+    # 2. 5분 미만 PROCESSING -> 중복 추출 거부
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_recent_processing_is_rejected(self, mock_extract):
+        mock_extract.return_value = "새 텍스트"
+        old_run_id = uuid.uuid4()
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now(),
+            extraction_run_id=old_run_id,
+        )
+
+        self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        # claim 자체가 거부되어 PROCESSING/run_id가 그대로 유지되어야 함
+        self.assertEqual(material.status, MaterialStatus.PROCESSING)
+        self.assertEqual(material.extraction_run_id, old_run_id)
+        mock_extract.assert_not_called()
+        
+    @patch('exams.views.extract_text_from_pdf')
+    def test_completed_material_can_be_re_extracted(self, mock_extract):
+        mock_extract.return_value = "재추출된 새 텍스트"
+        material = self._make_pdf_material(
+            status=MaterialStatus.COMPLETED,
+            extracted_text="예전 텍스트",
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        mock_extract.assert_called_once()
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "재추출된 새 텍스트") 
+
+    # -----------------------------------------------------------------
+    # 3. 5분 초과 PROCESSING -> 재선점 허용
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_stale_processing_over_timeout_is_reclaimed(self, mock_extract):
+        mock_extract.return_value = "재선점 후 추출된 텍스트"
+        old_run_id = uuid.uuid4()
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now() - datetime.timedelta(
+                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
+            ),
+            extraction_run_id=old_run_id,
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "재선점 후 추출된 텍스트")
+        self.assertNotEqual(material.extraction_run_id, old_run_id)
+
+    # -----------------------------------------------------------------
+    # 4. extraction_started_at=NULL 기존 PROCESSING -> 재선점 허용
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_null_extraction_started_at_is_treated_as_stale(self, mock_extract):
+        mock_extract.return_value = "NULL 좀비 구제 후 텍스트"
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=None,
+            extraction_run_id=None,
+        )
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.status, MaterialStatus.COMPLETED)
+        self.assertEqual(material.extracted_text, "NULL 좀비 구제 후 텍스트")
+
+    # -----------------------------------------------------------------
+    # 5. stale 재선점 후 이전 실행이 최신 실행 결과를 덮지 못함
+    # -----------------------------------------------------------------
+    @patch('exams.views.extract_text_from_pdf')
+    def test_stale_reclaim_prevents_old_run_from_overwriting_new_result(self, mock_extract):
+        material = self._make_pdf_material()  # PENDING
+
+        def _simulate_competing_run_during_extraction(file):
+            # 이 실행(A)이 아직 OCR 중인 동안, 다른 실행(B)이 A를 stale로 판단해
+            # 재선점하고 먼저 결과를 저장해버린 상황을 재현한다.
+            StudyMaterial.objects.filter(pk=material.pk).update(
+                extraction_run_id=uuid.uuid4(),
+                extracted_text="B의 결과 (다른 실행이 먼저 완료함)",
+                status=MaterialStatus.COMPLETED,
+            )
+            return "A의 뒤늦은 결과"
+
+        mock_extract.side_effect = _simulate_competing_run_during_extraction
+
+        response = self.client.post(reverse('exams:material_extract', args=[material.id]))
+        material.refresh_from_db()
+
+        # material_extract 내부의 실제 _save_if_owner가 A의 저장을 막아야 하므로,
+        # B가 먼저 저장해둔 결과가 그대로 유지되어야 한다.
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(material.extracted_text, "B의 결과 (다른 실행이 먼저 완료함)")
+    # -----------------------------------------------------------------
+    # 6. material_analysis_status 응답의 extraction_is_stale
+    # -----------------------------------------------------------------
+    def test_analysis_status_reports_extraction_is_stale_when_timed_out(self):
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now() - datetime.timedelta(
+                seconds=STALE_EXTRACTION_TIMEOUT_SECONDS + 1
+            ),
+            extraction_run_id=uuid.uuid4(),
+        )
+
+        response = self.client.get(
+            reverse('exams:material_analysis_status', args=[material.id])
+        )
+        data = response.json()
+
+        self.assertTrue(data["extraction_is_stale"])
+        self.assertEqual(data["stage"], "EXTRACTING")
+
+    def test_analysis_status_reports_extraction_not_stale_when_recent(self):
+        material = self._make_pdf_material(
+            status=MaterialStatus.PROCESSING,
+            extraction_started_at=timezone.now(),
+            extraction_run_id=uuid.uuid4(),
+        )
+
+        response = self.client.get(
+            reverse('exams:material_analysis_status', args=[material.id])
+        )
+        data = response.json()
+
+        self.assertFalse(data["extraction_is_stale"])
+
+"""
+다중 PDF 업로드(material_create) + 일괄 추출(material_bulk_extract) +
+일괄 분석(material_bulk_analyze)에 대한 테스트.
+
+가정:
+- 앱 이름은 `exams` (views.py 내부의 상대 import 및 URL 네임스페이스 기준)
+- StudyMaterialForm은 material_type + file(선택)을 받는다
+- ExamPeriodStatus.ACTIVE 상태의 시험기간 + 계획(DailyPlan) 없는 상태가
+  "수정 가능" 조건이다 (check_exam_period_locked_by_exam_id 등 참고)
+
+실제 프로젝트의 앱 이름/모델 필드가 다르면 import 경로와 필드명만
+맞춰서 조정하면 된다.
+"""
+from unittest.mock import patch
+
+from django.conf import settings as dj_settings
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+
+from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
+from exams.models import Exam, ExamPeriod, StudyMaterial
+from exams.services.pdf_extractor import PdfExtractionError
+from exams.services.analysis_orchestrator import (
+    DuplicateAnalysisRequestError,
+)
+
+User = get_user_model()
+
+# 테스트 DB에는 collectstatic이 안 돌아있어 ManifestStaticFilesStorage가
+# 'css/tokens.css' 같은 해시된 정적파일을 찾지 못해 500이 난다. 테스트에서는
+# 매니페스트 없이도 동작하는 기본 스토리지로 우회한다. 기존 STORAGES 설정 중
+# 'default'(미디어 파일) 백엔드는 그대로 두고 'staticfiles'만 바꾼다.
+_TEST_STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
+_TEST_STORAGES = dict(getattr(dj_settings, "STORAGES", {}))
+_TEST_STORAGES["staticfiles"] = {"BACKEND": _TEST_STATICFILES_STORAGE}
+
+
+def make_pdf_file(name="sample.pdf", size_bytes=1024):
+    """최소한의 PDF 헤더 + 더미 바이트로 업로드 테스트용 파일을 만든다."""
+    content = b"%PDF-1.4\n" + (b"0" * max(0, size_bytes - 9))
+    return SimpleUploadedFile(name, content, content_type="application/pdf")
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkUploadTests(TestCase):
+    """material_create의 PDF 다중 업로드 처리."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_create", kwargs={"exam_id": self.exam.id})
+
+    def test_upload_multiple_pdfs_success(self):
+        """여러 개의 정상 PDF를 한 번에 올리면 모두 StudyMaterial로 생성된다."""
+        files = [make_pdf_file(f"chapter{i}.pdf") for i in range(1, 4)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+
+        self.assertEqual(
+            StudyMaterial.objects.filter(exam=self.exam).count(),
+            3,
+            msg=f"status={response.status_code}, messages={messages}",
+        )
+        self.assertRedirects(
+            response, reverse("exams:period_detail", kwargs={"period_id": self.period.id})
+        )
+        self.assertTrue(any("3개 자료가 업로드" in m for m in messages))
+
+    def test_upload_no_files_shows_error(self):
+        """파일을 하나도 선택하지 않으면 생성 없이 에러만 표시된다."""
+        response = self.client.post(self.url, data={"material_type": MaterialType.PDF})
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        self.assertEqual(response.status_code, 200)  # 폼 재렌더링
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("업로드할 파일을 선택" in m for m in messages))
+
+    def test_upload_exceeds_max_files_rejected(self):
+        """최대 개수(5개)를 넘으면 전체 업로드가 거부된다."""
+        files = [make_pdf_file(f"f{i}.pdf") for i in range(6)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("최대 5개까지" in m for m in messages))
+
+    def test_upload_exceeds_total_size_rejected(self):
+        """전체 용량(50MB)을 넘으면 업로드가 거부된다."""
+        big = 20 * 1024 * 1024  # 파일당 20MB, 3개 = 60MB > 50MB
+        files = [make_pdf_file(f"big{i}.pdf", size_bytes=big) for i in range(3)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("전체 업로드 용량" in m for m in messages))
+
+    def test_upload_partial_failure_saves_successful_ones(self):
+        """일부 파일만 용량 초과여도, 정상 파일은 저장되고 실패 파일만 에러로 안내된다."""
+        ok_file = make_pdf_file("ok.pdf", size_bytes=1024)
+        too_big_file = make_pdf_file("toobig.pdf", size_bytes=21 * 1024 * 1024)
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": [ok_file, too_big_file]},
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+
+        self.assertEqual(
+            StudyMaterial.objects.filter(exam=self.exam).count(),
+            1,
+            msg=f"status={response.status_code}, messages={messages}",
+        )
+        saved = StudyMaterial.objects.get(exam=self.exam)
+        self.assertEqual(saved.file.name.split("/")[-1].split(".")[0][:2], "ok")
+
+        self.assertTrue(any("1개 자료가 업로드" in m for m in messages))
+        self.assertTrue(any("toobig.pdf" in m and "20MB" in m for m in messages))
+
+    def test_upload_rejects_other_users_exam(self):
+        """다른 사용자의 exam_id로는 업로드할 수 없다 (소유권 검증)."""
+        other_user = User.objects.create_user(
+            username="other", email="other@example.com", password="pw12345!"
+        )
+        other_period = ExamPeriod.objects.create(
+            user=other_user,
+            title="타인 시험",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=7),
+        )
+        other_exam = Exam.objects.create(
+            exam_period=other_period,
+            subject_name="타인 과목",
+            exam_date=other_period.end_date,
+        )
+
+        url = reverse("exams:material_create", kwargs={"exam_id": other_exam.id})
+        response = self.client.post(
+            url,
+            data={"material_type": MaterialType.PDF, "files": [make_pdf_file()]},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(StudyMaterial.objects.filter(exam=other_exam).count(), 0)
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkExtractTests(TestCase):
+    """material_bulk_extract: 여러 자료를 한 번에 텍스트 추출."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_bulk_extract", kwargs={"exam_id": self.exam.id})
+
+        self.material_ok = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("ok.pdf"),
+            status=MaterialStatus.PENDING,
+        )
+        self.material_fail = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("fail.pdf"),
+            status=MaterialStatus.PENDING,
+        )
+
+    def test_no_material_ids_shows_error(self):
+        response = self.client.post(self.url, data={})
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("추출할 자료를 선택" in m for m in messages))
+
+    @patch("exams.views.extract_text_from_pdf")
+    def test_bulk_extract_partial_success(self, mock_extract):
+        """하나는 추출 성공, 하나는 PdfExtractionError -> 성공분만 반영되고
+        실패 사유가 함께 안내되며, 둘 다 계속 처리된다(하나 실패해도 중단 안 함)."""
+
+        def side_effect(file_field):
+            if "ok" in file_field.name:
+                return "추출된 텍스트 내용"
+            raise PdfExtractionError("손상된 PDF입니다.")
+
+        mock_extract.side_effect = side_effect
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_fail.id]},
+        )
+
+        self.material_ok.refresh_from_db()
+        self.material_fail.refresh_from_db()
+
+        self.assertEqual(self.material_ok.status, MaterialStatus.COMPLETED)
+        self.assertEqual(self.material_ok.extracted_text, "추출된 텍스트 내용")
+        self.assertEqual(self.material_fail.status, MaterialStatus.FAILED)
+        self.assertEqual(self.material_fail.error_message, "손상된 PDF입니다.")
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 추출이 완료" in m for m in messages))
+        self.assertTrue(any(str(self.material_fail.id) in m for m in messages))
+
+    @patch("exams.views.extract_text_from_pdf")
+    def test_bulk_extract_skips_already_processing(self, mock_extract):
+        """PROCESSING 중(타임아웃 이내)인 자료는 claim 단계에서 걸러지고
+        나머지는 그대로 처리된다."""
+        self.material_fail.status = MaterialStatus.PROCESSING
+        self.material_fail.extraction_started_at = timezone.now()
+        self.material_fail.save(update_fields=["status", "extraction_started_at"])
+
+        mock_extract.return_value = "추출된 텍스트"
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_fail.id]},
+        )
+
+        self.material_ok.refresh_from_db()
+        self.material_fail.refresh_from_db()
+
+        self.assertEqual(self.material_ok.status, MaterialStatus.COMPLETED)
+        # 여전히 PROCESSING (claim 실패로 재선점되지 않음)
+        self.assertEqual(self.material_fail.status, MaterialStatus.PROCESSING)
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("이미 PDF 텍스트를 추출 중" in m for m in messages))
+
+    def test_bulk_extract_reclaims_stale_processing(self):
+        """타임아웃(300초)이 지난 PROCESSING 자료는 재선점되어 다시 추출된다."""
+        stale_time = timezone.now() - timezone.timedelta(seconds=301)
+        self.material_fail.status = MaterialStatus.PROCESSING
+        self.material_fail.extraction_started_at = stale_time
+        self.material_fail.save(update_fields=["status", "extraction_started_at"])
+
+        with patch("exams.views.extract_text_from_pdf", return_value="복구된 텍스트"):
+            response = self.client.post(
+                self.url,
+                data={"material_ids": [self.material_fail.id]},
+            )
+
+        self.material_fail.refresh_from_db()
+        self.assertEqual(self.material_fail.status, MaterialStatus.COMPLETED)
+        self.assertEqual(self.material_fail.extracted_text, "복구된 텍스트")
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 추출이 완료" in m for m in messages))
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkAnalyzeTests(TestCase):
+    """material_bulk_analyze: 여러 자료를 한 번에 AI 분석."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_bulk_analyze", kwargs={"exam_id": self.exam.id})
+
+        # AI 분석은 텍스트 추출이 COMPLETED인 자료만 대상이 된다.
+        self.material_ok = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("ok.pdf"),
+            status=MaterialStatus.COMPLETED,
+            extracted_text="본문 텍스트",
+        )
+        self.material_not_ready = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("pending.pdf"),
+            status=MaterialStatus.PENDING,  # 아직 추출 전 -> 분석 claim 실패 대상
+        )
+
+    def test_no_material_ids_shows_error(self):
+        response = self.client.post(self.url, data={})
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("분석할 자료를 선택" in m for m in messages))
+
+    @patch("exams.views.run_claimed_analysis")
+    @patch("exams.views.claim_analysis_run")
+    def test_bulk_analyze_partial_success(self, mock_claim, mock_run):
+        """텍스트 추출이 안 된 자료는 claim 단계에서 걸러지고, 준비된 자료만
+        분석이 실행된다."""
+
+        def claim_side_effect(material, is_retry=False):
+            if material.id == self.material_ok.id:
+                return "run-id-ok"
+            raise DuplicateAnalysisRequestError()  # claim 실패 시뮬레이션용, 실제로는 상태 체크가 먼저 걸림
+
+        mock_claim.side_effect = claim_side_effect
+        mock_run.return_value = None  # 정상 실행되면 예외 없이 끝남
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_not_ready.id]},
+        )
+
+        # material_not_ready는 status != COMPLETED라 _claim_material_for_analysis에서
+        # claim_analysis_run 호출 전에 이미 걸러진다.
+        mock_run.assert_called_once()
+        called_material = mock_run.call_args[0][0]
+        self.assertEqual(called_material.id, self.material_ok.id)
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 AI 분석이 완료" in m for m in messages))
+        self.assertTrue(
+            any("텍스트 추출이 완료된 자료만" in m for m in messages)
+        )
+
+    def test_bulk_analyze_redirects_to_task_review(self):
+        with patch("exams.views.claim_analysis_run", return_value="run-id"), \
+             patch("exams.views.run_claimed_analysis", return_value=None):
+            response = self.client.post(
+                self.url,
+                data={"material_ids": [self.material_ok.id]},
+            )
+
+        self.assertRedirects(
+            response, reverse("exams:task_review", kwargs={"exam_id": self.exam.id})
+        )

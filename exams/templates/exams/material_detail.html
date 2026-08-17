@@ -176,6 +176,8 @@ var pollCount = 0;
 var networkErrorCount = 0;
 var MAX_NETWORK_RETRIES = 3;
 
+var pendingStaleFormId = 'auto-retry-form';
+
 function shouldAutoPoll() {
   var inProgress = ['pending', 'processing'];
   return inProgress.indexOf(INITIAL_EXTRACT_STATUS) !== -1
@@ -239,7 +241,9 @@ function checkStatusAndAct() {
     });
 }
 
-function showStaleState(canRetry) {
+function showStaleState(canRetry, formId, staleMessage) {
+  pendingStaleFormId = formId || 'auto-retry-form';
+
   if (stuckTimer) {
     clearTimeout(stuckTimer);
     stuckTimer = null;
@@ -248,7 +252,7 @@ function showStaleState(canRetry) {
 
   document.getElementById('auto-loading-overlay').classList.add('open');
   document.getElementById('auto-loading-spinner').style.display = 'none';
-  document.getElementById('auto-loading-text').textContent = '분석이 멈췄어요';
+  document.getElementById('auto-loading-text').textContent = '처리가 멈췄어요';
   document.getElementById('auto-loading-sub').textContent = '';
 
   var staleBox = document.getElementById('auto-loading-stale');
@@ -259,11 +263,11 @@ function showStaleState(canRetry) {
   staleBox.classList.add('show');
 
   if (canRetry) {
-    staleText.textContent = '분석이 5분 넘게 멈춰있어요. 다시 시도해볼까요?';
+    staleText.textContent = staleMessage || '처리가 5분 넘게 멈춰있어요. 다시 시도해볼까요?';
     retryBtn.style.display = '';
     addLink.style.display = 'none';
   } else {
-    staleText.textContent = '분석에 반복해서 실패했어요. 직접 작업을 추가해주세요.';
+    staleText.textContent = '반복해서 실패했어요. 직접 작업을 추가해주세요.';
     retryBtn.style.display = 'none';
     addLink.style.display = '';
   }
@@ -279,13 +283,19 @@ function handleStatus(data) {
     return;
   }
   if (data.stage === 'EXTRACTING') {
+    
+    if (data.extraction_is_stale) {
+      showStaleState(true, 'auto-extract-form', '텍스트 추출이 5분 넘게 멈춰있어요. 다시 시도해볼까요?');
+      return;
+    }
     showAutoLoading('PDF 텍스트를 추출하고 있어요');
     scheduleNextCheck();
     return;
   }
   if (data.stage === 'ANALYZING') {
     if (data.is_stale) {
-      showStaleState(!!data.can_retry);
+      // formId를 명시적으로 'auto-retry-form'으로 전달 (기존 동작과 동일)
+      showStaleState(!!data.can_retry, 'auto-retry-form');
       return;
     }
     showAutoLoading('AI 학습 작업을 분석하고 있어요');
@@ -325,8 +335,11 @@ document.addEventListener('DOMContentLoaded', function () {
   document.getElementById('stale-retry-btn').addEventListener('click', function () {
     document.getElementById('auto-loading-stale').classList.remove('show');
     document.getElementById('auto-loading-spinner').style.display = '';
-    showAutoLoading('다시 분석을 시작하고 있어요');
-    document.getElementById('auto-retry-form').submit();
+    showAutoLoading('다시 시작하고 있어요');
+    // [변경 4] 하드코딩된 'auto-retry-form' 대신, showStaleState()가 기록해둔
+    // pendingStaleFormId를 제출한다. 추출 stale이면 auto-extract-form,
+    // 분석 stale이면 auto-retry-form이 제출된다.
+    document.getElementById(pendingStaleFormId).submit();
   });
 });
 </script>
