@@ -5083,7 +5083,7 @@ class FeasibilityDeadlineAwareTests(TestCase):
 
     def test_cumulative_min_max_tracked_separately_not_max_subtraction(self):
         """
-        GPT가 지적한 반례: 이전 과목의 max만큼 무조건 소비했다고 가정하고
+        이전 consumed 방식의 회귀 반례: 이전 과목의 max만큼 무조건 소비했다고 가정하고
         빼는 방식(consumed -= max)은 min/max 폭이 좁은 뒤 과목을 실제보다
         비관적으로 판정한다.
 
