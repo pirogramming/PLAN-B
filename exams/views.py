@@ -48,6 +48,12 @@ from .services.analysis_orchestrator import (
     StaleAnalysisRunError,
 )
 
+from .services.exam_period import (
+    complete_expired_period,
+    complete_expired_periods_for_user,
+    has_processing_material,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,100 +69,13 @@ MAX_BULK_TOTAL_SIZE = 50 * 1024 * 1024    # 50MB
 MAX_BULK_PROCESS_MATERIALS = 5
 
 
-# =====================================================================
-# 헬퍼 함수: 소유권 검증 + Lazy Check 자동 종료
-# =====================================================================
-def _has_processing_material(period):
-    """해당 시험기간에 PDF 추출(status) 또는 AI 분석(analysis_status)이
-    PROCESSING 중인 StudyMaterial이 하나라도 있는지 확인한다.
-
-    #132의 AI/OCR 경로는 'ExamPeriod lock → PROCESSING 선점 → lock 해제 →
-    외부 OCR/AI 호출 → 결과 저장' 구조라, lock을 해제한 뒤 실제 호출이
-    끝나기 전까지는 ExamPeriod row lock만으로 진행 중 여부를 알 수 없다.
-    그 사이 시험기간을 COMPLETED로 만들어버리면(수동 종료든 lazy check든)
-    "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"이 가능해지므로,
-    종료/자동종료 판정 전에 이 함수로 반드시 확인해야 한다.
-    """
-    return StudyMaterial.objects.filter(
-        exam__exam_period=period,
-    ).filter(
-        Q(status=MaterialStatus.PROCESSING) | Q(analysis_status=MaterialStatus.PROCESSING)
-    ).exists()
-
-
-# =====================================================================
-# 헬퍼 함수: 만료된 ACTIVE 시험기간 → COMPLETED 전환 (Lazy Check)
-# period_complete()의 수동 종료와 동일하게 ExamPeriod select_for_update() 락
-# 안에서 '판정 → 저장'을 원자적으로 수행한다. 이걸 지키지 않으면
-#   1) Lazy Check가 PROCESSING 없음을 확인
-#   2) AI 요청이 ExamPeriod 락을 잡고 material을 PROCESSING으로 선점
-#   3) Lazy Check가 뒤늦게 COMPLETED로 저장
-# 하는 경쟁이 가능해져서, "AI 호출 완료 후 종료된 시험기간에 StudyTask 저장"과
-# 동일한 버그가 재발한다.
-# =====================================================================
-def _lazy_complete_expired_period_locked(period):
-    """단일 ExamPeriod에 대해 select_for_update() 락 안에서 만료+미처리 여부를
-    다시 확인하고 필요시 COMPLETED로 전환한 뒤, 잠금이 걸렸던 시점 기준 최신
-    인스턴스를 반환한다.
-
-    호출부에서 이미 얕게 조회해 둔 period가 만료 대상으로 '보이지 않으면'
-    (ACTIVE가 아니거나 아직 end_date 이전) 락을 아예 열지 않고 그대로
-    반환한다 - 대부분의 조회가 여기 해당하므로, 매 요청마다 트랜잭션을 여는
-    비용을 피하기 위한 최적화다. 이 사전 체크는 최적화일 뿐 최종 판정이
-    아니며, 만료 대상으로 보이는 경우엔 반드시 락 안에서 다시 판정한다.
-    """
-    if not (
-        period.status == ExamPeriodStatus.ACTIVE
-        and period.end_date < timezone.localdate()
-    ):
-        return period
-
-    with transaction.atomic():
-        locked = ExamPeriod.objects.select_for_update().get(id=period.id)
-        if (
-            locked.status == ExamPeriodStatus.ACTIVE
-            and locked.end_date < timezone.localdate()
-            and not _has_processing_material(locked)
-        ):
-            locked.status = ExamPeriodStatus.COMPLETED
-            locked.save(update_fields=['status'])
-        return locked
-
-
-def _lazy_complete_expired_periods_for_user(user):
-    """사용자의 만료된 ACTIVE ExamPeriod 전체를 대상으로 Lazy Check를 수행한다.
-
-    period_list/period_create가 이전에 쓰던 queryset.exclude(...).update(...)
-    일괄 처리는 '어떤 시험기간이 PROCESSING 중인지 확인하는 조회'와
-    'COMPLETED로 갱신하는 UPDATE' 사이에 락이 없어 위와 동일한 경쟁이
-    가능했다. 이를 막기 위해 만료 후보 id만 뽑은 뒤, 각 시험기간을 개별
-    트랜잭션에서 select_for_update()로 잠그고 판정한다. 시험기간 수가 많지
-    않은 도메인이라 건별 락의 비용은 무시할 만하다.
-    """
-    expired_period_ids = ExamPeriod.objects.filter(
-        user=user,
-        status=ExamPeriodStatus.ACTIVE,
-        end_date__lt=timezone.localdate(),
-    ).values_list('id', flat=True)
-
-    for period_id in expired_period_ids:
-        with transaction.atomic():
-            period = ExamPeriod.objects.select_for_update().get(id=period_id)
-            if (
-                period.status == ExamPeriodStatus.ACTIVE
-                and period.end_date < timezone.localdate()
-                and not _has_processing_material(period)
-            ):
-                period.status = ExamPeriodStatus.COMPLETED
-                period.save(update_fields=['status'])
-
 
 def _get_owned_exam_period(user, period_id):
     """사용자의 시험기간을 조회하고, 만료된 ACTIVE 상태면 Lazy Check로 즉시
     COMPLETED 전환을 시도한다(전환 여부 판정 자체는
-    _lazy_complete_expired_period_locked 참고)."""
+    complete_expired_period 참고)."""
     period = get_object_or_404(ExamPeriod, id=period_id, user=user)
-    return _lazy_complete_expired_period_locked(period)
+    return complete_expired_period(period)
 
 
 
@@ -395,7 +314,7 @@ def _normalize_material_ids(raw_ids):
 @require_http_methods(["GET"])
 def period_list(request):
     # end_date가 지난 ACTIVE 시험기간을 개별 락 기준으로 일괄 COMPLETED 처리
-    _lazy_complete_expired_periods_for_user(request.user)
+    complete_expired_periods_for_user(request.user)
 
     periods = ExamPeriod.objects.filter(user=request.user)
     ongoing_periods = periods.exclude(
@@ -419,7 +338,7 @@ def period_list(request):
 def period_create(request):
     # period_list/period_detail을 거치지 않고 바로 생성 화면으로 들어오는 경우에도
     # 동일한 Lazy Check를 먼저 수행한다.
-    _lazy_complete_expired_periods_for_user(request.user)
+    complete_expired_periods_for_user(request.user)
 
     if request.method == 'POST':
         form = ExamPeriodForm(request.POST)
@@ -547,7 +466,7 @@ def period_complete(request, period_id):
             messages.info(request, "이미 완료되거나 보관 처리된 시험기간입니다.")
             return redirect('exams:period_list')
 
-        if _has_processing_material(period):
+        if has_processing_material(period):
             messages.error(request, "PDF 추출 또는 AI 분석이 진행 중인 학습자료가 있어 시험기간을 종료할 수 없습니다. 처리가 끝난 후 다시 시도해주세요.")
             return redirect('exams:period_list')
 
@@ -584,6 +503,7 @@ def period_detail(request, period_id):
 @require_http_methods(["GET"])
 def period_manage(request, period_id):
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    period = complete_expired_period(period)
     if not DailyPlan.objects.filter(exam_period=period).exists():
         return redirect('exams:period_detail', period_id=period.id)
     exams = period.exams.all()
