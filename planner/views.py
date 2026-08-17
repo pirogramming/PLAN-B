@@ -486,15 +486,14 @@ def plan_generate(request, period_id):
             messages.error(request, readiness_error)
             return redirect('planner:feasibility', period_id=exam_period.id)
 
-        result, tasks = _calculate_feasibility_for_period(exam_period)
+        available_times = list(_available_times(exam_period))
+        result, tasks = _calculate_feasibility_for_period(exam_period, available_times)
         if result['status'] != POSSIBLE:
             messages.error(
                 request,
                 "현재 상태에서는 계획을 생성할 수 없습니다. 가능시간 또는 학습작업을 조정해주세요.",
             )
             return redirect('planner:feasibility', period_id=exam_period.id)
-
-        available_times = list(_available_times(exam_period))
 
         try:
             generate_schedule(
