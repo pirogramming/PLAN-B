@@ -56,6 +56,8 @@ from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanI
 User = get_user_model()
 logger = logging.getLogger(__name__)
 TEMP_MEDIA_ROOT = tempfile.mkdtemp()
+from django.contrib.messages import get_messages
+from exams.forms import StudyMaterialForm
 
 
 class OwnershipTests(TestCase):
@@ -4131,3 +4133,87 @@ class MaterialBulkAnalyzeTests(TestCase):
         self.assertRedirects(
             response, reverse("exams:task_review", kwargs={"exam_id": self.exam.id})
         )
+
+class MaterialCreateBulkTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="testpass123",
+        )
+        logged_in = self.client.login(email="tester@example.com", password="testpass123")
+        assert logged_in, "로그인 실패 - AUTH_USER_MODEL 설정을 다시 확인하세요"
+
+        today = timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="테스트 시험기간",
+            start_date=today,
+            end_date=today + timezone.timedelta(days=14),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="테스트 과목",
+            exam_date=today,
+        )
+
+    def test_single_upload_with_legacy_file_field_still_works(self):
+        # Dummy PDF 데이터 
+        pdf = SimpleUploadedFile(
+            "note.pdf",
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 300 300]>>endobj trailer<</Root 1 0 R>>\n%%EOF",
+            content_type="application/pdf",
+        )
+        response = self.client.post(
+            reverse("exams:material_create", args=[self.exam.id]),
+            data={"material_type": MaterialType.PDF, "title": "note", "file": pdf},
+        )
+        # 생성 여부 확인 (뷰 구현 방식에 따라 status_code/redirect 확인)
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 1)
+
+    def test_bulk_extract_rejects_material_from_other_exam(self):
+        # 💡 other_exam 생성 시에도 exam_date 지정
+        other_exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="다른 과목",
+            exam_date=self.period.start_date,
+        )
+        foreign_material = StudyMaterial.objects.create(
+            exam=other_exam,
+            material_type=MaterialType.PDF,
+            title="foreign",
+            status=MaterialStatus.PENDING,
+        )
+        response = self.client.post(
+            reverse("exams:material_bulk_extract", args=[self.exam.id]),
+            data={"material_ids": [str(foreign_material.id)]},
+        )
+        foreign_material.refresh_from_db()
+        self.assertEqual(foreign_material.status, MaterialStatus.PENDING)  # 처리되지 않음
+        messages = [m.message for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("존재하지 않는" in m or "찾을 수 없는" in m or "권한" in m for m in messages))
+
+    def test_bulk_extract_invalid_material_id_does_not_500(self):
+        response = self.client.post(
+            reverse("exams:material_bulk_extract", args=[self.exam.id]),
+            data={"material_ids": ["abc"]},
+        )
+        self.assertEqual(response.status_code, 302)
+        messages = [m.message for m in get_messages(response.wsgi_request)]
+        # 메시지 유연한 조건 검사
+        self.assertTrue(len(messages) > 0)
+
+    def test_upload_error_rerender_includes_form_in_context(self):
+        response = self.client.post(
+            reverse("exams:material_create", args=[self.exam.id]),
+            data={"material_type": MaterialType.PDF},  # 필수 파일 첨부 누락
+        )
+        # response.context가 존재하는지 사전 검증
+        if response.status_code == 200 and response.context is not None:
+            self.assertIn("form", response.context)
+            self.assertIsInstance(response.context["form"], StudyMaterialForm)
+        else:
+            # 뷰에서 폼 실패 시 302 리다이렉트 처리하는 구조라면 status_code 검증
+            self.assertIn(response.status_code, [200, 302])

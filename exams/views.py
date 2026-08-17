@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 MAX_BULK_FILES = 5
 MAX_SINGLE_FILE_SIZE = 20 * 1024 * 1024   # 20MB (기존 단건 업로드 제한과 동일)
 MAX_BULK_TOTAL_SIZE = 50 * 1024 * 1024    # 50MB
+MAX_BULK_PROCESS_MATERIALS = 5
 
 
 # =====================================================================
@@ -321,23 +322,20 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
 
 
 # =====================================================================
-# 헬퍼 함수: 일괄(bulk) 처리용 lock+claim 공통 로직
-# check_exam_period_not_locked_by_material_id 데코레이터와 정확히 동일한
-# 잠금 순서(ExamPeriod 락 → material 재조회 → claim_func 선점 → 락 해제 →
-# 실행)를 material_ids 반복 호출 상황에서도 그대로 재사용하기 위한 함수.
-# 데코레이터는 URL 하나(material_id 하나)에 물리는 구조라 material_ids
-# 여러 개를 순회하는 bulk 뷰에서는 쓸 수 없어서, 그 잠금 로직만 별도
-# 함수로 뽑아 단건 뷰와 bulk 뷰가 완전히 같은 동시성 방어를 공유하게 했다.
-# =====================================================================
-def _claim_and_run_for_material(user, material_id, claim_func, run_func):
+def _claim_and_run_for_material(user, exam_id, material_id, claim_func, run_func):
     """material_id 하나에 대해 lock → claim까지 마친 뒤 run_func(material, extra)를
     락 밖에서 실행한다. run_func은 (ok, message) 튜플을 반환해야 한다.
     claim 단계에서 이미 실패하면 run_func은 호출되지 않고 (False, message)를 반환한다.
+
+    exam_id를 조건에 포함해, 로그인 사용자가 소유한 자료라도 요청 URL의
+    exam(과목) 소속이 아니면 처리하지 않는다 - 그렇지 않으면 다른 과목의
+    material_id를 섞어 보내는 것만으로 그 자료까지 실제 추출/분석이 되어버린다.
     """
     with transaction.atomic():
         try:
             material_ref = StudyMaterial.objects.select_related('exam__exam_period').get(
                 id=material_id,
+                exam_id=exam_id,
                 exam__exam_period__user=user,
             )
         except StudyMaterial.DoesNotExist:
@@ -356,6 +354,7 @@ def _claim_and_run_for_material(user, material_id, claim_func, run_func):
         try:
             material = StudyMaterial.objects.get(
                 id=material_id,
+                exam_id=exam_id,
                 exam__exam_period__user=user,
             )
         except StudyMaterial.DoesNotExist:
@@ -368,6 +367,26 @@ def _claim_and_run_for_material(user, material_id, claim_func, run_func):
 
     return run_func(material, extra)
 
+
+def _normalize_material_ids(raw_ids):
+    """request.POST.getlist("material_ids")의 문자열 값들을 정수 PK로 정규화한다.
+    잘못된 값(abc 등)은 PK 조회에 바로 쓰이면 500으로 이어질 수 있어 걸러내고,
+    같은 ID가 여러 번 전달돼도 한 번만 처리되도록 최초 등장 순서를 유지한 채
+    dedupe한다. (valid_ids, invalid_raw_values) 튜플을 반환한다.
+    """
+    seen = set()
+    valid_ids = []
+    invalid = []
+    for raw in raw_ids:
+        try:
+            mid = int(raw)
+        except (TypeError, ValueError):
+            invalid.append(raw)
+            continue
+        if mid not in seen:
+            seen.add(mid)
+            valid_ids.append(mid)
+    return valid_ids, invalid
 
 # =====================================================================
 # 시험기간 목록 (exams:period_list) - 일괄 Lazy Check 자동 종료 적용
@@ -832,22 +851,22 @@ def material_create(request, exam_id):
         # material_type 값(오타, 조작된 요청 등)이 조용히 PDF 흐름을 타는 걸 방지한다.
         if material_type != MaterialType.PDF:
             messages.error(request, "지원하지 않는 자료 유형입니다.")
-            return render(request, "exams/material_form.html", {"exam": exam})
+            return render(request, "exams/material_form.html", {"exam": exam, "form": StudyMaterialForm()})
 
         # PDF 다중 업로드 흐름
-        files = request.FILES.getlist("files")
+        files = request.FILES.getlist("files") or request.FILES.getlist("file")
         if not files:
             messages.error(request, "업로드할 파일을 선택해주세요.")
-            return render(request, "exams/material_form.html", {"exam": exam})
+            return render(request, "exams/material_form.html", {"exam": exam, "form": StudyMaterialForm()})
 
         if len(files) > MAX_BULK_FILES:
             messages.error(request, f"한 번에 최대 {MAX_BULK_FILES}개까지 업로드할 수 있습니다.")
-            return render(request, "exams/material_form.html", {"exam": exam})
+            return render(request, "exams/material_form.html", {"exam": exam, "form": StudyMaterialForm()})
 
         total_size = sum(f.size for f in files)
         if total_size > MAX_BULK_TOTAL_SIZE:
             messages.error(request, "전체 업로드 용량이 50MB를 초과했습니다.")
-            return render(request, "exams/material_form.html", {"exam": exam})
+            return render(request, "exams/material_form.html", {"exam": exam, "form": StudyMaterialForm()})
 
         created, errors = [], []
         for f in files:
@@ -1227,10 +1246,22 @@ def material_analysis_status(request, material_id):
 @require_http_methods(["POST"])
 def material_bulk_extract(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
-    material_ids = request.POST.getlist("material_ids")
+    raw_material_ids = request.POST.getlist("material_ids")
+
+    if not raw_material_ids:
+        messages.error(request, "추출할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
+    for raw in invalid_ids:
+        messages.error(request, f"잘못된 자료 ID입니다: {raw}")
 
     if not material_ids:
         messages.error(request, "추출할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
+        messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
         return redirect('exams:period_detail', period_id=exam.exam_period_id)
 
     success_count = 0
@@ -1242,7 +1273,7 @@ def material_bulk_extract(request, exam_id):
             return ok, msg
 
         ok, msg = _claim_and_run_for_material(
-            request.user, material_id, _claim_material_for_extraction, _run
+            request.user, exam.id, material_id, _claim_material_for_extraction, _run
         )
         if ok:
             success_count += 1
@@ -1267,10 +1298,22 @@ def material_bulk_extract(request, exam_id):
 @require_http_methods(["POST"])
 def material_bulk_analyze(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
-    material_ids = request.POST.getlist("material_ids")
+    raw_material_ids = request.POST.getlist("material_ids")
+
+    if not raw_material_ids:
+        messages.error(request, "분석할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
+    for raw in invalid_ids:
+        messages.error(request, f"잘못된 자료 ID입니다: {raw}")
 
     if not material_ids:
         messages.error(request, "분석할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
+        messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
         return redirect('exams:period_detail', period_id=exam.exam_period_id)
 
     success_count = 0
@@ -1282,7 +1325,7 @@ def material_bulk_analyze(request, exam_id):
             return ok, msg
 
         ok, msg = _claim_and_run_for_material(
-            request.user, material_id, _claim_material_for_analysis, _run
+            request.user, exam.id, material_id, _claim_material_for_analysis, _run
         )
         if ok:
             success_count += 1
@@ -1295,7 +1338,6 @@ def material_bulk_analyze(request, exam_id):
         messages.error(request, m)
 
     return redirect('exams:task_review', exam_id=exam_id)
-
 
 # =====================================================================
 # AI 작업 검토 (exams:task_review) 
