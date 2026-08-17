@@ -4954,3 +4954,129 @@ class RecoveryOrderPreservationTests(TestCase):
         # low/optional인 자료구조는 그 뒤 날짜로 밀려야 한다.
         self.assertEqual(item_1_2_recovery.changed_date, d1)
         self.assertGreater(item_ds_recovery.changed_date, d1)
+
+class FeasibilityDeadlineAwareTests(TestCase):
+    """
+    #167: 전체 실현가능성 판정이 시험 당일 배제/작업 비분할을
+    반영하는지 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="feasibility_tester",
+            email="feasibility_tester@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="feasibility_tester@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="전체 판정 정확도 테스트용 시험기간",
+            start_date=self.today,
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+
+    def _feasibility_context(self):
+        response = self.client.get(
+            reverse('planner:feasibility', kwargs={'period_id': self.exam_period.id})
+        )
+        return response.context
+
+    def test_exam_day_availability_excluded_from_overall_judgement(self):
+        """
+        시험 당일 가용시간은 그 과목 작업에 못 쓰이므로, 단순 합계로는
+        '가능'인데 실제로는 불가능한 케이스를 잡아야 한다.
+
+        시나리오: 시험이 내일(day+1)이고, 작업은 60분 필요한데
+        오늘(day+0) 가용시간은 0분, 시험 당일(day+1) 가용시간만 60분.
+        합계로는 60분 있어 보이지만, 시험 당일엔 그 작업을 못 배치하므로
+        실제로는 불가능해야 한다.
+        """
+        from exams.models import Exam, StudyTask
+        exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=1),
+            speed_factor=1.0,
+        )
+        StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=0,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=60,
+        )
+
+        context = self._feasibility_context()
+
+        self.assertEqual(context['result']['status'], IMPOSSIBLE)
+        self.assertFalse(context['can_generate'])
+
+    def test_can_generate_false_when_fragmentation_prevents_allocation(self):
+        """
+        누적 판정은 통과해도(합계로는 충분해도), 작업이 쪼개지지 않아서
+        실제로는 못 들어가는 경우 can_generate가 False여야 한다.
+
+        시나리오: 60분짜리 작업 하나, 가용시간은 30분+30분으로 나뉜
+        두 날짜뿐. 합계는 60분으로 충분해 보이지만 작업을 쪼갤 수 없어
+        어느 한쪽에도 못 들어간다.
+        """
+        from exams.models import Exam, StudyTask
+        exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=10),
+            speed_factor=1.0,
+        )
+        StudyTask.objects.create(
+            exam=exam, title="60분 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=30,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=1),
+            available_minutes=30,
+        )
+
+        context = self._feasibility_context()
+
+        # 누적/합계 판정 자체는 통과할 수 있지만(60=60),
+        # dry-run에서 파편화로 실패하므로 can_generate는 False여야 한다.
+        self.assertFalse(context['can_generate'])
+
+    def test_can_generate_true_for_normal_feasible_case(self):
+        """
+        정상적으로 배치 가능한 케이스에서는 can_generate가 True여야
+        한다 (dry-run 추가로 인한 오탐 방지 확인용 회귀).
+        """
+        from exams.models import Exam, StudyTask
+        exam = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=10),
+            speed_factor=1.0,
+        )
+        StudyTask.objects.create(
+            exam=exam, title="작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=30, estimated_max_minutes=30, is_confirmed=True,
+        )
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=60,
+        )
+
+        context = self._feasibility_context()
+
+        self.assertEqual(context['result']['status'], POSSIBLE)
+        self.assertTrue(context['can_generate'])
