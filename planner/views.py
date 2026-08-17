@@ -35,7 +35,6 @@ from planner.services.schedule_generator import (
     _to_available_time_inputs,
 )
 from planner.services.calendar import build_calendar_context
-from planner.services.calendar import build_calendar_context
 from planner.services.scheduler import allocate_tasks_to_days
 from planner.services.progress_recorder import (
     finalize_daily_plan,
@@ -328,28 +327,26 @@ def _calculate_feasibility_for_period(exam_period):
     display_result = calculate_feasibility(required_min, required_max, available)
 
     available_times = list(_available_times(exam_period))
-    consumed = 0
+    cumulative_min = 0
+    cumulative_max = 0
     worst_status = POSSIBLE
     status_order = {POSSIBLE: 0, RISKY: 1, IMPOSSIBLE: 2}
 
     for exam in exam_period.exams.all().order_by('exam_date'):
         subject_tasks = [task for task in tasks if task.exam_id == exam.id]
-        subject_min = sum(task.estimated_min_minutes for task in subject_tasks)
-        subject_max = sum(task.estimated_max_minutes for task in subject_tasks)
+        cumulative_min += sum(task.estimated_min_minutes for task in subject_tasks)
+        cumulative_max += sum(task.estimated_max_minutes for task in subject_tasks)
 
         capacity_until_exam = sum(
             at.available_minutes for at in available_times
             if at.date < exam.exam_date
         )
-        available_for_subject = max(capacity_until_exam - consumed, 0)
 
-        subject_result = calculate_feasibility(
-            subject_min, subject_max, available_for_subject
+        checkpoint_result = calculate_feasibility(
+            cumulative_min, cumulative_max, capacity_until_exam
         )
-        if status_order[subject_result['status']] > status_order[worst_status]:
-            worst_status = subject_result['status']
-
-        consumed += subject_max
+        if status_order[checkpoint_result['status']] > status_order[worst_status]:
+            worst_status = checkpoint_result['status']
 
     display_result['status'] = worst_status
     return display_result, tasks

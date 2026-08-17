@@ -5080,3 +5080,56 @@ class FeasibilityDeadlineAwareTests(TestCase):
 
         self.assertEqual(context['result']['status'], POSSIBLE)
         self.assertTrue(context['can_generate'])
+
+    def test_cumulative_min_max_tracked_separately_not_max_subtraction(self):
+        """
+        GPT가 지적한 반례: 이전 과목의 max만큼 무조건 소비했다고 가정하고
+        빼는 방식(consumed -= max)은 min/max 폭이 좁은 뒤 과목을 실제보다
+        비관적으로 판정한다.
+
+        과목 A: min20/max100, A 시험일 이전 가용 50
+        과목 B: min80/max80, B 시험일 이전 누적 가용 120
+
+        올바른 누적 판정:
+          A 시점: 누적 min20/max100, 가용50 -> 위험
+          B 시점: 누적 min100/max180, 가용120 -> 위험
+          전체 = 위험
+
+        (consumed -= max 방식이었다면 B 시점 가용이 120-100=20으로 계산돼
+        min80 미만이라 '불가능'으로 잘못 나왔을 것.)
+        """
+        from exams.models import Exam, StudyTask
+
+        exam_a = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="A과목",
+            exam_date=self.today + timedelta(days=3),
+            speed_factor=1.0,
+        )
+        exam_b = Exam.objects.create(
+            exam_period=self.exam_period, subject_name="B과목",
+            exam_date=self.today + timedelta(days=6),
+            speed_factor=1.0,
+        )
+        StudyTask.objects.create(
+            exam=exam_a, title="A 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=20, estimated_max_minutes=100, is_confirmed=True,
+        )
+        StudyTask.objects.create(
+            exam=exam_b, title="B 작업", importance="high", depth="core",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=80, estimated_max_minutes=80, is_confirmed=True,
+        )
+        # A 시험일(day+3) 이전 가용시간 합 = 50
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today, available_minutes=50,
+        )
+        # B 시험일(day+6) 이전 누적 가용시간 = 50 + 70 = 120
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.today + timedelta(days=4),
+            available_minutes=70,
+        )
+
+        context = self._feasibility_context()
+
+        self.assertEqual(context['result']['status'], RISKY)
