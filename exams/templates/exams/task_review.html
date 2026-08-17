@@ -134,7 +134,13 @@
               <span class="task-time-pill num">
                 예상 {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
               </span>
+              {% if form.instance.source_pages %}
+              <span class="task-source-pages" title="이 작업의 근거가 된 PDF 페이지">
+                {{ form.instance.source_pages|join:", " }}페이지 참고
+              </span>
+              {% endif %}
             </div>
+            
             <button
               type="button"
               class="btn btn-secondary btn-sm btn-delete-task"
