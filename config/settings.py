@@ -170,7 +170,7 @@ GOOGLE_API_KEY = config('GOOGLE_API_KEY', default='')
 
 
 #AI 모델임시설정
-AI_MODEL_NAME = config('AI_MODEL_NAME', default='gemini-3.1-flash-lite')
+AI_MODEL_NAME = config('AI_MODEL_NAME', default='gemini-3.5-flash-lite')
 # True면 실제 API를 호출하지 않고 고정 샘플 응답 사용 
 AI_MOCK_MODE = config('AI_MOCK_MODE', default=True, cast=bool)
 
