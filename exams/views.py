@@ -463,6 +463,27 @@ def period_update(request, period_id):
     if request.method == 'POST':
         form = ExamPeriodForm(request.POST, instance=period)
         if form.is_valid():
+            new_start = form.cleaned_data['start_date']
+            new_end = form.cleaned_data['end_date']
+
+            # 범위 벗어나는 시험 과목 검증
+            out_of_range_exams = Exam.objects.filter(exam_period=period).exclude(
+                exam_date__range=(new_start, new_end)
+            )
+            
+            if out_of_range_exams.exists():
+                subject_names = ", ".join(
+                    out_of_range_exams.values_list('subject_name', flat=True)
+                )
+                form.add_error(
+                    None,
+                    f"다음 과목의 시험일이 변경하려는 기간을 벗어납니다: {subject_names}. "
+                    "먼저 해당 과목의 시험일을 조정하거나 삭제한 뒤 다시 시도해주세요."
+                )
+                # ⭕ 에러 발생 시 즉시 폼 재렌더링 처리
+                return render(request, 'exams/period_form.html', {'form': form, 'period': period})
+
+            # 검증 통과 시 저장 진행
             with transaction.atomic():
                 updated = form.save()
 
