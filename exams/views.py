@@ -51,6 +51,17 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
+# 다중 업로드 정책 상수 (MVP 기준)
+# 파일별 StudyMaterial이 독립적이라 일부 실패해도 전체 롤백하지 않고
+# 성공한 파일만 저장하는 정책과 함께 사용된다. 값은 OCR/AI 처리 부하를
+# 고려해 보수적으로 잡았고, 필요시 조정한다.
+# =====================================================================
+MAX_BULK_FILES = 5
+MAX_SINGLE_FILE_SIZE = 20 * 1024 * 1024   # 20MB (기존 단건 업로드 제한과 동일)
+MAX_BULK_TOTAL_SIZE = 50 * 1024 * 1024    # 50MB
+
+
+# =====================================================================
 # 헬퍼 함수: 소유권 검증 + Lazy Check 자동 종료
 # =====================================================================
 def _has_processing_material(period):
@@ -306,6 +317,56 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
             return view_func(request, material_id, *args, **kwargs)
         return wrapped_view
     return decorator
+
+
+# =====================================================================
+# 헬퍼 함수: 일괄(bulk) 처리용 lock+claim 공통 로직
+# check_exam_period_not_locked_by_material_id 데코레이터와 정확히 동일한
+# 잠금 순서(ExamPeriod 락 → material 재조회 → claim_func 선점 → 락 해제 →
+# 실행)를 material_ids 반복 호출 상황에서도 그대로 재사용하기 위한 함수.
+# 데코레이터는 URL 하나(material_id 하나)에 물리는 구조라 material_ids
+# 여러 개를 순회하는 bulk 뷰에서는 쓸 수 없어서, 그 잠금 로직만 별도
+# 함수로 뽑아 단건 뷰와 bulk 뷰가 완전히 같은 동시성 방어를 공유하게 했다.
+# =====================================================================
+def _claim_and_run_for_material(user, material_id, claim_func, run_func):
+    """material_id 하나에 대해 lock → claim까지 마친 뒤 run_func(material, extra)를
+    락 밖에서 실행한다. run_func은 (ok, message) 튜플을 반환해야 한다.
+    claim 단계에서 이미 실패하면 run_func은 호출되지 않고 (False, message)를 반환한다.
+    """
+    with transaction.atomic():
+        try:
+            material_ref = StudyMaterial.objects.select_related('exam__exam_period').get(
+                id=material_id,
+                exam__exam_period__user=user,
+            )
+        except StudyMaterial.DoesNotExist:
+            return False, "존재하지 않는 학습자료입니다."
+
+        period = ExamPeriod.objects.select_for_update().get(
+            id=material_ref.exam.exam_period_id
+        )
+
+        if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+            return False, "종료된 시험기간의 학습자료입니다."
+
+        if DailyPlan.objects.filter(exam_period=period).exists():
+            return False, "이미 계획이 생성된 시험기간의 학습자료입니다."
+
+        try:
+            material = StudyMaterial.objects.get(
+                id=material_id,
+                exam__exam_period__user=user,
+            )
+        except StudyMaterial.DoesNotExist:
+            return False, "이미 삭제된 학습자료입니다."
+
+        claimed, message, level, extra = claim_func(material)
+        if not claimed:
+            return False, message
+    # atomic 블록 종료 → ExamPeriod 락 해제, 이후 실제 실행(외부 호출)은 락 밖에서
+
+    return run_func(material, extra)
+
 
 # =====================================================================
 # 시험기간 목록 (exams:period_list) - 일괄 Lazy Check 자동 종료 적용
@@ -736,7 +797,14 @@ def available_time_update(request, period_id):
 
 
 # =====================================================================
-# 자료 등록 (exams:material_create) 
+# 자료 등록 (exams:material_create)
+# 다중 업로드 지원: <input type="file" name="files" multiple>로 여러 PDF를
+# 한 번에 받는다. 파일별 StudyMaterial이 서로 독립적이므로, 일부 파일이
+# 검증에 실패해도 전체를 롤백하지 않고 성공한 파일만 저장한다 (팀 논의로
+# 결정: 하나 실패했다고 정상 파일까지 재업로드시킬 이유가 없음). 실패한
+# 파일은 파일명+사유를 메시지로 안내한다.
+# 텍스트(TEXT) 자료는 파일이 없는 별도 흐름이라 다중 업로드 대상에서 제외하고
+# 기존처럼 단일 폼으로만 등록한다.
 # =====================================================================
 @login_required
 @check_exam_period_locked_by_exam_id
@@ -745,16 +813,59 @@ def material_create(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
 
     if request.method == "POST":
-        form = StudyMaterialForm(request.POST, request.FILES)
-        if form.is_valid():
-            material = form.save(commit=False)
-            material.exam = exam
+        material_type = request.POST.get("material_type", MaterialType.PDF)
 
-            if material.material_type == MaterialType.TEXT:
+        # TEXT 자료는 파일이 없는 기존 단일 흐름을 그대로 유지한다.
+        if material_type == MaterialType.TEXT:
+            form = StudyMaterialForm(request.POST, request.FILES)
+            if form.is_valid():
+                material = form.save(commit=False)
+                material.exam = exam
                 material.status = MaterialStatus.COMPLETED
+                material.save()
+                return redirect("exams:material_detail", material_id=material.id)
+            return render(request, "exams/material_form.html", {"form": form, "exam": exam})
 
-            material.save()
-            return redirect("exams:material_detail", material_id=material.id)
+        # PDF 다중 업로드 흐름
+        files = request.FILES.getlist("files")
+        if not files:
+            messages.error(request, "업로드할 파일을 선택해주세요.")
+            return render(request, "exams/material_form.html", {"exam": exam})
+
+        if len(files) > MAX_BULK_FILES:
+            messages.error(request, f"한 번에 최대 {MAX_BULK_FILES}개까지 업로드할 수 있습니다.")
+            return render(request, "exams/material_form.html", {"exam": exam})
+
+        total_size = sum(f.size for f in files)
+        if total_size > MAX_BULK_TOTAL_SIZE:
+            messages.error(request, "전체 업로드 용량이 50MB를 초과했습니다.")
+            return render(request, "exams/material_form.html", {"exam": exam})
+
+        created, errors = [], []
+        for f in files:
+            if f.size > MAX_SINGLE_FILE_SIZE:
+                errors.append(f"{f.name}: 파일 용량이 20MB를 초과했습니다.")
+                continue
+
+            form = StudyMaterialForm(
+                data={"material_type": MaterialType.PDF}, files={"file": f}
+            )
+            if form.is_valid():
+                material = form.save(commit=False)
+                material.exam = exam
+                # 파일별로 개별 저장한다 - 전체를 하나의 트랜잭션으로 묶지 않는 이유는
+                # 뒤 파일이 실패해도 앞서 저장에 성공한 파일이 함께 롤백되면 안 되기 때문.
+                material.save()
+                created.append(material)
+            else:
+                errors.append(f"{f.name}: {form.errors.as_text()}")
+
+        if created:
+            messages.success(request, f"{len(created)}개 자료가 업로드되었습니다.")
+        for e in errors:
+            messages.error(request, e)
+
+        return redirect("exams:period_detail", period_id=exam.exam_period_id)
     else:
         form = StudyMaterialForm()
 
@@ -773,7 +884,10 @@ def material_detail(request, material_id):
 
 
 # =====================================================================
-# PDF 텍스트 추출 (exams:material_extract) 
+# PDF 텍스트 추출 (exams:material_extract)
+# 실제 추출 로직은 _extract_one()으로 분리했다 - 단건 뷰(material_extract)와
+# 일괄 뷰(material_bulk_extract)가 claim 이후 처리를 완전히 동일한 함수로
+# 수행하게 하기 위함이며, 로직 자체는 기존과 동일하고 위치만 이동했다.
 # =====================================================================
 def _claim_material_for_extraction(material):
     if material.material_type != MaterialType.PDF:
@@ -798,16 +912,13 @@ def _claim_material_for_extraction(material):
     return True, None, None, None
 
 
-@login_required
-@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
-@require_http_methods(["POST"])
-def material_extract(request, material_id, claim_extra=None):
-    material = get_object_or_404(
-        StudyMaterial, id=material_id, exam__exam_period__user=request.user
-    )
+def _extract_one(material):
+    """claim(PROCESSING 선점) 이후 실제 PDF 텍스트 추출을 수행한다.
+    (ok, message, level) 튜플을 반환하며, level은 messages.<level>() 호출에
+    그대로 쓸 수 있도록 'success'/'warning'/'error' 중 하나다.
+    material_extract, material_bulk_extract가 공통으로 호출한다.
+    """
     previous_extracted_text = material.extracted_text
-    # material_type / file / status 선점은 claim_func가 락 안에서 이미 끝냈으므로
-    # 여기서는 바로 추출을 진행한다.
 
     try:
         extracted = extract_text_from_pdf(material.file)
@@ -815,15 +926,13 @@ def material_extract(request, material_id, claim_extra=None):
         material.status = MaterialStatus.FAILED
         material.error_message = str(e)
         material.save(update_fields=['status', 'error_message'])
-        messages.error(request, "PDF 텍스트 추출에 실패했습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
+        return False, "PDF 텍스트 추출에 실패했습니다.", "error"
 
     if not extracted:
         material.status = MaterialStatus.FAILED
         material.error_message = "텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다."
         material.save(update_fields=['status', 'error_message'])
-        messages.warning(request, "텍스트를 추출하지 못했습니다. 스캔 이미지 PDF일 수 있어요.")
-        return redirect('exams:material_detail', material_id=material.id)
+        return False, "텍스트를 추출하지 못했습니다. 스캔 이미지 PDF일 수 있어요.", "warning"
 
     material.status = MaterialStatus.COMPLETED
     material.extracted_text = extracted
@@ -838,7 +947,20 @@ def material_extract(request, material_id, claim_extra=None):
         'status', 'extracted_text', 'error_message',
         'analysis_status', 'analysis_error_message', 'analysis_retry_count',
     ])
-    messages.success(request, "PDF 텍스트 추출이 완료되었습니다.")
+    return True, "PDF 텍스트 추출이 완료되었습니다.", "success"
+
+
+@login_required
+@check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_extraction)
+@require_http_methods(["POST"])
+def material_extract(request, material_id, claim_extra=None):
+    material = get_object_or_404(
+        StudyMaterial, id=material_id, exam__exam_period__user=request.user
+    )
+    # material_type / file / status 선점은 claim_func가 락 안에서 이미 끝냈으므로
+    # 여기서는 바로 추출을 진행한다.
+    ok, msg, level = _extract_one(material)
+    getattr(messages, level)(request, msg)
     return redirect('exams:material_detail', material_id=material.id)
 
 
@@ -873,6 +995,9 @@ def material_delete(request, material_id):
 
 # =====================================================================
 # AI 분석 실행 (exams:material_analyze)
+# 실제 분석 실행 로직은 _run_analysis()로 분리했다 (is_retry로 재시도 문구만
+# 분기) - material_analyze, material_retry_analyze, material_bulk_analyze가
+# claim 이후 처리를 동일한 함수로 수행한다.
 # =====================================================================
 def _claim_material_for_analysis(material):
     if material.status != MaterialStatus.COMPLETED:
@@ -884,6 +1009,31 @@ def _claim_material_for_analysis(material):
     return True, None, None, run_id
 
 
+def _run_analysis(material, run_id, material_id, *, is_retry=False):
+    """claim(run_id 선점) 이후 실제 AI 분석 실행을 수행한다.
+    (ok, message, level) 튜플을 반환한다.
+    """
+    try:
+        run_claimed_analysis(material, run_id)
+        return True, "AI 분석이 완료되었습니다.", "success"
+    except StaleAnalysisRunError:
+        if is_retry:
+            logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        else:
+            logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
+        return False, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.", "info"
+    except (AIAnalysisError, AnalysisPipelineError):
+        if is_retry:
+            return False, "재시도한 AI 분석도 실패했습니다.", "error"
+        return False, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.", "error"
+    except Exception:
+        if is_retry:
+            logger.exception(f"AI 분석 재시도 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+            return False, "AI 분석 재시도 처리 중 알 수 없는 시스템 오류가 발생했습니다.", "error"
+        logger.exception(f"AI 분석 실행 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        return False, "AI 분석 처리 중 알 수 없는 시스템 오류가 발생했습니다.", "error"
+
+
 @login_required
 @check_exam_period_not_locked_by_material_id(claim_func=_claim_material_for_analysis)
 @require_http_methods(["POST"])
@@ -892,19 +1042,9 @@ def material_analyze(request, material_id, claim_extra=None):
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    try:
-        run_claimed_analysis(material, claim_extra)
-        messages.success(request, "AI 분석이 완료되었습니다.")
-    except StaleAnalysisRunError:
-        logger.info(f"AI 분석 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
-        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError):
-        messages.error(request, "AI 분석에 실패했습니다. 다시 시도하거나 직접 작업을 추가해주세요.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except Exception:
-        logger.exception(f"AI 분석 실행 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
-        messages.error(request, "AI 분석 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
+    ok, msg, level = _run_analysis(material, claim_extra, material_id, is_retry=False)
+    getattr(messages, level)(request, msg)
+    if not ok:
         return redirect('exams:material_detail', material_id=material.id)
 
     return redirect('exams:task_review', exam_id=material.exam_id)
@@ -934,21 +1074,11 @@ def material_retry_analyze(request, material_id, claim_extra=None):
         StudyMaterial, id=material_id, exam__exam_period__user=request.user
     )
 
-    try:
-        run_claimed_analysis(material, claim_extra)
-    except StaleAnalysisRunError:
-        logger.info(f"AI 재시도 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
-        messages.info(request, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except (AIAnalysisError, AnalysisPipelineError):
-        messages.error(request, "재시도한 AI 분석도 실패했습니다.")
-        return redirect('exams:material_detail', material_id=material.id)
-    except Exception:
-        logger.exception(f"AI 분석 재시도 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
-        messages.error(request, "AI 분석 재시도 처리 중 알 수 없는 시스템 오류가 발생했습니다.")
+    ok, msg, level = _run_analysis(material, claim_extra, material_id, is_retry=True)
+    getattr(messages, level)(request, msg)
+    if not ok:
         return redirect('exams:material_detail', material_id=material.id)
 
-    messages.success(request, "AI 분석이 완료되었습니다.")
     return redirect('exams:task_review', exam_id=material.exam_id)
 
 # =====================================================================
@@ -1009,6 +1139,89 @@ def material_analysis_status(request, material_id):
         "study_material_id": material.id,
         "exam_id": material.exam_id,
     })
+
+
+# =====================================================================
+# 자료 일괄 텍스트 추출 (exams:material_bulk_extract)
+# 여러 자료를 한 번에 추출한다. 별도의 추출 로직을 새로 만들지 않고 단건과
+# 동일한 claim(_claim_material_for_extraction) + 실행(_extract_one)을
+# material_ids 개수만큼 반복 호출하며, 각 material_id는
+# _claim_and_run_for_material()을 통해 단건 데코레이터와 동일한 잠금 순서로
+# 처리된다. 일부 자료가 실패해도(이미 처리 중, 삭제됨 등) 나머지는 계속
+# 진행하고, 끝에 성공 개수와 실패 사유를 함께 안내한다.
+# =====================================================================
+@login_required
+@require_http_methods(["POST"])
+def material_bulk_extract(request, exam_id):
+    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    material_ids = request.POST.getlist("material_ids")
+
+    if not material_ids:
+        messages.error(request, "추출할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    success_count = 0
+    fail_messages = []
+
+    for material_id in material_ids:
+        def _run(material, extra):
+            ok, msg, _level = _extract_one(material)
+            return ok, msg
+
+        ok, msg = _claim_and_run_for_material(
+            request.user, material_id, _claim_material_for_extraction, _run
+        )
+        if ok:
+            success_count += 1
+        else:
+            fail_messages.append(f"자료 #{material_id}: {msg}")
+
+    if success_count:
+        messages.success(request, f"{success_count}개 자료 추출이 완료되었습니다.")
+    for m in fail_messages:
+        messages.error(request, m)
+
+    return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+
+# =====================================================================
+# 자료 일괄 AI 분석 (exams:material_bulk_analyze)
+# material_bulk_extract와 동일한 패턴 - 단건 claim(_claim_material_for_analysis)
+# + 실행(_run_analysis)을 material_ids 개수만큼 반복 호출한다. 일부 실패해도
+# 나머지는 계속 처리한다.
+# =====================================================================
+@login_required
+@require_http_methods(["POST"])
+def material_bulk_analyze(request, exam_id):
+    exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    material_ids = request.POST.getlist("material_ids")
+
+    if not material_ids:
+        messages.error(request, "분석할 자료를 선택해주세요.")
+        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+
+    success_count = 0
+    fail_messages = []
+
+    for material_id in material_ids:
+        def _run(material, extra):
+            ok, msg, _level = _run_analysis(material, extra, material.id, is_retry=False)
+            return ok, msg
+
+        ok, msg = _claim_and_run_for_material(
+            request.user, material_id, _claim_material_for_analysis, _run
+        )
+        if ok:
+            success_count += 1
+        else:
+            fail_messages.append(f"자료 #{material_id}: {msg}")
+
+    if success_count:
+        messages.success(request, f"{success_count}개 자료 AI 분석이 완료되었습니다.")
+    for m in fail_messages:
+        messages.error(request, m)
+
+    return redirect('exams:task_review', exam_id=exam_id)
 
 
 # =====================================================================
