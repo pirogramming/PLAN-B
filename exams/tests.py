@@ -4220,7 +4220,6 @@ class MaterialCreateBulkTests(TestCase):
 
 class ExamPeriodTest(TestCase):
     def setUp(self):
-        # 1. 사용자 생성 및 로그인
         self.user = User.objects.create_user(
             username="tester",
             email="tester@example.com",
@@ -4228,24 +4227,22 @@ class ExamPeriodTest(TestCase):
         )
         self.client.force_login(self.user)
 
-        # 2. 테스트용 기본 ExamPeriod 생성
-        today = datetime.date.today()
+        # 기본 시험 기간 설정: 8/16 ~ 8/26
         self.period = ExamPeriod.objects.create(
             user=self.user,
             title="2026년 2학기 중간고사",
-            start_date=today,
-            end_date=today + datetime.timedelta(days=7),
+            start_date=datetime.date(2026, 8, 16),
+            end_date=datetime.date(2026, 8, 26),
         )
 
-    def test_period_update_blocks_when_exam_date_falls_outside_new_range(self):
-        # 현재 기간의 마지막 날 시험 과목 생성
-        exam = Exam.objects.create(
+    # 1. 종료일 축소 거부 (시험일: 8/25, 종료일: 8/26 -> 8/20 변경 시도)
+    def test_period_update_rejects_end_date_shrink(self):
+        Exam.objects.create(
             exam_period=self.period,
             subject_name="수학",
-            exam_date=self.period.end_date,
+            exam_date=datetime.date(2026, 8, 25),
         )
-        # 시험일보다 앞당긴 종료일 설정
-        new_end = self.period.end_date - datetime.timedelta(days=3)
+        new_end = datetime.date(2026, 8, 20)
 
         response = self.client.post(
             reverse("exams:period_update", args=[self.period.id]),
@@ -4257,8 +4254,51 @@ class ExamPeriodTest(TestCase):
         )
 
         self.period.refresh_from_db()
-        
-        # 검증
-        self.assertEqual(response.status_code, 200)  # 저장 실패 후 폼 재렌더링
-        self.assertNotEqual(self.period.end_date, new_end)  # DB 값이 변경되지 않았는지 확인
-        self.assertIn("수학", response.content.decode())  # 에러 메시지에 과목명이 포함되었는지 확인
+        self.assertEqual(response.status_code, 200)  # form.is_valid() == False, 재렌더링
+        self.assertEqual(self.period.end_date, datetime.date(2026, 8, 26))  # DB 변경 없음
+        self.assertIn("수학", response.content.decode())  # 에러 메시지에 과목명 포함 확인
+
+    # 2. 시작일 뒤로 이동 거부 (시험일: 8/17, 시작일: 8/16 -> 8/20 변경 시도)
+    def test_period_update_rejects_start_date_shift_forward(self):
+        Exam.objects.create(
+            exam_period=self.period,
+            subject_name="영어",
+            exam_date=datetime.date(2026, 8, 17),
+        )
+        new_start = datetime.date(2026, 8, 20)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": new_start,
+                "end_date": self.period.end_date,
+            },
+        )
+
+        self.period.refresh_from_db()
+        self.assertEqual(response.status_code, 200)  # form.is_valid() == False, 재렌더링
+        self.assertEqual(self.period.start_date, datetime.date(2026, 8, 16))  # DB 변경 없음
+        self.assertIn("영어", response.content.decode())
+
+    # 3. 모든 시험일이 새 범위 안이면 수정 성공 (시험일: 8/18, 기간: 8/16~8/26 -> 8/16~8/20)
+    def test_period_update_succeeds_when_all_exams_within_new_range(self):
+        Exam.objects.create(
+            exam_period=self.period,
+            subject_name="국어",
+            exam_date=datetime.date(2026, 8, 18),
+        )
+        new_end = datetime.date(2026, 8, 20)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": self.period.start_date,
+                "end_date": new_end,
+            },
+        )
+
+        self.period.refresh_from_db()
+        self.assertEqual(response.status_code, 302)  # 성공 시 상세보기 페이지 등으로 리다이렉트
+        self.assertEqual(self.period.end_date, new_end)  # DB 변경 성공
