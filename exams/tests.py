@@ -1,11 +1,12 @@
 import datetime
 import io
+import threading
 import json
 import logging
 import uuid
 import shutil
 import tempfile
-from unittest.mock import patch
+from unittest.mock import  MagicMock,patch
 from django.conf import settings as dj_settings
 
 import pypdfium2 as pdfium
@@ -52,7 +53,7 @@ from exams.services.analysis_orchestrator import (
 )
 
 from exams.services import task_extractor
-from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError
+from exams.services.pdf_extractor import extract_text_from_pdf, PdfExtractionError, _anomaly_ratio
 from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanItem
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -940,8 +941,9 @@ startxref
 
         with self.assertRaises(PdfExtractionError) as context:
             extract_text_from_pdf(dummy_file)
-
-        self.assertIn("암호화된 PDF 파일은 지원하지 않습니다", str(context.exception))
+        self.assertEqual(
+            context.exception.user_message, "암호화된 PDF 파일은 지원하지 않습니다."
+        )
 
     def test_extract_text_encrypted_with_empty_password(self):
         import pypdf
@@ -957,16 +959,20 @@ startxref
 
         with self.assertRaises(PdfExtractionError) as context:
             extract_text_from_pdf(dummy_file)
-
-        self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+        self.assertEqual(
+            context.exception.user_message, "PDF에서 텍스트를 추출할 수 없습니다."
+        )
 
     def test_extract_text_from_invalid_pdf(self):
         dummy_file = SimpleUploadedFile("invalid.pdf", b"Not a PDF content", content_type="application/pdf")
 
         with self.assertRaises(PdfExtractionError) as context:
             extract_text_from_pdf(dummy_file)
+        self.assertEqual(
+            context.exception.user_message,
+            "올바른 PDF 형식이 아니거나 손상된 파일입니다.",
+        )
 
-        self.assertIn("올바른 PDF 형식이 아니거나 손상된 파일입니다", str(context.exception))
 
     def test_extract_text_from_empty_pdf_or_image(self):
         import pypdf
@@ -982,8 +988,9 @@ startxref
         with patch("exams.services.pdf_extractor.OCR_AVAILABLE", False):
             with self.assertRaises(PdfExtractionError) as context:
                 extract_text_from_pdf(dummy_file)
-
-        self.assertIn("PDF에서 텍스트를 추출할 수 없습니다", str(context.exception))
+        self.assertEqual(
+            context.exception.user_message, "PDF에서 텍스트를 추출할 수 없습니다."
+        )
 
 
 class AITransactionIsolationTestCase(TransactionTestCase):
@@ -5048,7 +5055,7 @@ class SaveExtractedTasksOrderTestCase(TestCase):
         self.assertEqual(task.order, material.id * task_extractor.ORDER_BLOCK_SIZE + 1)
 
 
-class MaterialBulkExtractTests(TestCase):
+class  MaterialBulkExtractAjaxTests(TestCase):
     def setUp(self):
         User = get_user_model()
         self.user = User.objects.create_user(
@@ -5087,3 +5094,257 @@ class MaterialBulkExtractTests(TestCase):
         follow_up = self.client.get(reverse("exams:period_detail", args=[self.period.id]))
         leaked = [m.message for m in get_messages(follow_up.wsgi_request)]
         self.assertEqual(leaked, [])
+
+
+"""
+pdf_extractor.py 테스트.
+
+exams/tests.py에 그대로 붙여넣거나, exams/tests/test_pdf_extractor.py로
+분리해서 사용하세요 (분리한다면 상단 import 경로를 프로젝트 구조에 맞게
+조정해야 합니다).
+
+커버 범위:
+  1. PdfExtractionError의 user_message/detail 분리가 의도대로 동작하는지
+     (사용자 노출용 메시지에는 내부 구현 정보가 없고, detail에는 원본이 남는지)
+  2. extract_text_from_pdf()가 각 실패 케이스에서 올바른 user_message/detail로
+     PdfExtractionError를 던지는지 (파일 읽기 실패 / 암호화 / 손상된 PDF / 텍스트
+     없음)
+  3. 정상 추출 경로(텍스트 레이어 + OCR 폴백)가 기존과 동일하게 동작하는지
+  4. PDFium 호출 직렬화(_PDFIUM_LOCK)가 동시 호출에서도 예외 없이 통과하는지
+     (동시성 버그라 100% 결정적 재현은 아니지만, 회귀 방지용 스모크 테스트)
+
+실제 pdfium/tesseract 바이너리에 의존하지 않도록 pdfium.PdfDocument와
+pytesseract 관련 함수는 전부 mock 처리합니다.
+"""
+
+
+class _FakeFileField:
+    """Django FieldFile을 흉내내는 최소 stub.
+
+    open()/seek()/read()/close()만 지원하며, close()에서 예외를 내도록
+    설정할 수 있어 "파일을 닫는 중 오류" 경고 경로도 검증 가능하다.
+    """
+
+    def __init__(self, data: bytes, *, read_error: Exception | None = None):
+        self._data = data
+        self._read_error = read_error
+        self._buf = None
+
+    def open(self, mode='rb'):
+        if self._read_error is not None:
+            raise self._read_error
+        self._buf = io.BytesIO(self._data)
+
+    def seek(self, pos):
+        if self._buf is not None:
+            self._buf.seek(pos)
+
+    def read(self):
+        return self._buf.read()
+
+    def close(self):
+        if self._buf is not None:
+            self._buf.close()
+
+
+class PdfExtractionErrorMessageSplitTests(TestCase):
+    """PdfExtractionError 자체의 user_message/detail 분리 동작."""
+
+    def test_detail_defaults_to_user_message_when_not_given(self):
+        err = PdfExtractionError("사용자용 메시지")
+        self.assertEqual(err.user_message, "사용자용 메시지")
+        self.assertEqual(err.detail, "사용자용 메시지")
+
+    def test_detail_can_carry_internal_information_separately(self):
+        err = PdfExtractionError(
+            "올바른 PDF 형식이 아니거나 손상된 파일입니다.",
+            detail="PDFium: Data format error (raw pdfium message)",
+        )
+        self.assertEqual(err.user_message, "올바른 PDF 형식이 아니거나 손상된 파일입니다.")
+        self.assertIn("Data format error", err.detail)
+        # 사용자 메시지에는 내부 상세가 섞이지 않아야 한다
+        self.assertNotIn("Data format error", err.user_message)
+
+    def test_str_uses_detail_not_user_message(self):
+        # 로그(logger.exception 등)에서 str(e)를 그대로 찍었을 때 상세 원인이
+        # 남아야 디버깅에 쓸모가 있다.
+        err = PdfExtractionError("사용자용", detail="상세 원인 xyz")
+        self.assertIn("상세 원인 xyz", str(err))
+
+
+class ExtractTextFromPdfFileReadErrorTests(TestCase):
+    """파일 자체를 읽지 못하는 경우 (스토리지 오류 등)."""
+
+    def test_file_read_error_hides_internal_detail_from_user_message(self):
+        storage_error = OSError("/var/app/storage/private/xyz.pdf: Permission denied")
+        file_field = _FakeFileField(b"", read_error=storage_error)
+
+        with self.assertRaises(PdfExtractionError) as ctx:
+            extract_text_from_pdf(file_field)
+
+        err = ctx.exception
+        self.assertNotIn("/var/app", err.user_message)
+        self.assertNotIn("Permission denied", err.user_message)
+        # 상세 원인은 detail에 남아 로그/DB에서 확인 가능해야 한다
+        self.assertIn("Permission denied", err.detail)
+
+
+class ExtractTextFromPdfPdfiumErrorTests(TestCase):
+    """PdfDocument() 자체가 실패하는 경우 (암호화 / 손상된 파일)."""
+
+    @patch("exams.services.pdf_extractor.pdfium.PdfDocument")
+    def test_encrypted_pdf_user_message_has_no_internal_detail(self, mock_pdf_document):
+        mock_pdf_document.side_effect = pdfium.PdfiumError(
+            "Failed to load document (FPDF_ERR_PASSWORD)"
+        )
+        file_field = _FakeFileField(b"%PDF-1.4 fake encrypted content")
+
+        with self.assertRaises(PdfExtractionError) as ctx:
+            extract_text_from_pdf(file_field)
+
+        err = ctx.exception
+        self.assertEqual(err.user_message, "암호화된 PDF 파일은 지원하지 않습니다.")
+        self.assertIn("FPDF_ERR_PASSWORD", err.detail)
+
+    @patch("exams.services.pdf_extractor.pdfium.PdfDocument")
+    def test_corrupted_pdf_user_message_has_no_internal_detail(self, mock_pdf_document):
+        mock_pdf_document.side_effect = pdfium.PdfiumError(
+            "Failed to load document (PDFium: Data format error)"
+        )
+        file_field = _FakeFileField(b"not a real pdf")
+
+        with self.assertRaises(PdfExtractionError) as ctx:
+            extract_text_from_pdf(file_field)
+
+        err = ctx.exception
+        self.assertEqual(
+            err.user_message, "올바른 PDF 형식이 아니거나 손상된 파일입니다."
+        )
+        self.assertIn("Data format error", err.detail)
+        self.assertNotIn("Data format error", err.user_message)
+
+
+class ExtractTextFromPdfNoTextExtractedTests(TestCase):
+    """텍스트 레이어도 없고 OCR도 실패/불가능한 경우."""
+
+    @patch("exams.services.pdf_extractor.OCR_AVAILABLE", False)
+    @patch("exams.services.pdf_extractor.pdfium.PdfDocument")
+    def test_no_text_and_ocr_unavailable(self, mock_pdf_document):
+        mock_page = MagicMock()
+        mock_textpage = MagicMock()
+        mock_textpage.get_text_range.return_value = ""
+        mock_page.get_textpage.return_value = mock_textpage
+
+        mock_pdf = MagicMock()
+        mock_pdf.__len__.return_value = 1
+        mock_pdf.__getitem__.return_value = mock_page
+        mock_pdf_document.return_value = mock_pdf
+
+        file_field = _FakeFileField(b"%PDF-1.4 scanned image only")
+
+        with self.assertRaises(PdfExtractionError) as ctx:
+            extract_text_from_pdf(file_field)
+
+        err = ctx.exception
+        self.assertEqual(err.user_message, "PDF에서 텍스트를 추출할 수 없습니다.")
+        self.assertIn("OCR 라이브러리가 설치되어 있지 않습니다", err.detail)
+
+
+class ExtractTextFromPdfHappyPathTests(TestCase):
+    """텍스트 레이어가 정상적으로 있는 경우 - OCR로 안 빠지고 그대로 채택."""
+
+    @patch("exams.services.pdf_extractor.pdfium.PdfDocument")
+    def test_normal_text_layer_extraction(self, mock_pdf_document):
+        mock_page = MagicMock()
+        mock_textpage = MagicMock()
+        mock_textpage.get_text_range.return_value = (
+            "이것은 정상적인 텍스트 레이어 내용입니다. " * 3
+        )
+        mock_page.get_textpage.return_value = mock_textpage
+
+        mock_pdf = MagicMock()
+        mock_pdf.__len__.return_value = 1
+        mock_pdf.__getitem__.return_value = mock_page
+        mock_pdf_document.return_value = mock_pdf
+
+        file_field = _FakeFileField(b"%PDF-1.4 normal text pdf")
+
+        result = extract_text_from_pdf(file_field)
+
+        self.assertIn("이것은 정상적인 텍스트 레이어 내용입니다.", result)
+        self.assertIn("--- 페이지 1 ---", result)
+        mock_pdf.close.assert_called()
+
+
+class AnomalyRatioTests(TestCase):
+    """_anomaly_ratio()는 OCR 폴백 여부 판단에 쓰이므로 기본 케이스만 회귀 확인."""
+
+    def test_clean_korean_text_has_low_anomaly(self):
+        self.assertLess(_anomaly_ratio("정상적인 한글 문장입니다."), 0.1)
+
+    def test_garbage_text_has_high_anomaly(self):
+        # _NORMAL_CHAR_PATTERN은 한글(가-힣)만 허용하고 한자는 포함하지 않으므로,
+        # 특수문자 대신 한자를 쓰면 확실하게 "비정상" 판정을 받는다.
+        self.assertGreater(_anomaly_ratio("測試文字亂碼無法辨識"), 0.9)
+
+    def test_empty_text_is_fully_anomalous(self):
+        self.assertEqual(_anomaly_ratio(""), 1.0)
+
+
+class PdfiumLockConcurrencyTests(TestCase):
+    """
+    _PDFIUM_LOCK이 실제로 여러 스레드의 PDFium 호출을 직렬화하는지 확인.
+
+    진짜 pdfium 라이브러리의 스레드 unsafety를 재현하는 건 아니다(그건
+    결정적으로 재현하기 어려움) - 대신 락 자체가 "동시에 두 스레드가
+    critical section 안에 들어가지 않는다"는 걸 보장하는지를,
+    pdfium.PdfDocument를 락 보유 여부를 기록하는 fake로 바꿔서 검증한다.
+    이 테스트가 실패한다면 락이 우회되고 있다는 뜻이므로 회귀 방지 용도로
+    남겨둔다.
+    """
+
+    @patch("exams.services.pdf_extractor.pdfium.PdfDocument")
+    def test_concurrent_extract_calls_never_overlap_inside_pdfium_lock(
+        self, mock_pdf_document
+    ):
+        overlap_detected = threading.Event()
+        currently_inside = threading.Event()
+
+        def fake_pdf_document(pdf_bytes):
+            if currently_inside.is_set():
+                overlap_detected.set()
+            currently_inside.set()
+            try:
+                mock_page = MagicMock()
+                mock_textpage = MagicMock()
+                mock_textpage.get_text_range.return_value = "정상 텍스트 " * 5
+                mock_page.get_textpage.return_value = mock_textpage
+
+                mock_pdf = MagicMock()
+                mock_pdf.__len__.return_value = 1
+                mock_pdf.__getitem__.return_value = mock_page
+                return mock_pdf
+            finally:
+                # 락이 제대로 걸려 있다면 이 finally가 끝나기 전까지
+                # 다른 스레드는 fake_pdf_document에 진입할 수 없어야 한다.
+                currently_inside.clear()
+
+        mock_pdf_document.side_effect = fake_pdf_document
+
+        errors = []
+
+        def worker():
+            try:
+                file_field = _FakeFileField(b"%PDF-1.4 concurrent test")
+                extract_text_from_pdf(file_field)
+            except Exception as e:  # pragma: no cover - 실패 시 진단용
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertFalse(overlap_detected.is_set(), "PDFium 호출이 락 없이 겹쳐서 실행됨")
+        self.assertEqual(errors, [])

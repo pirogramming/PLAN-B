@@ -935,11 +935,13 @@ def _extract_one(material, run_id):
         extracted = extract_text_from_pdf(material.file)
     except PdfExtractionError as e:
         try:
-            _save_if_owner(status=MaterialStatus.FAILED, error_message=str(e))
+            # DB에는 상세 원인(detail)을 저장해서 나중에 로그/관리자 화면에서 디버깅 가능하게 한다.
+            _save_if_owner(status=MaterialStatus.FAILED, error_message=e.detail)
         except StaleExtractionRunError:
             logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
             return False, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.", "info"
-        return False, f"PDF 텍스트 추출에 실패했습니다: {e}", "error"
+        # 사용자(및 FE alert)에게는 내부 구현 정보가 없는 안전한 문구만 노출한다.
+        return False, f"PDF 텍스트 추출에 실패했습니다: {e.user_message}", "error"
     except Exception:
         logger.exception(f"PDF 추출 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
         try:
