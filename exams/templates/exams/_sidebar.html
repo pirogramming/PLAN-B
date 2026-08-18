@@ -66,37 +66,37 @@
     {% step_state nav 'period_form' as s1 %}
     <a class="nav-i nav-step {{ s1 }}"
        href="{% if wiz.period_id %}{% url 'exams:period_update' wiz.period_id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
-      <span class="step-num">{% if s1 == 'done' %}✓{% else %}1{% endif %}</span><span class="step-label">시험기간 등록</span>
+      <span class="step-num">1</span><span class="step-label">시험기간 등록</span>
     </a>
 
     {% step_state nav 'subject_create' as s2 %}
     <a class="nav-i nav-step {{ s2 }}{% if not wiz.period_id %} off{% endif %}"
        href="{% if wiz.period_id %}{% url 'exams:subject_create' wiz.period_id %}{% else %}#{% endif %}">
-      <span class="step-num">{% if s2 == 'done' %}✓{% else %}2{% endif %}</span><span class="step-label">과목 등록</span>
+      <span class="step-num">2</span><span class="step-label">과목 등록</span>
     </a>
 
     {% step_state nav 'available_time' as s3 %}
     <a class="nav-i nav-step {{ s3 }}{% if not wiz.period_id %} off{% endif %}"
        href="{% if wiz.period_id %}{% url 'exams:available_time_update' wiz.period_id %}{% else %}#{% endif %}">
-      <span class="step-num">{% if s3 == 'done' %}✓{% else %}3{% endif %}</span><span class="step-label">공부 가능 시간 등록</span>
+      <span class="step-num">3</span><span class="step-label">공부 가능 시간 등록</span>
     </a>
 
     {% step_state nav 'material' as s4 %}
     <a class="nav-i nav-step {{ s4 }}{% if not wiz.first_exam_id %} off{% endif %}"
        href="{% if wiz.first_exam_id %}{% url 'exams:material_create' wiz.first_exam_id %}{% else %}#{% endif %}">
-      <span class="step-num">{% if s4 == 'done' %}✓{% else %}4{% endif %}</span><span class="step-label">시험범위 등록</span>
+      <span class="step-num">4</span><span class="step-label">시험범위 등록</span>
     </a>
 
     {% step_state nav 'task_review' as s5 %}
     <a class="nav-i nav-step {{ s5 }}{% if not wiz.first_exam_id %} off{% endif %}"
        href="{% if wiz.first_exam_id %}{% url 'exams:task_review' wiz.first_exam_id %}{% else %}#{% endif %}">
-      <span class="step-num">{% if s5 == 'done' %}✓{% else %}5{% endif %}</span><span class="step-label">학습 작업 확인</span>
+      <span class="step-num">5</span><span class="step-label">학습 작업 확인</span>
     </a>
 
     {% step_state nav 'feasibility' as s6 %}
     <a class="nav-i nav-step {{ s6 }}{% if not wiz.period_id %} off{% endif %}"
        href="{% if wiz.period_id %}{% url 'planner:feasibility' wiz.period_id %}{% else %}#{% endif %}">
-      <span class="step-num">{% if s6 == 'done' %}✓{% else %}6{% endif %}</span><span class="step-label">계획 가능성 판단</span>
+      <span class="step-num">6</span><span class="step-label">계획 가능성 판단</span>
     </a>
   </nav>
   {% endif %}

@@ -106,7 +106,8 @@
         {% for m in exam.study_materials.all %}
         <div class="period-material-item">
           <label class="period-material-item-label">
-            <input type="checkbox" name="material_ids" value="{{ m.id }}">
+            <input type="checkbox" name="material_ids" value="{{ m.id }}"
+                   {% if m.material_type == 'pdf' and m.status == 'completed' and m.analysis_status == 'pending' %}checked{% endif %}>
             <span class="period-material-title">{{ m.title }}</span>
             <span class="period-material-status">
               추출 {{ m.get_status_display }} · 분석 {{ m.get_analysis_status_display }}
@@ -134,37 +135,33 @@
   {% endfor %}
 </div>
 {% endblock %}
+
 {% block exam_extra_js %}
 <script>
 (function () {
   document.querySelectorAll('.period-material-form').forEach(function (form) {
     form.addEventListener('submit', function (e) {
-      // 삭제 버튼(각 줄의 × 버튼)이나, 추출→분석 체이닝의 두 번째(분석) 제출은
-      // 그대로 보낸다. 여기서 가로채는 건 "선택 자료 추출 + 분석" 버튼 클릭뿐.
       var submitter = e.submitter;
       if (!submitter || submitter.classList.contains('period-material-delete-btn')) {
         return;
       }
       if (form.dataset.chaining === 'true' || form.dataset.processing === 'true') {
-        // 이미 처리 중인데 버튼을 또 눌러서 들어온 제출은 막는다 (연타 방지)
         e.preventDefault();
         return;
       }
 
       var checked = form.querySelectorAll('input[name="material_ids"]:checked');
       if (checked.length === 0) {
-        return; // 선택 없이 눌렀으면 그냥 서버로 보내서 "선택해주세요" 에러를 그대로 보여줌
+        return;
       }
 
       e.preventDefault();
       form.dataset.processing = 'true';
+      submitter.textContent = '추출 중입니다...';
       submitter.disabled = true;
 
       var formData = new FormData(form);
 
-      // 1) 추출을 먼저 백그라운드로 보내고, 성공한 자료가 하나라도 있으면
-      //    그 자료들만(success_ids) 분석으로 이어간다 - 일부 실패해도
-      //    성공한 나머지는 계속 진행되는 partial-success 정책에 맞춤.
       fetch(form.action, {
         method: 'POST',
         body: formData,
@@ -175,25 +172,40 @@
         }
         return response.json();
       }).then(function (data) {
-        if (!data.ok) {
-          throw new Error('extract had no successes');
+        if (data.fail_reasons && data.fail_reasons.length > 0) {
+          window.alert(
+            '다음 자료는 추출에 실패했습니다:\n\n' + data.fail_reasons.join('\n')
+          );
         }
-        // 2) 체크박스를 성공한 자료 기준으로 다시 맞춘 뒤, 같은 폼을
-        //    분석 URL로 실제 제출(페이지 이동)한다.
+
+        if (!data.ok) {
+          form.dataset.processing = 'false';
+          submitter.disabled = false;
+          submitter.textContent = '선택 자료 추출 + 분석';
+          window.location.reload();
+          return;
+        }
+
         var successIds = (data.success_ids || []).map(String);
         form.querySelectorAll('input[name="material_ids"]').forEach(function (cb) {
           cb.checked = successIds.indexOf(cb.value) !== -1;
         });
+        submitter.textContent = '분석 중입니다...';
         form.dataset.chaining = 'true';
         form.action = form.dataset.analyzeUrl;
         form.submit();
-      }).catch(function () {
-        window.location.reload();
+      }).catch(function (err) {
+        console.error(err);
+        window.alert('추출 요청 중 오류가 발생했습니다. 다시 시도해주세요.');
+        form.dataset.processing = 'false';
+        submitter.disabled = false;
+        submitter.textContent = '선택 자료 추출 + 분석';
       });
     });
   });
 })();
 </script>
 {% endblock %}
+
 {# available_times 요약은 아직 개수만 보여줌 — 더 자세한 요약(예: 채워진 날짜 비율)이
 필요하면 이주헌/장희원한테 view에서 요약값을 context로 내려달라고 요청하면 됨. #}

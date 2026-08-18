@@ -12,7 +12,7 @@
 {% block exam_content %}
 {% get_calendar_grid period.id as calendar_days %}
 
-<div class="avail-wrap" style="max-width:960px; margin:0 auto;">
+<div class="avail-wrap page-wrap" style="max-width:960px; margin:0 auto;">
   <div class="page-head">
     <div>
       <h1>공부 가능 시간 등록</h1>
@@ -58,7 +58,7 @@
           <div class="avail-weekday">토</div>
           <div class="avail-weekday">일</div>
 
-                    {% for day in calendar_days %}
+          {% for day in calendar_days %}
             {% if day.is_past %}
             <button type="button"
                     class="avail-day past-day" disabled
@@ -100,7 +100,7 @@
         <div class="avail-side-hint">분 단위로 입력</div>
 
         <button type="button"
-                class="btn btn-secondary avail-save-btn"
+                class="btn btn-primary avail-save-btn"
                 style="width:100%;"
                 id="side-panel-save">
           입력 반영
@@ -111,7 +111,7 @@
       </div>
     </div>
 
-    <button type="submit" class="btn btn-brand btn-lg avail-next-btn">
+    <button type="submit" class="btn btn-primary btn-lg avail-next-btn">
       다음
     </button>
   </form>

@@ -30,7 +30,7 @@
     {% elif material.status == 'failed' %}
     <span class="badge badge-bad">추출 실패</span>
     <div class="field-error" style="margin-top:8px;">
-      {{ material.error_message }}
+      {{ material.get_display_error_message }}
     </div>
     <form method="post" action="{% url 'exams:material_extract' material.id %}" style="margin-top:12px;">
       {% csrf_token %}

@@ -14,7 +14,7 @@
 
 {% block exam_content %}
 {% get_wizard_context period=exam_period as wiz %}
-<div class="feasibility-wrap">
+<div class="feasibility-wrap page-wrap">
   <div class="feasibility-header">
     <div class="page-title" style="margin-bottom:0;">
       계획이 가능한지 확인해볼게요
@@ -83,15 +83,15 @@
   </div>
 
   {% if not can_generate %}
-  <div class="form-error-box">
+  <div class="form-error-box" style="margin-top:18px;">
     {{ readiness_error|default:"가능시간을 늘리거나 학습 작업을 조정해주세요." }}
   </div>
   <div class="feasibility-action-row">
-    <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-ghost">
+    <a href="{{ available_time_edit_url }}?next={{ request.path|urlencode }}" class="btn btn-brand">
       가능시간 수정
     </a>
     {% if wiz.first_exam_id %}
-    <a href="{% url 'exams:task_review' wiz.first_exam_id %}" class="btn btn-ghost">
+    <a href="{% url 'exams:task_review' wiz.first_exam_id %}" class="btn btn-brand">
       학습작업 수정
     </a>
     {% endif %}
