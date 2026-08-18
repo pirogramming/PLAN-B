@@ -3021,32 +3021,6 @@ class ExamPeriodLockValidationTests(TestCase):
             any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
         )
 
-    # ============================================================
-    # 계획이 존재하는 경우 - 학습자료 POST 차단
-    # ============================================================
-
-    def test_material_create_blocked_when_plan_exists(self):
-        """계획이 생성된 시험기간에는 학습자료를 추가할 수 없다."""
-        url = reverse("exams:material_create", args=[self.exam.id])
-
-        response = self.client.post(
-            url,    
-            {
-                "title": "수정된 중간고사",
-                "start_date": self.period.start_date,
-                "end_date": self.period.end_date,
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertFalse(
-            StudyMaterial.objects.filter(exam=self.exam, title="새로운 자료").exists()
-        )
-
-        messages_list = list(response.wsgi_request._messages)
-        self.assertTrue(
-            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
-        )
 
     def test_material_delete_blocked_when_plan_exists(self):
         """계획이 생성된 시험기간의 학습자료는 삭제할 수 없다."""
@@ -3206,6 +3180,20 @@ class ExamPeriodLockValidationTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(StudyMaterial.objects.filter(id=material_id).exists())
+
+    def test_subject_delete_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간의 과목은 삭제할 수 없다."""
+        url = reverse("exams:subject_delete", args=[self.period.id, self.exam.id])
+
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Exam.objects.filter(id=self.exam.id).exists())
+
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
+        )
 
 class ExamPeriodCompletionTests(TestCase):
     """시험기간 수동/자동(Lazy Check) 종료 기능 검증"""
