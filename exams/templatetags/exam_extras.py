@@ -16,6 +16,7 @@ from django import template
 from django.utils import timezone
 
 from exams.models import Exam, AvailableTime, ExamPeriod
+from planner.models import DailyPlan
 
 register = template.Library()
 
@@ -77,6 +78,12 @@ def get_calendar_grid(period_id):
     date_to_minutes = {d: m for d, m in available_rows}
     today = timezone.localdate()
 
+    finalized_dates = set(
+        DailyPlan.objects.filter(
+            exam_period_id=period_id, finalized_at__isnull=False,
+        ).values_list('date', flat=True)
+    )
+
     days = []
     current = period.start_date
     while current <= period.end_date:
@@ -85,9 +92,22 @@ def get_calendar_grid(period_id):
             'weekday': current.isoweekday(),  # 1=월 ... 7=일
             'is_exam_day': current in exam_dates,
             'is_past': current < today,
+            'is_finalized': current in finalized_dates,
             'formset_index': date_to_index.get(current),
             'has_value': date_to_minutes.get(current, 0) > 0,
             'minutes': date_to_minutes.get(current, 0),
         })
         current += timedelta(days=1)
     return days
+_WIZARD_STEP_ORDER = ['period_form', 'subject_create', 'available_time', 'material', 'task_review', 'feasibility']
+
+
+@register.simple_tag
+def step_state(current_nav, step_name):
+    """사이드바 1~6단계: 지금 단계 기준으로 지나온 단계는 'done', 지금은 'on', 나머지는 ''."""
+    if current_nav == step_name:
+        return 'on'
+    try:
+        return 'done' if _WIZARD_STEP_ORDER.index(step_name) < _WIZARD_STEP_ORDER.index(current_nav) else ''
+    except ValueError:
+        return ''

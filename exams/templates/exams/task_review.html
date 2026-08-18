@@ -134,7 +134,13 @@
               <span class="task-time-pill num">
                 예상 {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
               </span>
+              {% if form.instance.source_pages %}
+              <span class="task-source-pages" title="이 작업의 근거가 된 PDF 페이지">
+                {{ form.instance.source_pages|join:", " }}페이지 참고
+              </span>
+              {% endif %}
             </div>
+            
             <button
               type="button"
               class="btn btn-secondary btn-sm btn-delete-task"
@@ -166,7 +172,7 @@
             type="submit"
             name="action"
             value="confirm"
-            class="btn btn-primary btn-lg task-primary-btn"
+            class="btn btn-brand btn-lg task-primary-btn"
           >
             모든 과목 저장하고 다음으로
           </button>
@@ -189,7 +195,7 @@
       <button type="button" class="btn btn-secondary" id="delete-cancel-btn">
         취소
       </button>
-      <button type="button" class="btn btn-primary" id="delete-confirm-btn">
+      <button type="button" class="btn btn-danger" id="delete-confirm-btn">
         확인
       </button>
     </div>

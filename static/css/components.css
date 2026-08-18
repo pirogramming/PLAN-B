@@ -58,6 +58,9 @@
 .badge::before{ content:""; width:7px; height:7px; border-radius:50%; }
 .badge.badge-possible{ background:var(--judge1-bg); color:var(--judge1); border:1px solid var(--judge1-line); }
 .badge.badge-possible::before{ background:var(--judge1); }
+/* badge-ok(확정됨)는 planner.css에 색만 정의돼 있고 점 표시(::before) 색이
+   없어서, 투명한 점이 자리만 차지해 글자가 오른쪽으로 쏠려 보였다 */
+.badge.badge-ok::before{ background:var(--judge1); }
 .badge.badge-risky{ background:var(--judge2-bg); color:var(--judge2); border:1px solid var(--judge2-line); }
 .badge.badge-risky::before{ background:var(--judge2); }
 .badge.badge-impossible{ background:var(--judge3-bg); color:var(--judge3); border:1px solid var(--judge3-line); }
@@ -458,6 +461,12 @@
   color: var(--neutral5);
   cursor: not-allowed;
 }
+.avail-day.finalized-day {
+  background: var(--brand1);
+  color: var(--brand4);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
 .avail-day.has-value::after {
   content: "";
   position: absolute;
@@ -683,6 +692,79 @@
 .period-link-btn {
   flex: 1;
   justify-content: center;
+  font-size: 12px;
+}
+
+/* 과목 카드 안 - 등록된 자료 목록 + 일괄 추출/분석 (period_detail.html) */
+.period-material-list {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--neutral4);
+}
+.period-material-heading {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--neutral7);
+  margin-bottom: 8px;
+}
+.period-material-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.period-material-item-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: var(--neutral2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.period-material-item-label input[type="checkbox"] {
+  flex: none;
+}
+.period-material-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--neutral10);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.period-material-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--neutral7);
+}
+.period-material-delete-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: none;
+  background: var(--neutral2);
+  color: var(--neutral7);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.period-material-delete-btn:hover {
+  background: var(--judge3-bg);
+  color: var(--judge3);
+}
+.period-material-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.period-material-actions .btn {
+  flex: 1;
   font-size: 12px;
 }
 
@@ -991,10 +1073,187 @@
 
   .avail-body { flex-direction: column; }
   .avail-side-col { position: static; }
+  .avail-cal-col,
+  .avail-side-col {
+    flex: none;
+    width: 100%;
+  }
 
   .task-review-body { flex-direction: column; }
   .task-nav-col { flex: 1 1 auto; }
 
   .task-select-row { flex-wrap: wrap; }
   .task-select-item { flex: 1 1 calc(50% - 5px); }
+}
+
+/* ===== FE1 위저드 반응형 (모바일 375px까지) ===== */
+@media (max-width: 767px) {
+  /* 사이드바(1~6단계) 모바일 - 라벨 있는 가로 스크롤 칩 대신,
+     번호(완료 시 체크)만 있는 얇은 고정 바로 바꾼다. 항목이 6개뿐이라
+     원 모양 6개는 스크롤 없이 한 화면에 다 들어간다. */
+  .app .side.side-wizard {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 60px;
+    padding: 0 12px;
+    overflow: visible;
+  }
+  /* "시험기간 홈" nav는 모바일 바에서는 자리 차지하지 않게 숨긴다 */
+  .side.side-wizard > nav:first-of-type {
+    display: none;
+  }
+  .side.side-wizard .nav-steps {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .side.side-wizard .nav-i.nav-step {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 50%;
+    justify-content: center;
+    align-items: center;
+    background: var(--neutral3);
+  }
+  .side.side-wizard .nav-step.on {
+    background: var(--neutral11);
+  }
+  .side.side-wizard .nav-step.done {
+    background: var(--brand1);
+  }
+  .side.side-wizard .nav-step.off {
+    opacity: .45;
+  }
+  .side.side-wizard .nav-step .step-num {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    color: inherit;
+    font-size: 14px;
+    font-weight: 800;
+  }
+  .side.side-wizard .nav-step.on .step-num {
+    color: var(--neutral1);
+  }
+  .side.side-wizard .nav-step.done .step-num {
+    color: var(--brand4);
+  }
+  .side.side-wizard .step-label {
+    display: none;
+  }
+
+  /* 사이드바가 하단에 고정되는 만큼, 그 뒤에 오는 본문 컨텐츠가
+     가려지지 않도록 여유 공간을 준다. */
+  .side.side-wizard ~ .main .content {
+    padding-bottom: 92px;
+  }
+
+  /* 화면 폭보다 넓은 요소가 하나라도 있으면 페이지 전체가 옆으로
+     밀려서 "왼쪽으로 쏠려 보이는" 문제가 생긴다. 각 위저드 페이지가
+     인라인 style="max-width:...px"로 폭을 제한하고 있는데, 모바일에서는
+     그 값이 화면보다 넓을 수 있어 강제로 100%까지 줄인다. */
+  .content {
+    overflow-x: hidden;
+  }
+  .content > div[style*="max-width"] {
+    max-width: 100% !important;
+  }
+
+  /* 2열 레이아웃(과목 등록 폼+리스트 등) 세로로 쌓기 - 쌓이면 각 칸이
+     컨테이너 전체 폭을 그대로 쓰기 때문에 두 블록 폭이 자동으로 같아진다 */
+  .two-col,
+  .subject-two-col {
+    flex-direction: column;
+  }
+
+  /* 계획 가능성 판단 - 헤더/통계 그리드 */
+  .feasibility-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .feasibility-header form,
+  .feasibility-header .btn {
+    width: 100%;
+  }
+  .feasibility-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    row-gap: 16px;
+  }
+  .feasibility-stat:nth-child(2n) {
+    border-right: none;
+  }
+  .feasibility-stat:nth-child(1),
+  .feasibility-stat:nth-child(2) {
+    border-bottom: 1px solid var(--neutral4);
+    padding-bottom: 14px;
+  }
+  .feasibility-action-row {
+    flex-direction: column;
+  }
+  .feasibility-subject-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .feasibility-subject-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  /* 학습 작업 확인 상단 - "+ 이 과목 자료 추가" / "+ 작업 추가하기"가
+     한 줄에 좁게 눌려서 글자가 깨지는 문제 - 세로로 쌓고 폭을 꽉 채움 */
+  .page-head .row {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .page-head .row .btn {
+    width: 100%;
+    white-space: normal;
+  }
+
+  /* 페이지 큰 타이틀 축소 (34px는 모바일에 너무 큼) */
+  .page-title {
+    font-size: 24px;
+  }
+
+  /* 학습 작업 카드 여백 축소 */
+  .task-item-card {
+    padding: 18px 16px;
+  }
+
+  /* 시험범위 등록 업로드 박스 높이 축소 */
+  .material-upload-box {
+    min-height: 180px;
+  }
+}
+
+/* 좁은 폰(375px 등) 추가 조정 */
+@media (max-width: 480px) {
+  .avail-cal-grid {
+    gap: 5px;
+  }
+  .avail-day {
+    height: 38px;
+    font-size: 11px;
+    padding: 4px;
+  }
+  .avail-weekday {
+    font-size: 10px;
+  }
+  .feasibility-stat-num {
+    font-size: 18px;
+  }
+  .segment {
+    flex-wrap: wrap;
+  }
+  .segment .opt {
+    flex: 1 1 calc(33.333% - 4px);
+  }
 }

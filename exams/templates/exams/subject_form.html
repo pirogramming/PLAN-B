@@ -30,7 +30,7 @@
   </div>
   {% endif %}
 
-  <div style="display:flex; gap:24px; align-items:flex-start;">
+  <div class="subject-two-col" style="display:flex; gap:24px; align-items:flex-start;">
     <div class="card card-body" style="flex:1; padding:32px 36px;">
       <form method="post" novalidate>
         {% csrf_token %}
@@ -97,7 +97,7 @@
   </div>
 
   <a href="{% url 'exams:available_time_update' period.id %}?next={% if period_exams %}{% url 'exams:material_create' period_exams.0.id %}{% endif %}"
-     class="btn btn-primary btn-lg"
+     class="btn btn-brand btn-lg"
      style="margin-top:20px; {% if not period_exams %}pointer-events:none; opacity:.5;{% endif %}">
     다음
   </a>

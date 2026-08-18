@@ -65,23 +65,18 @@
         {{ form.material_type }}
       </div>
 
-      {% if form.file.errors %}
-      <div class="form-error-box material-upload-error">
-        {{ form.file.errors|striptags }}
-      </div>
-      {% endif %}
-
       <div id="pdf-panel" class="material-upload-panel">
-        <label for="{{ form.file.id_for_label }}"
-               class="material-upload-box{% if form.file.errors %} error{% endif %}">
+        <label for="pdf-files-input" class="material-upload-box" id="pdf-upload-box">
           <div class="material-upload-icon">＋</div>
-          <div class="material-upload-text">
-            파일을 끌어다 놓거나 클릭해서 업로드
+          <div class="material-upload-text" id="pdf-upload-text">
+            파일을 끌어다 놓거나 클릭해서 업로드 (여러 개 선택 가능)
           </div>
         </label>
-        {{ form.file }}
+        <input type="file" name="files" id="pdf-files-input" multiple
+               accept="application/pdf" style="display:none;">
         <div class="material-upload-hint">
-          텍스트 추출이 가능한 PDF만 지원돼요 (최대 20MB)
+          텍스트 추출이 가능한 PDF만 지원돼요 · 파일당 최대 20MB,
+          한 번에 최대 5개, 전체 50MB까지 업로드할 수 있어요
         </div>
       </div>
 
@@ -94,9 +89,9 @@
         {% endif %}
       </div>
 
-      <button type="submit" class="btn btn-primary btn-lg material-submit-btn"
+      <button type="submit" class="btn btn-brand btn-lg material-submit-btn"
               style="width:100%;" id="analyze-submit-btn">
-        분석 시작
+        자료 업로드
       </button>
     </form>
   </div>
@@ -130,6 +125,8 @@
     typeInput.value = pdfValue;
   }
 
+  var submitBtn = document.getElementById('analyze-submit-btn');
+
   tabs.forEach(function (tab) {
     tab.addEventListener('click', function () {
       tabs.forEach(function (t) { t.classList.remove('active'); });
@@ -140,16 +137,28 @@
       if (typeInput) {
         typeInput.value = isPdf ? pdfValue : textValue;
       }
+      if (submitBtn) {
+        // PDF는 등록만 하고 period_detail로 이동 (분석은 나중에 따로 트리거),
+        // 텍스트는 등록 즉시 material_detail에서 자동으로 분석까지 진행되므로
+        // 실제 동작에 맞게 버튼 문구를 다르게 보여준다.
+        submitBtn.textContent = isPdf ? '자료 업로드' : '분석 시작';
+      }
     });
   });
 
-  var fileInput = document.getElementById('{{ form.file.id_for_label }}');
-  var uploadText = document.querySelector('.material-upload-text');
-  var uploadBox = document.querySelector('.material-upload-box');
+  var fileInput = document.getElementById('pdf-files-input');
+  var uploadText = document.getElementById('pdf-upload-text');
+  var uploadBox = document.getElementById('pdf-upload-box');
 
   function setFileName() {
-    if (fileInput.files[0] && uploadText) {
+    if (!fileInput.files.length || !uploadText) return;
+    if (fileInput.files.length === 1) {
       uploadText.textContent = fileInput.files[0].name;
+    } else {
+      var names = Array.prototype.map.call(fileInput.files, function (f) {
+        return f.name;
+      }).join(', ');
+      uploadText.textContent = fileInput.files.length + '개 파일 선택됨: ' + names;
     }
   }
 
