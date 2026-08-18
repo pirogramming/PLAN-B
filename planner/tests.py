@@ -113,7 +113,7 @@ class RoundUpToFiveTests(TestCase):
 class EstimateTaskMinutesTests(TestCase):
     def test_concept_normal_speed_one(self):
         min_m, max_m = estimate_task_minutes("concept", "normal", 1.0)
-        self.assertEqual((min_m, max_m), (20, 40))
+        self.assertEqual((min_m, max_m), (15, 30))
 
     def test_practice_hard_speed_one(self):
         min_m, max_m = estimate_task_minutes("practice", "hard", 1.0)
@@ -125,7 +125,7 @@ class EstimateTaskMinutesTests(TestCase):
 
     def test_concept_hard_with_speed_factor(self):
         min_m, max_m = estimate_task_minutes("concept", "hard", 1.1)
-        self.assertEqual((min_m, max_m), (30, 60))
+        self.assertEqual((min_m, max_m), (25, 45))
 
     def test_unknown_task_type_falls_back_to_custom(self):
         min_m, max_m = estimate_task_minutes("weird_type", "normal", 1.0)
@@ -133,7 +133,7 @@ class EstimateTaskMinutesTests(TestCase):
 
     def test_unknown_difficulty_falls_back_to_normal(self):
         min_m, max_m = estimate_task_minutes("concept", "weird_difficulty", 1.0)
-        self.assertEqual((min_m, max_m), (20, 40))
+        self.assertEqual((min_m, max_m), (15, 30))
 
     def test_speed_factor_below_one_makes_faster(self):
         min_m, max_m = estimate_task_minutes("practice", "normal", 0.9)
@@ -1276,13 +1276,13 @@ class FinalizeDailyPlanTests(TestCase):
         )
 
         occupied_task = self._make_task(exam, importance="high", depth="core", order=2)
-        future_plan = self._make_daily_plan(tomorrow, available_minutes=60, planned_minutes=30)
-        self._make_item(future_plan, occupied_task, planned_minutes=30)
+        future_plan = self._make_daily_plan(tomorrow, available_minutes=60, planned_minutes=40)
+        self._make_item(future_plan, occupied_task, planned_minutes=40)
 
         result = finalize_daily_plan(current_plan)
 
-        # 가용시간 60분 - 기존 작업 30분 = 30분만 남으므로,
-        # estimated_max 기준 40분짜리 미완료 작업은 들어갈 자리가 없어야 함
+        # 가용시간 60분 - 기존 작업 40분 = 20분만 남으므로,
+        # estimated_max 기준 30분짜리 미완료 작업은 들어갈 자리가 없어야 함
         self.assertIsNone(result["recovery_plans"]["maintain_volume"])
 
     # ── 13. 핵심 집중형이 유일한 작업까지 전부 제외하지 않는지 ──
@@ -4028,9 +4028,9 @@ class DashboardContextTests(TestCase):
         response = self._get_dashboard()
         overall = response.context["overall"]
 
-        # task_a(DONE)=0,0 + task_b(PARTIAL 50%)=10,20 + task_c(미착수)=20,40
-        self.assertEqual(overall["min_minutes"], 30)
-        self.assertEqual(overall["max_minutes"], 60)
+        # task_a(DONE)=0,0 + task_b(PARTIAL 50%)=10,15 + task_c(미착수)=15,30
+        self.assertEqual(overall["min_minutes"], 25)
+        self.assertEqual(overall["max_minutes"], 45)
 
     # ── 3. overall - 가용시간 및 판정 ────────────────
     def test_overall_available_minutes_and_status(self):
@@ -4049,9 +4049,9 @@ class DashboardContextTests(TestCase):
         self.assertEqual(len(summary), 1)
         subject = summary[0]
         self.assertEqual(subject["subject_name"], "테스트 과목")
-        # task_a(DONE)는 remaining 0이라 카운트에서 빠지고, task_b(20)+task_c(40)만 잡힘
+        # task_a(DONE)는 remaining 0이라 카운트에서 빠지고, task_b(15)+task_c(30)만 잡힘
         self.assertEqual(subject["remaining_task_count"], 2)
-        self.assertEqual(subject["remaining_minutes"], 60)
+        self.assertEqual(subject["remaining_minutes"], 45)
         self.assertEqual(subject["d_day"], 7)
 
     # ── 5. progress - 오늘 vs 전체가 다른 범위를 봐야 함 ──
