@@ -163,6 +163,30 @@ class RecoveryPlanItem(models.Model):
     )
     reason = models.TextField(null=True, blank=True)
     remaining_minutes = models.PositiveIntegerField(default=0)
+
+    source_daily_plan_item = models.ForeignKey(
+        'DailyPlanItem',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='recovery_source_items',
+        help_text=(
+            "이 복구 항목이 원래 있던 DailyPlanItem. "
+            "None이면 실패한 작업을 새로 배치하는 것이고, "
+            "값이 있으면 학습 순서 보존을 위해 기존에 배치돼 있던 "
+            "미래 작업을 이동시키는 것이다."
+        ),
+    )
+
+    is_carry_along = models.BooleanField(
+        default=False,
+        help_text=(
+            "학습 순서 보존을 위해 함께 재배치/제외되는 후속 작업이면 True. "
+            "source_daily_plan_item은 원본이 삭제되면 SET_NULL로 None이 되므로, "
+            "carry-along 여부 자체는 이 필드로 별도 보존한다 (FK 값만으로는 "
+            "'원래 실패 작업'과 '원본이 사라진 carry-along'을 구분할 수 없다)."
+        ),
+    )
     
     def __str__(self):
         return f'{self.recovery_plan} - {self.study_task} ({self.action_type})'

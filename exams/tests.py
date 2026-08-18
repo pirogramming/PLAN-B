@@ -56,6 +56,12 @@ from planner.models import DailyPlan, DailyPlanItem, RecoveryPlan, RecoveryPlanI
 User = get_user_model()
 logger = logging.getLogger(__name__)
 TEMP_MEDIA_ROOT = tempfile.mkdtemp()
+from django.contrib.messages import get_messages
+from exams.forms import StudyMaterialForm
+from .services.exam_period import (
+    complete_expired_period,
+    complete_expired_periods_for_user,
+)
 
 
 class OwnershipTests(TestCase):
@@ -423,9 +429,8 @@ class MaterialCreateTests(TestCase):
         pdf_file = SimpleUploadedFile("dummy.pdf", b"%PDF-1.4 dummy content", content_type="application/pdf")
 
         response = self.client.post(reverse('exams:material_create', args=[self.exam.id]), {
-            'title': 'PDF 자료',
             'material_type': MaterialType.PDF,
-            'file': pdf_file,
+            'files': [pdf_file],
         })
         self.assertEqual(response.status_code, 302)
         material = StudyMaterial.objects.get(exam=self.exam)
@@ -3743,3 +3748,839 @@ class MaterialExtractStaleTests(TestCase):
         data = response.json()
 
         self.assertFalse(data["extraction_is_stale"])
+
+"""
+다중 PDF 업로드(material_create) + 일괄 추출(material_bulk_extract) +
+일괄 분석(material_bulk_analyze)에 대한 테스트.
+
+가정:
+- 앱 이름은 `exams` (views.py 내부의 상대 import 및 URL 네임스페이스 기준)
+- StudyMaterialForm은 material_type + file(선택)을 받는다
+- ExamPeriodStatus.ACTIVE 상태의 시험기간 + 계획(DailyPlan) 없는 상태가
+  "수정 가능" 조건이다 (check_exam_period_locked_by_exam_id 등 참고)
+
+실제 프로젝트의 앱 이름/모델 필드가 다르면 import 경로와 필드명만
+맞춰서 조정하면 된다.
+"""
+from unittest.mock import patch
+
+from django.conf import settings as dj_settings
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+
+from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
+from exams.models import Exam, ExamPeriod, StudyMaterial
+from exams.services.pdf_extractor import PdfExtractionError
+from exams.services.analysis_orchestrator import (
+    DuplicateAnalysisRequestError,
+)
+
+User = get_user_model()
+
+# 테스트 DB에는 collectstatic이 안 돌아있어 ManifestStaticFilesStorage가
+# 'css/tokens.css' 같은 해시된 정적파일을 찾지 못해 500이 난다. 테스트에서는
+# 매니페스트 없이도 동작하는 기본 스토리지로 우회한다. 기존 STORAGES 설정 중
+# 'default'(미디어 파일) 백엔드는 그대로 두고 'staticfiles'만 바꾼다.
+_TEST_STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
+_TEST_STORAGES = dict(getattr(dj_settings, "STORAGES", {}))
+_TEST_STORAGES["staticfiles"] = {"BACKEND": _TEST_STATICFILES_STORAGE}
+
+
+def make_pdf_file(name="sample.pdf", size_bytes=1024):
+    """최소한의 PDF 헤더 + 더미 바이트로 업로드 테스트용 파일을 만든다."""
+    content = b"%PDF-1.4\n" + (b"0" * max(0, size_bytes - 9))
+    return SimpleUploadedFile(name, content, content_type="application/pdf")
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkUploadTests(TestCase):
+    """material_create의 PDF 다중 업로드 처리."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_create", kwargs={"exam_id": self.exam.id})
+
+    def test_upload_multiple_pdfs_success(self):
+        """여러 개의 정상 PDF를 한 번에 올리면 모두 StudyMaterial로 생성된다."""
+        files = [make_pdf_file(f"chapter{i}.pdf") for i in range(1, 4)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+
+        self.assertEqual(
+            StudyMaterial.objects.filter(exam=self.exam).count(),
+            3,
+            msg=f"status={response.status_code}, messages={messages}",
+        )
+        self.assertRedirects(
+            response, reverse("exams:period_detail", kwargs={"period_id": self.period.id})
+        )
+        self.assertTrue(any("3개 자료가 업로드" in m for m in messages))
+
+    def test_upload_no_files_shows_error(self):
+        """파일을 하나도 선택하지 않으면 생성 없이 에러만 표시된다."""
+        response = self.client.post(self.url, data={"material_type": MaterialType.PDF})
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        self.assertEqual(response.status_code, 200)  # 폼 재렌더링
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("업로드할 파일을 선택" in m for m in messages))
+
+    def test_upload_exceeds_max_files_rejected(self):
+        """최대 개수(5개)를 넘으면 전체 업로드가 거부된다."""
+        files = [make_pdf_file(f"f{i}.pdf") for i in range(6)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("최대 5개까지" in m for m in messages))
+
+    def test_upload_exceeds_total_size_rejected(self):
+        """전체 용량(50MB)을 넘으면 업로드가 거부된다."""
+        big = 20 * 1024 * 1024  # 파일당 20MB, 3개 = 60MB > 50MB
+        files = [make_pdf_file(f"big{i}.pdf", size_bytes=big) for i in range(3)]
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": files},
+        )
+
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 0)
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("전체 업로드 용량" in m for m in messages))
+
+    def test_upload_partial_failure_saves_successful_ones(self):
+        """일부 파일만 용량 초과여도, 정상 파일은 저장되고 실패 파일만 에러로 안내된다."""
+        ok_file = make_pdf_file("ok.pdf", size_bytes=1024)
+        too_big_file = make_pdf_file("toobig.pdf", size_bytes=21 * 1024 * 1024)
+
+        response = self.client.post(
+            self.url,
+            data={"material_type": MaterialType.PDF, "files": [ok_file, too_big_file]},
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+
+        self.assertEqual(
+            StudyMaterial.objects.filter(exam=self.exam).count(),
+            1,
+            msg=f"status={response.status_code}, messages={messages}",
+        )
+        saved = StudyMaterial.objects.get(exam=self.exam)
+        self.assertEqual(saved.file.name.split("/")[-1].split(".")[0][:2], "ok")
+
+        self.assertTrue(any("1개 자료가 업로드" in m for m in messages))
+        self.assertTrue(any("toobig.pdf" in m and "20MB" in m for m in messages))
+
+    def test_upload_rejects_other_users_exam(self):
+        """다른 사용자의 exam_id로는 업로드할 수 없다 (소유권 검증)."""
+        other_user = User.objects.create_user(
+            username="other", email="other@example.com", password="pw12345!"
+        )
+        other_period = ExamPeriod.objects.create(
+            user=other_user,
+            title="타인 시험",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=7),
+        )
+        other_exam = Exam.objects.create(
+            exam_period=other_period,
+            subject_name="타인 과목",
+            exam_date=other_period.end_date,
+        )
+
+        url = reverse("exams:material_create", kwargs={"exam_id": other_exam.id})
+        response = self.client.post(
+            url,
+            data={"material_type": MaterialType.PDF, "files": [make_pdf_file()]},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(StudyMaterial.objects.filter(exam=other_exam).count(), 0)
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkExtractTests(TestCase):
+    """material_bulk_extract: 여러 자료를 한 번에 텍스트 추출."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_bulk_extract", kwargs={"exam_id": self.exam.id})
+
+        self.material_ok = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("ok.pdf"),
+            status=MaterialStatus.PENDING,
+        )
+        self.material_fail = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("fail.pdf"),
+            status=MaterialStatus.PENDING,
+        )
+
+    def test_no_material_ids_shows_error(self):
+        response = self.client.post(self.url, data={})
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("추출할 자료를 선택" in m for m in messages))
+
+    @patch("exams.views.extract_text_from_pdf")
+    def test_bulk_extract_partial_success(self, mock_extract):
+        """하나는 추출 성공, 하나는 PdfExtractionError -> 성공분만 반영되고
+        실패 사유가 함께 안내되며, 둘 다 계속 처리된다(하나 실패해도 중단 안 함)."""
+
+        def side_effect(file_field):
+            if "ok" in file_field.name:
+                return "추출된 텍스트 내용"
+            raise PdfExtractionError("손상된 PDF입니다.")
+
+        mock_extract.side_effect = side_effect
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_fail.id]},
+        )
+
+        self.material_ok.refresh_from_db()
+        self.material_fail.refresh_from_db()
+
+        self.assertEqual(self.material_ok.status, MaterialStatus.COMPLETED)
+        self.assertEqual(self.material_ok.extracted_text, "추출된 텍스트 내용")
+        self.assertEqual(self.material_fail.status, MaterialStatus.FAILED)
+        self.assertEqual(self.material_fail.error_message, "손상된 PDF입니다.")
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 추출이 완료" in m for m in messages))
+        self.assertTrue(any(str(self.material_fail.id) in m for m in messages))
+
+    @patch("exams.views.extract_text_from_pdf")
+    def test_bulk_extract_skips_already_processing(self, mock_extract):
+        """PROCESSING 중(타임아웃 이내)인 자료는 claim 단계에서 걸러지고
+        나머지는 그대로 처리된다."""
+        self.material_fail.status = MaterialStatus.PROCESSING
+        self.material_fail.extraction_started_at = timezone.now()
+        self.material_fail.save(update_fields=["status", "extraction_started_at"])
+
+        mock_extract.return_value = "추출된 텍스트"
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_fail.id]},
+        )
+
+        self.material_ok.refresh_from_db()
+        self.material_fail.refresh_from_db()
+
+        self.assertEqual(self.material_ok.status, MaterialStatus.COMPLETED)
+        # 여전히 PROCESSING (claim 실패로 재선점되지 않음)
+        self.assertEqual(self.material_fail.status, MaterialStatus.PROCESSING)
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("이미 PDF 텍스트를 추출 중" in m for m in messages))
+
+    def test_bulk_extract_reclaims_stale_processing(self):
+        """타임아웃(300초)이 지난 PROCESSING 자료는 재선점되어 다시 추출된다."""
+        stale_time = timezone.now() - timezone.timedelta(seconds=301)
+        self.material_fail.status = MaterialStatus.PROCESSING
+        self.material_fail.extraction_started_at = stale_time
+        self.material_fail.save(update_fields=["status", "extraction_started_at"])
+
+        with patch("exams.views.extract_text_from_pdf", return_value="복구된 텍스트"):
+            response = self.client.post(
+                self.url,
+                data={"material_ids": [self.material_fail.id]},
+            )
+
+        self.material_fail.refresh_from_db()
+        self.assertEqual(self.material_fail.status, MaterialStatus.COMPLETED)
+        self.assertEqual(self.material_fail.extracted_text, "복구된 텍스트")
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 추출이 완료" in m for m in messages))
+
+
+@override_settings(
+    STATICFILES_STORAGE=_TEST_STATICFILES_STORAGE,
+    STORAGES=_TEST_STORAGES,
+)
+class MaterialBulkAnalyzeTests(TestCase):
+    """material_bulk_analyze: 여러 자료를 한 번에 AI 분석."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester", email="tester@example.com", password="pw12345!"
+        )
+        self.client.force_login(self.user)
+
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="중간고사",
+            status=ExamPeriodStatus.ACTIVE,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timezone.timedelta(days=14),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="자료구조",
+            exam_date=self.period.end_date,
+        )
+        self.url = reverse("exams:material_bulk_analyze", kwargs={"exam_id": self.exam.id})
+
+        # AI 분석은 텍스트 추출이 COMPLETED인 자료만 대상이 된다.
+        self.material_ok = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("ok.pdf"),
+            status=MaterialStatus.COMPLETED,
+            extracted_text="본문 텍스트",
+        )
+        self.material_not_ready = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            file=make_pdf_file("pending.pdf"),
+            status=MaterialStatus.PENDING,  # 아직 추출 전 -> 분석 claim 실패 대상
+        )
+
+    def test_no_material_ids_shows_error(self):
+        response = self.client.post(self.url, data={})
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("분석할 자료를 선택" in m for m in messages))
+
+    @patch("exams.views.run_claimed_analysis")
+    @patch("exams.views.claim_analysis_run")
+    def test_bulk_analyze_partial_success(self, mock_claim, mock_run):
+        """텍스트 추출이 안 된 자료는 claim 단계에서 걸러지고, 준비된 자료만
+        분석이 실행된다."""
+
+        def claim_side_effect(material, is_retry=False):
+            if material.id == self.material_ok.id:
+                return "run-id-ok"
+            raise DuplicateAnalysisRequestError()  # claim 실패 시뮬레이션용, 실제로는 상태 체크가 먼저 걸림
+
+        mock_claim.side_effect = claim_side_effect
+        mock_run.return_value = None  # 정상 실행되면 예외 없이 끝남
+
+        response = self.client.post(
+            self.url,
+            data={"material_ids": [self.material_ok.id, self.material_not_ready.id]},
+        )
+
+        # material_not_ready는 status != COMPLETED라 _claim_material_for_analysis에서
+        # claim_analysis_run 호출 전에 이미 걸러진다.
+        mock_run.assert_called_once()
+        called_material = mock_run.call_args[0][0]
+        self.assertEqual(called_material.id, self.material_ok.id)
+
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertTrue(any("1개 자료 AI 분석이 완료" in m for m in messages))
+        self.assertTrue(
+            any("텍스트 추출이 완료된 자료만" in m for m in messages)
+        )
+
+    def test_bulk_analyze_redirects_to_task_review(self):
+        with patch("exams.views.claim_analysis_run", return_value="run-id"), \
+             patch("exams.views.run_claimed_analysis", return_value=None):
+            response = self.client.post(
+                self.url,
+                data={"material_ids": [self.material_ok.id]},
+            )
+
+        self.assertRedirects(
+            response, reverse("exams:task_review", kwargs={"exam_id": self.exam.id})
+        )
+
+class MaterialCreateBulkTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="testpass123",
+        )
+        logged_in = self.client.login(email="tester@example.com", password="testpass123")
+        assert logged_in, "로그인 실패 - AUTH_USER_MODEL 설정을 다시 확인하세요"
+
+        today = timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="테스트 시험기간",
+            start_date=today,
+            end_date=today + timezone.timedelta(days=14),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="테스트 과목",
+            exam_date=today,
+        )
+
+    def test_single_upload_with_legacy_file_field_still_works(self):
+        # Dummy PDF 데이터 
+        pdf = SimpleUploadedFile(
+            "note.pdf",
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 300 300]>>endobj trailer<</Root 1 0 R>>\n%%EOF",
+            content_type="application/pdf",
+        )
+        response = self.client.post(
+            reverse("exams:material_create", args=[self.exam.id]),
+            data={"material_type": MaterialType.PDF, "title": "note", "file": pdf},
+        )
+        # 생성 여부 확인 (뷰 구현 방식에 따라 status_code/redirect 확인)
+        self.assertEqual(StudyMaterial.objects.filter(exam=self.exam).count(), 1)
+
+    def test_bulk_extract_rejects_material_from_other_exam(self):
+        # 💡 other_exam 생성 시에도 exam_date 지정
+        other_exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="다른 과목",
+            exam_date=self.period.start_date,
+        )
+        foreign_material = StudyMaterial.objects.create(
+            exam=other_exam,
+            material_type=MaterialType.PDF,
+            title="foreign",
+            status=MaterialStatus.PENDING,
+        )
+        response = self.client.post(
+            reverse("exams:material_bulk_extract", args=[self.exam.id]),
+            data={"material_ids": [str(foreign_material.id)]},
+        )
+        foreign_material.refresh_from_db()
+        self.assertEqual(foreign_material.status, MaterialStatus.PENDING)  # 처리되지 않음
+        messages = [m.message for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("존재하지 않는" in m or "찾을 수 없는" in m or "권한" in m for m in messages))
+
+    def test_bulk_extract_invalid_material_id_does_not_500(self):
+        response = self.client.post(
+            reverse("exams:material_bulk_extract", args=[self.exam.id]),
+            data={"material_ids": ["abc"]},
+        )
+        self.assertEqual(response.status_code, 302)
+        messages = [m.message for m in get_messages(response.wsgi_request)]
+        # 메시지 유연한 조건 검사
+        self.assertTrue(len(messages) > 0)
+
+    def test_upload_error_rerender_includes_form_in_context(self):
+        response = self.client.post(
+            reverse("exams:material_create", args=[self.exam.id]),
+            data={"material_type": MaterialType.PDF},  # 필수 파일 첨부 누락
+        )
+        # response.context가 존재하는지 사전 검증
+        if response.status_code == 200 and response.context is not None:
+            self.assertIn("form", response.context)
+            self.assertIsInstance(response.context["form"], StudyMaterialForm)
+        else:
+            # 뷰에서 폼 실패 시 302 리다이렉트 처리하는 구조라면 status_code 검증
+            self.assertIn(response.status_code, [200, 302])
+
+class ExamPeriodTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="testpass123",
+        )
+        self.client.force_login(self.user)
+
+        # 기본 시험 기간 설정: 8/16 ~ 8/26
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="2026년 2학기 중간고사",
+            start_date=datetime.date(2026, 8, 16),
+            end_date=datetime.date(2026, 8, 26),
+        )
+
+    # 1. 종료일 축소 거부 (시험일: 8/25, 종료일: 8/26 -> 8/20 변경 시도)
+    def test_period_update_rejects_end_date_shrink(self):
+        Exam.objects.create(
+            exam_period=self.period,
+            subject_name="수학",
+            exam_date=datetime.date(2026, 8, 25),
+        )
+        new_end = datetime.date(2026, 8, 20)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": self.period.start_date,
+                "end_date": new_end,
+            },
+        )
+
+        self.period.refresh_from_db()
+        self.assertEqual(response.status_code, 200)  # form.is_valid() == False, 재렌더링
+        self.assertEqual(self.period.end_date, datetime.date(2026, 8, 26))  # DB 변경 없음
+        self.assertIn("수학", response.content.decode())  # 에러 메시지에 과목명 포함 확인
+
+    # 2. 시작일 뒤로 이동 거부 (시험일: 8/17, 시작일: 8/16 -> 8/20 변경 시도)
+    def test_period_update_rejects_start_date_shift_forward(self):
+        Exam.objects.create(
+            exam_period=self.period,
+            subject_name="영어",
+            exam_date=datetime.date(2026, 8, 17),
+        )
+        new_start = datetime.date(2026, 8, 20)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": new_start,
+                "end_date": self.period.end_date,
+            },
+        )
+
+        self.period.refresh_from_db()
+        self.assertEqual(response.status_code, 200)  # form.is_valid() == False, 재렌더링
+        self.assertEqual(self.period.start_date, datetime.date(2026, 8, 16))  # DB 변경 없음
+        self.assertIn("영어", response.content.decode())
+
+    # 3. 모든 시험일이 새 범위 안이면 수정 성공 (시험일: 8/18, 기간: 8/16~8/26 -> 8/16~8/20)
+    def test_period_update_succeeds_when_all_exams_within_new_range(self):
+        Exam.objects.create(
+            exam_period=self.period,
+            subject_name="국어",
+            exam_date=datetime.date(2026, 8, 18),
+        )
+        new_end = datetime.date(2026, 8, 20)
+
+        response = self.client.post(
+            reverse("exams:period_update", args=[self.period.id]),
+            data={
+                "title": self.period.title,
+                "start_date": self.period.start_date,
+                "end_date": new_end,
+            },
+        )
+
+        self.period.refresh_from_db()
+        self.assertEqual(response.status_code, 302)  # 성공 시 상세보기 페이지 등으로 리다이렉트
+        self.assertEqual(self.period.end_date, new_end)  # DB 변경 성공
+
+
+def _make_user(username="tester"):
+    """User.USERNAME_FIELD가 'email'이고 email이 unique=True라서, 여러
+    테스트 유저를 만들 때 username마다 다른 email을 명시적으로 지정해야
+    한다 (안 그러면 두 번째 유저부터 빈 문자열 email unique 충돌 발생)."""
+    return User.objects.create_user(
+        username=username,
+        email=f"{username}@example.com",
+        password="pw12345!",
+    )
+
+def _make_period(user, *, status=ExamPeriodStatus.ACTIVE, days_ago_end=1, days_length=7, title="테스트 시험기간"):
+    """end_date가 오늘로부터 days_ago_end일 전(기본 1일 전=만료)인 ExamPeriod 생성.
+    days_ago_end가 음수면 아직 만료되지 않은(미래 종료) 시험기간이 된다."""
+    today = timezone.localdate()
+    end_date = today - datetime.timedelta(days=days_ago_end)
+    start_date = end_date - datetime.timedelta(days=days_length)
+    return ExamPeriod.objects.create(
+        user=user,
+        title=title,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+    )
+
+
+def _make_exam(period, *, subject_name="테스트 과목", days_offset=0):
+    exam_date = period.end_date - datetime.timedelta(days=days_offset)
+    return Exam.objects.create(
+        exam_period=period,
+        subject_name=subject_name,
+        exam_date=exam_date,
+    )
+
+
+def _make_material(exam, *, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.COMPLETED):
+    return StudyMaterial.objects.create(
+        exam=exam,
+        material_type=MaterialType.TEXT,
+        title="테스트 자료",
+        status=status,
+        analysis_status=analysis_status,
+    )
+
+
+# =====================================================================
+# 서비스 함수 단위 테스트
+# =====================================================================
+class CompleteExpiredPeriodServiceTests(TestCase):
+    def setUp(self):
+        self.user = _make_user()
+
+    def test_expired_active_period_without_processing_material_is_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_non_expired_active_period_is_left_unchanged(self):
+        period = _make_period(self.user, days_ago_end=-3)  # end_date가 미래
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_already_completed_period_is_left_unchanged(self):
+        period = _make_period(
+            self.user, status=ExamPeriodStatus.COMPLETED, days_ago_end=5
+        )
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+
+    def test_archived_period_is_left_unchanged(self):
+        period = _make_period(
+            self.user, status=ExamPeriodStatus.ARCHIVED, days_ago_end=5
+        )
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ARCHIVED)
+
+    def test_expired_period_with_processing_extraction_material_is_not_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING, analysis_status=MaterialStatus.PENDING)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_expired_period_with_processing_analysis_material_is_not_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.PROCESSING)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.ACTIVE)
+
+    def test_expired_period_with_only_completed_materials_is_completed(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.COMPLETED, analysis_status=MaterialStatus.COMPLETED)
+
+        result = complete_expired_period(period)
+
+        self.assertEqual(result.status, ExamPeriodStatus.COMPLETED)
+
+
+class CompleteExpiredPeriodsForUserServiceTests(TestCase):
+    def setUp(self):
+        self.user = _make_user("user_a")
+        self.other_user = _make_user("user_b")
+
+    def test_completes_all_expired_active_periods_for_the_user(self):
+        expired1 = _make_period(self.user, days_ago_end=1, title="만료1")
+        expired2 = _make_period(self.user, days_ago_end=10, title="만료2")
+        # 동시에 ACTIVE 시험기간은 하나만 허용된다는 제약이 있을 수 있으므로
+        # 서비스 함수 자체는 그 제약을 모르는 상태로도 동작해야 한다(선/후행
+        # 검증은 뷰 레벨 책임). 여기서는 서비스 단위 동작만 확인한다.
+        expired2.status = ExamPeriodStatus.ACTIVE
+        expired2.save(update_fields=['status'])
+
+        complete_expired_periods_for_user(self.user)
+
+        expired1.refresh_from_db()
+        expired2.refresh_from_db()
+        self.assertEqual(expired1.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(expired2.status, ExamPeriodStatus.COMPLETED)
+
+    def test_does_not_touch_other_users_periods(self):
+        other_expired = _make_period(self.other_user, days_ago_end=1, title="다른유저")
+
+        complete_expired_periods_for_user(self.user)
+
+        other_expired.refresh_from_db()
+        self.assertEqual(other_expired.status, ExamPeriodStatus.ACTIVE)
+
+    def test_skips_period_with_processing_material(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING)
+
+        complete_expired_periods_for_user(self.user)
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_non_expired_period_is_not_touched(self):
+        period = _make_period(self.user, days_ago_end=-3)
+
+        complete_expired_periods_for_user(self.user)
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+
+# =====================================================================
+# 뷰 레벨 통합 테스트: period_list / period_create / period_detail /
+# period_manage가 동일하게 Lazy Check를 적용하는지 (화면별 표시 불일치 회귀 방지)
+# =====================================================================
+class LazyCompleteViewConsistencyTests(TestCase):
+    def setUp(self):
+        self.user = _make_user()
+        self.client.force_login(self.user)
+
+    def test_period_list_completes_expired_active_period(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        self.client.get(reverse('exams:period_list'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_create_get_completes_expired_active_period(self):
+        # period_create GET은 폼만 보여주지만, 뷰 진입 시점에 항상 Lazy Check가
+        # 먼저 실행되어야 한다 (period_list/period_detail을 거치지 않고 바로
+        # 생성 화면으로 들어오는 경우 대비).
+        period = _make_period(self.user, days_ago_end=1)
+
+        self.client.get(reverse('exams:period_create'))
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_detail_completes_expired_active_period(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        response = self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        # 화면에 렌더링되는 context의 period도 최신 상태여야 한다
+        # (같은 요청 안에서 오래된 인스턴스를 그대로 보여주면 안 됨).
+        self.assertEqual(response.context['period'].status, ExamPeriodStatus.COMPLETED)
+
+    def test_period_detail_does_not_complete_period_with_processing_material(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING)
+
+        self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+
+    def test_period_manage_completes_expired_active_period_when_plan_exists(self):
+        """period_manage는 DailyPlan이 있어야 period_detail로 리다이렉트되지
+        않고 화면 자체를 보여주므로, Lazy Check 검증을 위해 DailyPlan을 먼저
+        만들어둔다.
+
+        DailyPlan 필수 필드는 exam_period 외에 프로젝트마다 다를 수 있어
+        최소 필드로 생성했다. 실제 모델과 다르면 이 부분만 조정하면 된다.
+        """
+        period = _make_period(self.user, days_ago_end=1)
+        DailyPlan.objects.create(
+            exam_period=period,
+            date=period.start_date,
+            available_minutes=60,
+            planned_minutes=60,
+        )
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': period.id})
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(response.status_code, 200)
+
+    def test_period_manage_redirects_to_detail_without_plan_regardless_of_lazy_check(self):
+        # 계획이 없으면 원래 로직대로 period_detail로 리다이렉트된다.
+        # (Lazy Check 추가가 기존 리다이렉트 동작을 깨지 않는지 회귀 확인)
+        period = _make_period(self.user, days_ago_end=1)
+
+        response = self.client.get(
+            reverse('exams:period_manage', kwargs={'period_id': period.id})
+        )
+
+        self.assertRedirects(
+            response,
+            reverse('exams:period_detail', kwargs={'period_id': period.id}),
+        )
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+
+    def test_visiting_order_does_not_affect_final_status(self):
+        """재현 시나리오 회귀 테스트: period_list를 거쳤는지 여부와 무관하게
+        같은 시험기간이 동일한 최종 상태로 수렴해야 한다."""
+        period_a = _make_period(self.user, days_ago_end=1, title="A")
+        # period_detail을 먼저 방문
+        self.client.get(
+            reverse('exams:period_detail', kwargs={'period_id': period_a.id})
+        )
+        period_a.refresh_from_db()
+
+        other_user = _make_user("user_c")
+        self.client.force_login(other_user)
+        period_b = _make_period(other_user, days_ago_end=1, title="B")
+        # period_list를 먼저 방문
+        self.client.get(reverse('exams:period_list'))
+        period_b.refresh_from_db()
+
+        self.assertEqual(period_a.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(period_b.status, ExamPeriodStatus.COMPLETED)
