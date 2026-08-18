@@ -62,6 +62,12 @@
         {% for form in formset %}
         <div class="card card-body task-item-card">
           {{ form.id }}
+          <input
+            type="hidden"
+            name="{{ form.unit_name.html_name }}"
+            id="{{ form.unit_name.id_for_label }}"
+            value="{{ form.instance.unit_name|default:'' }}"
+          >
 
           <div class="task-item-top">
             <div class="task-unit-label">
@@ -71,16 +77,6 @@
             <span class="badge badge-ok">확정됨</span>
             {% endif %}
           </div>
-
-          {# 단원명: 읽기 전용 — 값은 그대로 formset에 전송되지만 수정은 못 하게 처리 #}
-          <input
-            type="text"
-            name="{{ form.unit_name.html_name }}"
-            id="{{ form.unit_name.id_for_label }}"
-            value="{{ form.instance.unit_name|default:'' }}"
-            class="form-control task-readonly-input"
-            readonly
-          >
 
           <div class="task-field-group">
             <label class="form-label">작업명</label>
@@ -92,38 +88,50 @@
             {% endif %}
           </div>
 
-          <div class="task-select-row">
-            <div class="task-select-item">
-              <label class="form-label">작업 유형</label>
-              {{ form.task_type }}
-            </div>
-            <div class="task-select-item">
-              <label class="form-label">중요도</label>
-              {{ form.importance }}
-            </div>
-            <div class="task-select-item">
-              <label class="form-label">깊이</label>
-              {{ form.depth }}
-            </div>
-            <div class="task-select-item">
-              <label class="form-label">난이도</label>
-              {{ form.difficulty }}
-            </div>
+          <div class="task-summary-row">
+            <span class="task-time-pill num">
+              예상 {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
+            </span>
+            {% if form.instance.source_pages %}
+            <span class="task-source-pages" title="이 작업의 근거가 된 PDF 페이지">
+              {{ form.instance.source_pages|join:", " }}페이지 참고
+            </span>
+            {% endif %}
+            <button type="button" class="task-toggle-btn">
+              <span class="task-toggle-label">자세히 보기</span>
+              <span class="task-toggle-chevron">▾</span>
+            </button>
           </div>
 
-          <div class="task-item-footer">
-            <div class="task-footer-left">
-              <span class="task-time-pill num">
-                예상 {{ form.instance.estimated_min_minutes }}~{{ form.instance.estimated_max_minutes }}분
-              </span>
+          <div class="task-detail-panel">
+            <div class="task-select-row">
+              <div class="task-select-item">
+                <label class="form-label">작업 유형</label>
+                {{ form.task_type }}
+              </div>
+              <div class="task-select-item">
+                <label class="form-label">중요도</label>
+                {{ form.importance }}
+              </div>
+              <div class="task-select-item">
+                <label class="form-label">깊이</label>
+                {{ form.depth }}
+              </div>
+              <div class="task-select-item">
+                <label class="form-label">난이도</label>
+                {{ form.difficulty }}
+              </div>
             </div>
-            <button
-              type="button"
-              class="btn btn-danger btn-sm btn-delete-task"
-              data-task-label="{{ form.instance.title }}"
-            >
-              삭제
-            </button>
+
+            <div class="task-item-footer">
+              <button
+                type="button"
+                class="btn btn-danger btn-sm btn-delete-task"
+                data-task-label="{{ form.instance.title }}"
+              >
+                삭제
+              </button>
+            </div>
           </div>
 
           {% if form.DELETE %}
@@ -208,6 +216,14 @@
     }
     pendingCard.style.display = 'none';
     modal.classList.remove('open');
+  });
+
+  document.querySelectorAll('.task-toggle-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var card = btn.closest('.task-item-card');
+      var expanded = card.classList.toggle('expanded');
+      btn.querySelector('.task-toggle-label').textContent = expanded ? '접기' : '자세히 보기';
+    });
   });
 })();
 </script>
