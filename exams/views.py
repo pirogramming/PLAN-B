@@ -52,6 +52,7 @@ from .services.exam_period import (
     complete_expired_period,
     complete_expired_periods_for_user,
     has_processing_material,
+    is_expired,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def check_exam_period_locked_by_period_id(view_func):
                 # 막을 수 있다. 이미 같은 트랜잭션에서 이 row를 잠근
                 # 상태이므로 재잠금 비용은 없다.
                 period = complete_expired_period(period)
-                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                     messages.error(request, "종료된 시험기간은 수정할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
                 if DailyPlan.objects.filter(exam_period=period).exists():
@@ -124,7 +125,7 @@ def check_exam_period_locked_by_exam_id(view_func):
                 )
                 period = ExamPeriod.objects.select_for_update().get(id=exam.exam_period_id)
                 period = complete_expired_period(period)
-                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                     messages.error(request, "종료된 시험기간의 과목은 수정할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
                 if DailyPlan.objects.filter(exam_period=period).exists():
@@ -140,6 +141,10 @@ def check_exam_period_locked_by_material_id(view_func):
     def wrapped_view(request, material_id, *args, **kwargs):
         if request.method == 'POST':
             with transaction.atomic():
+                # 1. exam_period_id만 얻기 위한 조회. 이 시점의 status/analysis_status는
+                #    아래 판정에 절대 사용하지 않는다 - ExamPeriod 락을 기다리는 동안
+                #    다른 요청(AI 분석 등)이 먼저 락을 잡고 이 material을 PROCESSING으로
+                #    선점할 수 있기 때문이다.
                 material_ref = get_object_or_404(
                     StudyMaterial.objects.select_related('exam__exam_period'),
                     id=material_id,
@@ -150,7 +155,7 @@ def check_exam_period_locked_by_material_id(view_func):
                 )
                 period = complete_expired_period(period)
 
-                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                     messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
 
@@ -158,6 +163,11 @@ def check_exam_period_locked_by_material_id(view_func):
                     messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
 
+                # 2. ExamPeriod 락을 획득한 *이후*에 material을 다시 조회해서
+                #    최신 status/analysis_status로 판정한다. 위 1번에서 락 대기가
+                #    있었다면, 그 사이 다른 요청이 먼저 이 ExamPeriod를 잠그고
+                #    material을 PROCESSING으로 바꿔놓았을 수 있는데, 이 재조회로
+                #    그 변경 사항을 놓치지 않고 반영한다.
                 material = get_object_or_404(
                     StudyMaterial,
                     id=material_id,
@@ -192,7 +202,7 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
                     )
                     period = complete_expired_period(period)
 
-                    if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+                    if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                         messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
                         return redirect('exams:period_detail', period_id=period.id)
 
@@ -244,8 +254,9 @@ def _claim_and_run_for_material(user, exam_id, material_id, claim_func, run_func
         period = ExamPeriod.objects.select_for_update().get(
             id=material_ref.exam.exam_period_id
         )
+        period = complete_expired_period(period)
 
-        if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+        if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
             return False, "종료된 시험기간의 학습자료입니다."
 
         if DailyPlan.objects.filter(exam_period=period).exists():
@@ -515,11 +526,12 @@ def period_manage_available_time(request, period_id):
                 id=period_id,
                 user=request.user,
             )
+            period = complete_expired_period(period)
 
             if not DailyPlan.objects.filter(exam_period=period).exists():
                 return redirect('exams:period_detail', period_id=period.id)
 
-            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                 messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
                 return redirect('exams:period_manage', period_id=period.id)
 
@@ -664,8 +676,9 @@ def available_time_update(request, period_id):
                 id=period_id,
                 user=request.user,
             )
+            period = complete_expired_period(period)
 
-            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                 messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
                 return redirect('exams:period_detail', period_id=period.id)
 

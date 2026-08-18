@@ -2955,11 +2955,11 @@ class ExamPeriodLockValidationTests(TestCase):
         url = reverse("exams:subject_create", args=[self.period.id])
 
         response = self.client.post(
-            url,    
+            url,
             {
-                "title": "수정된 중간고사",
-                "start_date": self.period.start_date,
-                "end_date": self.period.end_date,
+                "subject_name": "자료구조",
+                "exam_date": self.period.start_date + datetime.timedelta(days=5),
+                "priority": PriorityLevel.HIGH,
             },
         )
 
@@ -2973,16 +2973,17 @@ class ExamPeriodLockValidationTests(TestCase):
             any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
         )
 
+
     def test_subject_update_blocked_when_plan_exists(self):
         """계획이 생성된 시험기간의 과목은 수정할 수 없다."""
         url = reverse("exams:subject_update", args=[self.period.id, self.exam.id])
 
         response = self.client.post(
-            url,    
+            url,
             {
-                "title": "수정된 중간고사",
-                "start_date": self.period.start_date,
-                "end_date": self.period.end_date,
+                "subject_name": "수정된 알고리즘",
+                "exam_date": self.exam.exam_date,
+                "priority": PriorityLevel.HIGH,
             },
         )
 
@@ -2995,14 +2996,24 @@ class ExamPeriodLockValidationTests(TestCase):
             any("수정하거나 삭제할 수 없습니다" in str(m) for m in messages_list)
         )
 
-    def test_subject_delete_blocked_when_plan_exists(self):
-        """계획이 생성된 시험기간의 과목은 삭제할 수 없다."""
-        url = reverse("exams:subject_delete", args=[self.period.id, self.exam.id])
 
-        response = self.client.post(url)
+    def test_material_create_blocked_when_plan_exists(self):
+        """계획이 생성된 시험기간에는 학습자료를 추가할 수 없다."""
+        url = reverse("exams:material_create", args=[self.exam.id])
+
+        response = self.client.post(
+            url,
+            {
+                "title": "새로운 자료",
+                "material_type": MaterialType.TEXT,
+                "extracted_text": "새로운 테스트 내용",
+            },
+        )
 
         self.assertEqual(response.status_code, 302)
-        self.assertTrue(Exam.objects.filter(id=self.exam.id).exists())
+        self.assertFalse(
+            StudyMaterial.objects.filter(exam=self.exam, title="새로운 자료").exists()
+        )
 
         messages_list = list(response.wsgi_request._messages)
         self.assertTrue(
@@ -4704,10 +4715,10 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         self.assertEqual(period.title, "수정된 제목")
         self.assertEqual(response.status_code, 302)
 
-    def test_period_update_not_blocked_when_expired_but_processing_material_exists(self):
-        """만료됐어도 PROCESSING 중인 자료가 있으면 COMPLETED 전환 자체가
-        보류되므로, ACTIVE 상태 그대로 수정 경로에 도달한다(다른 방어 규칙과
-        충돌하지 않는지 확인)."""
+    def test_period_update_status_stays_active_but_edit_blocked_when_expired_with_processing_material(self):
+        """만료됐고 PROCESSING 자료가 있으면 status는 COMPLETED로 전환되지 않고
+        ACTIVE로 남지만(전환 보류 정책), end_date가 지난 이상 수정 POST 자체는
+        차단되어야 한다(수정 차단 정책은 전환 보류와 별개)."""
         period = _make_period(self.user, days_ago_end=1, title="원래 제목")
         exam = _make_exam(period)
         _make_material(exam, status=MaterialStatus.PROCESSING)
@@ -4722,6 +4733,23 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         )
 
         period.refresh_from_db()
-        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
-        self.assertEqual(period.title, "수정된 제목")
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)  # 전환은 보류됨
+        self.assertEqual(period.title, "원래 제목")  # 그러나 수정은 차단됨
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_subject_delete_blocked_when_period_expired_even_with_unrelated_processing_material(self):
+        """만료된 시험기간에 PROCESSING 자료가 있어 status가 ACTIVE로 남아있어도,
+        그 시험기간의 다른(처리 중이 아닌) 과목 삭제는 차단되어야 한다."""
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        other_exam = _make_exam(period, subject_name="다른 과목", days_offset=1)
+        _make_material(other_exam, status=MaterialStatus.PROCESSING)
+
+        response = self.client.post(
+            reverse('exams:subject_delete', args=[period.id, exam.id])
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)  # 전환 보류
+        self.assertTrue(Exam.objects.filter(id=exam.id).exists())  # 그러나 삭제도 차단
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
