@@ -155,9 +155,15 @@
       fetch(form.action, {
         method: 'POST',
         body: formData,
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
       }).then(function (response) {
         if (!response.ok) {
-          throw new Error('extract failed: ' + response.status);
+          throw new Error('extract request failed: ' + response.status);
+        }
+        return response.json();
+      }).then(function (data) {
+        if (!data.ok) {
+          throw new Error('extract had failures');
         }
         form.dataset.chaining = 'true';
         form.action = form.dataset.analyzeUrl;

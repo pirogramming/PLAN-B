@@ -91,7 +91,7 @@
 
       <button type="submit" class="btn btn-brand btn-lg material-submit-btn"
               style="width:100%;" id="analyze-submit-btn">
-        분석 시작
+        자료 업로드
       </button>
     </form>
   </div>
@@ -125,6 +125,8 @@
     typeInput.value = pdfValue;
   }
 
+  var submitBtn = document.getElementById('analyze-submit-btn');
+
   tabs.forEach(function (tab) {
     tab.addEventListener('click', function () {
       tabs.forEach(function (t) { t.classList.remove('active'); });
@@ -134,6 +136,12 @@
       document.getElementById('text-panel').style.display = isPdf ? 'none' : '';
       if (typeInput) {
         typeInput.value = isPdf ? pdfValue : textValue;
+      }
+      if (submitBtn) {
+        // PDF는 등록만 하고 period_detail로 이동 (분석은 나중에 따로 트리거),
+        // 텍스트는 등록 즉시 material_detail에서 자동으로 분석까지 진행되므로
+        // 실제 동작에 맞게 버튼 문구를 다르게 보여준다.
+        submitBtn.textContent = isPdf ? '자료 업로드' : '분석 시작';
       }
     });
   });

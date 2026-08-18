@@ -1179,13 +1179,27 @@ def material_analysis_status(request, material_id):
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
+def _bulk_extract_response(request, period_id, *, ok, success_count=0, fail_count=0):
+    """AJAX(fetch)로 온 요청이면 실제 추출 성공 여부를 JSON으로 내려준다.
+    이걸로 FE가 '추출이 진짜 성공했을 때만' 분석 요청으로 이어갈 수 있다
+    (기존엔 성공/실패 상관없이 항상 redirect(200)만 내려줘서, fetch의
+    response.ok만으로는 실패를 구분할 수 없었음). 일반 폼 제출(비AJAX)은
+    기존처럼 period_detail로 리다이렉트한다.
+    """
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return JsonResponse({'ok': ok, 'success_count': success_count, 'fail_count': fail_count})
+    return redirect('exams:period_detail', period_id=period_id)
+
+
+@login_required
+@require_http_methods(["POST"])
 def material_bulk_extract(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
     raw_material_ids = request.POST.getlist("material_ids")
 
     if not raw_material_ids:
         messages.error(request, "추출할 자료를 선택해주세요.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
 
     material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
     for raw in invalid_ids:
@@ -1193,11 +1207,11 @@ def material_bulk_extract(request, exam_id):
 
     if not material_ids:
         messages.error(request, "추출할 자료를 선택해주세요.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
 
     if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
         messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
 
     success_count = 0
     fail_messages = []
@@ -1220,9 +1234,12 @@ def material_bulk_extract(request, exam_id):
     for m in fail_messages:
         messages.error(request, m)
 
-    return redirect('exams:period_detail', period_id=exam.exam_period_id)
-
-
+    return _bulk_extract_response(
+        request, exam.exam_period_id,
+        ok=(len(fail_messages) == 0 and success_count > 0),
+        success_count=success_count,
+        fail_count=len(fail_messages),
+    )
 # =====================================================================
 # 자료 일괄 AI 분석 (exams:material_bulk_analyze)
 # material_bulk_extract와 동일한 패턴 - 단건 claim(_claim_material_for_analysis)
