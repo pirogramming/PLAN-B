@@ -4823,3 +4823,46 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         self.assertTrue(
             any("종료된 시험기간의 학습자료입니다" in str(m) for m in messages_list)
         )
+
+class GetLevelLockValidationTests(TestCase):
+    """GET(화면 진입) 시점에도 종료된 시험기간이 즉시 차단되는지 검증."""
+
+    def setUp(self):
+        self.user = _make_user()
+        self.client.force_login(self.user)
+
+    def test_subject_update_get_blocked_when_completed(self):
+        period = _make_period(self.user, status=ExamPeriodStatus.COMPLETED)
+        exam = _make_exam(period)
+        response = self.client.get(
+            reverse('exams:subject_update', args=[period.id, exam.id])
+        )
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_available_time_update_get_blocked_when_completed(self):
+        period = _make_period(self.user, status=ExamPeriodStatus.COMPLETED)
+        response = self.client.get(
+            reverse('exams:available_time_update', args=[period.id])
+        )
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_period_manage_available_time_get_blocked_when_completed(self):
+        period = _make_period(self.user, status=ExamPeriodStatus.COMPLETED)
+        DailyPlan.objects.create(
+            exam_period=period,
+            date=period.start_date,
+            available_minutes=0,
+            planned_minutes=0,
+            status=DailyPlanStatus.PLANNED,
+        )
+        response = self.client.get(
+            reverse('exams:period_manage_available_time', args=[period.id])
+        )
+        self.assertRedirects(response, reverse('exams:period_manage', args=[period.id]))
+
+    def test_subject_create_get_blocked_when_completed(self):
+        period = _make_period(self.user, status=ExamPeriodStatus.COMPLETED)
+        response = self.client.get(
+            reverse('exams:subject_create', args=[period.id])
+        )
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
