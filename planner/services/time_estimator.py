@@ -5,7 +5,7 @@ logger = logging.getLogger(__name__)
 
 # 작업 유형별 기준시간(분): (최소, 최대)
 TASK_TYPE_BASE_MINUTES = {
-    "concept": (20, 40),
+    "concept": (15, 30),
     "practice": (30, 60),
     "review": (15, 30),
     "summary": (20, 35),
