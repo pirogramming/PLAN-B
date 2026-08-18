@@ -602,6 +602,14 @@ def _reserved_order_base(study_material: StudyMaterial) -> int:
     id는 자료가 생성되는 순간 한 번 정해지면 이후 다른 자료의 생성/삭제와
     무관하게 절대 바뀌지 않으므로, 이 구간도 항상 안정적으로 유지된다. Django의
     auto-increment PK는 생성 순서대로 증가하므로 업로드 순서도 그대로 보존된다.
+
+    주의: id는 이 exam만이 아니라 StudyMaterial 테이블 전체에서 전역으로
+    증가하는 값이다. 그래서 다른 exam의 자료가 이 자료보다 먼저 생성됐다면,
+    그 영향으로 이 exam 안에서의 order 절대값(예: 1000, 2000, ...)에 숫자상
+    간격(gap)이 생길 수 있다 - 이건 의도된 트레이드오프이자 기능상 문제가
+    아니다. order는 정렬 목적일 뿐 연속된 정수여야 한다는 요구사항이 없고,
+    같은 exam 안에서의 상대적 업로드 순서는 이 방식으로도 항상 정확히
+    보존된다.
     """
     return study_material.id * ORDER_BLOCK_SIZE
 

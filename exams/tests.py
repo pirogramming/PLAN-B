@@ -5015,15 +5015,18 @@ class SaveExtractedTasksOrderTestCase(TestCase):
         )
         self.assertEqual(ordered_titles, ["1장 개념", "1장 구현", "1장 복습"])
 
-    def test_other_exam_materials_do_not_affect_order_base(self):
+    def test_existing_material_order_base_is_stable_after_other_exam_material_created(self):
         """
-        다른 시험(exam)의 자료가 생기든 안 생기든, order_base 계산 자체는
-        그 자료 자신의 id로만 결정되어 값이 바뀌지 않아야 한다.
+        리뷰 반영: id 기반 계산은 전역(global) StudyMaterial.id를 그대로 쓰므로,
+        다른 exam의 자료가 먼저/나중에 생성되면 그 영향으로 order_base의
+        "절대값"에 숫자상 gap이 생길 수 있다 - 이건 기능상 문제가 아니다
+        (order는 정렬 목적일 뿐, 연속된 정수여야 한다는 요구사항이 없다).
 
-        (id 기반으로 바뀌면서 order 절대값 자체는 이제 그 자료의 실제 DB id에
-        의존한다 - 예전 rank 방식처럼 "이 exam 안에서 항상 1번째면 order=1"이
-        보장되지는 않는다. 그래서 여기서는 절대값 대신, 다른 exam에 자료가
-        추가되기 전/후로 이 자료의 order_base가 그대로인지를 확인한다.)
+        이 테스트가 실제로 보장하는 것은 "이미 생성된 자료의 order_base가,
+        그 이후 다른 exam에 자료가 새로 생겨도 변하지 않는다"는 안정성이다.
+        동일 exam 안에서의 상대적 업로드 순서는 이 안정성 덕분에 항상
+        보존된다 (절대값 자체가 다른 exam 자료 때문에 달라 보일 수는 있어도,
+        같은 exam 안의 자료들끼리 비교했을 때 순서가 뒤집히지는 않는다).
         """
         material = self._make_material("1장.pdf")
         order_base_before = task_extractor._reserved_order_base(material)
