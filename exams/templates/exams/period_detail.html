@@ -170,9 +170,24 @@
         }
         return response.json();
       }).then(function (data) {
-        if (!data.ok) {
-          throw new Error('extract had no successes');
+        // 실패한 자료가 있으면(전체 실패든 일부 실패든) 이유를 먼저 보여준다.
+        if (data.fail_reasons && data.fail_reasons.length > 0) {
+          window.alert(
+            '다음 자료는 추출에 실패했습니다:\n\n' + data.fail_reasons.join('\n')
+          );
         }
+
+        if (!data.ok) {
+          // 전체 실패 - 분석으로 넘어가지 않고 버튼/상태만 되돌린다.
+          form.dataset.processing = 'false';
+          submitter.disabled = false;
+          submitter.textContent = '선택 자료 추출 + 분석';
+          window.location.reload();
+          return;
+        }
+
+        // 성공한 자료 기준으로 체크박스를 다시 맞춘 뒤, 같은 폼을
+        // 분석 URL로 실제 제출(페이지 이동)한다.
         var successIds = (data.success_ids || []).map(String);
         form.querySelectorAll('input[name="material_ids"]').forEach(function (cb) {
           cb.checked = successIds.indexOf(cb.value) !== -1;
@@ -181,8 +196,12 @@
         form.dataset.chaining = 'true';
         form.action = form.dataset.analyzeUrl;
         form.submit();
-      }).catch(function () {
-        window.location.reload();
+      }).catch(function (err) {
+        console.error(err);
+        window.alert('추출 요청 중 오류가 발생했습니다. 다시 시도해주세요.');
+        form.dataset.processing = 'false';
+        submitter.disabled = false;
+        submitter.textContent = '선택 자료 추출 + 분석';
       });
     });
   });
