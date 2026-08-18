@@ -147,6 +147,7 @@ class StudyMaterial(models.Model):
         verbose_name="텍스트 추출 상태"
     )
     error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
+    user_error_message = models.TextField(null=True, blank=True)
     extraction_started_at = models.DateTimeField(null=True, blank=True, verbose_name="PDF 추출 시작 시각")
     extraction_run_id = models.UUIDField(null=True, blank=True, verbose_name="PDF 추출 실행 식별자")
 

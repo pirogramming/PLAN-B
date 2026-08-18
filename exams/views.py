@@ -896,6 +896,7 @@ def _claim_material_for_extraction(material):
     ).update(
         status=MaterialStatus.PROCESSING,
         error_message=None,
+        user_error_message=None,
         extraction_started_at=now,
         extraction_run_id=run_id,
     )
@@ -917,6 +918,10 @@ def _extract_one(material, run_id):
     그대로 쓸 수 있다. 저장은 extraction_run_id가 이 실행의 run_id와 일치할
     때만 적용된다(_save_if_owner) - stale timeout으로 다른 실행이 이미
     이 material을 재선점했다면, 이 실행의 결과로 그걸 덮어쓰지 않기 위함이다.
+
+    error_message: 내부/로그용 상세 원인 (원본 예외 정보 포함 가능, 화면에 노출 금지)
+    user_error_message: 사용자 화면 노출용 안전한 메시지
+
     material_extract, material_bulk_extract가 공통으로 호출한다.
     """
     material_id = material.pk
@@ -935,27 +940,36 @@ def _extract_one(material, run_id):
         extracted = extract_text_from_pdf(material.file)
     except PdfExtractionError as e:
         try:
-            # DB에는 상세 원인(detail)을 저장해서 나중에 로그/관리자 화면에서 디버깅 가능하게 한다.
-            _save_if_owner(status=MaterialStatus.FAILED, error_message=e.detail)
+            _save_if_owner(
+                status=MaterialStatus.FAILED,
+                error_message=e.detail,              # 내부/로그용 - 원본 예외 정보 포함 가능
+                user_error_message=e.user_message,    # 화면 노출용 - 항상 안전한 문구
+            )
         except StaleExtractionRunError:
             logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
             return False, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.", "info"
-        # 사용자(및 FE alert)에게는 내부 구현 정보가 없는 안전한 문구만 노출한다.
         return False, f"PDF 텍스트 추출에 실패했습니다: {e.user_message}", "error"
     except Exception:
         logger.exception(f"PDF 추출 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
+        safe_msg = "알 수 없는 오류로 추출에 실패했습니다."
         try:
-            _save_if_owner(status=MaterialStatus.FAILED, error_message="알 수 없는 오류로 추출에 실패했습니다.")
+            _save_if_owner(
+                status=MaterialStatus.FAILED,
+                error_message=safe_msg,
+                user_error_message=safe_msg,
+            )
         except StaleExtractionRunError:
             logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
             return False, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.", "info"
         return False, "PDF 추출 처리 중 알 수 없는 시스템 오류가 발생했습니다.", "error"
 
     if not extracted:
+        safe_msg = "텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다."
         try:
             _save_if_owner(
                 status=MaterialStatus.FAILED,
-                error_message="텍스트를 추출할 수 없습니다. 스캔 이미지 PDF는 지원하지 않습니다.",
+                error_message=safe_msg,
+                user_error_message=safe_msg,
             )
         except StaleExtractionRunError:
             logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
@@ -966,6 +980,7 @@ def _extract_one(material, run_id):
         'status': MaterialStatus.COMPLETED,
         'extracted_text': extracted,
         'error_message': None,
+        'user_error_message': None,
     }
     if extracted != previous_extracted_text:
         update_fields.update(
@@ -1127,7 +1142,7 @@ def material_analysis_status(request, material_id):
     analysis_data = get_analysis_status(material)
 
     extraction_status = material.status
-    extraction_error = material.error_message
+    extraction_error = material.user_error_message
 
     extraction_is_stale = False
     if extraction_status == MaterialStatus.PROCESSING:
@@ -1182,7 +1197,6 @@ def material_analysis_status(request, material_id):
         "exam_id": material.exam_id,
     })
 
-
 # =====================================================================
 # 자료 일괄 텍스트 추출 (exams:material_bulk_extract)
 # 여러 자료를 한 번에 추출한다. 별도의 추출 로직을 새로 만들지 않고 단건과
@@ -1233,9 +1247,10 @@ def material_bulk_extract(request, exam_id):
         )
 
     if not raw_material_ids:
+        empty_msg = "추출할 자료를 선택해주세요."
         if not is_ajax:
-            messages.error(request, "추출할 자료를 선택해주세요.")
-        return _respond(ok=False)
+            messages.error(request, empty_msg)
+        return _respond(ok=False, fail_count=1, fail_reasons=[empty_msg])
 
     material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
     invalid_reasons = [f"잘못된 자료 ID입니다: {raw}" for raw in invalid_ids]
@@ -1249,9 +1264,10 @@ def material_bulk_extract(request, exam_id):
         return _respond(ok=False, fail_count=len(invalid_reasons), fail_reasons=invalid_reasons)
 
     if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
+        limit_msg = f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다."
         if not is_ajax:
-            messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
-        return _respond(ok=False)
+            messages.error(request, limit_msg)
+        return _respond(ok=False, fail_count=1, fail_reasons=[limit_msg])
 
     success_count = 0
     success_ids = []
@@ -1304,9 +1320,10 @@ def material_bulk_analyze(request, exam_id):
         )
 
     if not raw_material_ids:
+        empty_msg = "분석할 자료를 선택해주세요."
         if not is_ajax:
-            messages.error(request, "분석할 자료를 선택해주세요.")
-        return _respond(ok=False)
+            messages.error(request, empty_msg)
+        return _respond(ok=False, fail_count=1, fail_reasons=[empty_msg])
 
     material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
     invalid_reasons = [f"잘못된 자료 ID입니다: {raw}" for raw in invalid_ids]
@@ -1320,9 +1337,10 @@ def material_bulk_analyze(request, exam_id):
         return _respond(ok=False, fail_count=len(invalid_reasons), fail_reasons=invalid_reasons)
 
     if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
+        limit_msg = f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다."
         if not is_ajax:
-            messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
-        return _respond(ok=False)
+            messages.error(request, limit_msg)
+        return _respond(ok=False, fail_count=1, fail_reasons=[limit_msg])
 
     success_count = 0
     success_ids = []
