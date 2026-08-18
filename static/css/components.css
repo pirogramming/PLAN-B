@@ -249,6 +249,9 @@
   font-size: 15px;
   font-weight: 700;
   color: var(--neutral10);
+  font-family: var(--ui);
+  font-variant-numeric: normal;
+  letter-spacing: normal;
 }
 .task-summary-row {
   display: flex;
