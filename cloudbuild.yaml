@@ -44,7 +44,7 @@ steps:
       - "--cpu=2"
       - "--timeout=300"
       - "--concurrency=2"
-      - "--set-env-vars=DEBUG=False,AI_MODEL_NAME=gemini-3.5-flash-lite,AI_MOCK_MODE=False,USE_GCS=True,GS_BUCKET_NAME=planb-media,SECURE_SSL_REDIRECT=True,ALLOWED_HOSTS=planb-729189969182.asia-northeast3.run.app,CSRF_TRUSTED_ORIGINS=https://planb-729189969182.asia-northeast3.run.app"
+      - "--set-env-vars=^@^DEBUG=False@AI_MODEL_NAME=gemini-3.5-flash-lite@AI_MOCK_MODE=False@USE_GCS=True@GS_BUCKET_NAME=planb-media@SECURE_SSL_REDIRECT=True@ALLOWED_HOSTS=planb-729189969182.asia-northeast3.run.app,planb-study.web.app,.a.run.app@CSRF_TRUSTED_ORIGINS=https://planb-729189969182.asia-northeast3.run.app,https://planb-study.web.app"
       - "--set-secrets=SECRET_KEY=django-secret-key:latest,DATABASE_URL=database-url:latest,GOOGLE_API_KEY=google-api-key:latest,GOOGLE_CLIENT_ID=google-client-id:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,NAVER_CLIENT_ID=naver-client-id:latest,NAVER_CLIENT_SECRET=naver-client-secret:latest"
 
 availableSecrets:
