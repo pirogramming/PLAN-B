@@ -2267,7 +2267,9 @@ startxref
         self.assertEqual(config.seed, task_extractor.GENERATION_SEED)
         self.assertEqual(config.response_schema, task_extractor._RESPONSE_SCHEMA)
         self.assertEqual(config.response_mime_type, "application/json")
-        self.assertEqual(config.temperature, 0.2)
+        # gemini-3.5-flash-lite는 temperature/top_p/top_k가 deprecated된 모델이라
+        # _call_ai()가 더 이상 이 값을 설정하지 않는다 (seed만으로 재현성 관리).
+        self.assertIsNone(config.temperature)
 
     def test_response_schema_matches_required_task_fields(self):
         """_RESPONSE_SCHEMA의 required 목록이 _REQUIRED_TASK_FIELDS와 어긋나지 않는지
@@ -4866,3 +4868,129 @@ class GetLevelLockValidationTests(TestCase):
             reverse('exams:subject_create', args=[period.id])
         )
         self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+class SaveExtractedTasksOrderTestCase(TestCase):
+    """
+    save_extracted_tasks()의 order 할당이 "분석 완료 순서"가 아니라 "자료
+    업로드 순서(StudyMaterial.created_at)"를 기준으로 정해지는지 확인한다.
+
+    배경: 여러 자료(예: "1장.pdf", "2장.pdf")를 업로드하고 비동기로 분석하면,
+    완료 순서가 업로드 순서와 다를 수 있다(예: 2장이 1장보다 먼저 끝남). 기존
+    로직(그 시점의 최대 order에 이어 붙이는 방식)은 이 경우 늦게 끝난 자료의
+    작업이 화면에서 뒤로 밀리는 문제가 있었다.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="order_test_user@example.com",
+            email="order_test_user@example.com", password="pass1234!",
+        )
+        self.period = ExamPeriod.objects.create(
+            user=self.user, title="순서 테스트",
+            start_date=datetime.date(2026, 8, 1), end_date=datetime.date(2026, 8, 20),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period, subject_name="자료구조", exam_date=datetime.date(2026, 8, 18),
+        )
+
+    def _make_material(self, title):
+        return StudyMaterial.objects.create(
+            exam=self.exam, title=title, extracted_text=f"{title} 내용",
+            status=MaterialStatus.COMPLETED,
+        )
+
+    def _extracted(self, title):
+        return task_extractor.ExtractedTask(
+            unit_name=title, title=title, task_type="concept",
+            importance="high", depth="core", difficulty="normal", ai_reason="테스트",
+        )
+
+    def test_order_follows_upload_order_not_completion_order(self):
+        """1장.pdf를 먼저 업로드했지만 2장.pdf가 먼저 분석 완료돼도,
+        최종 order는 업로드 순서(1장 -> 2장)를 따라야 한다."""
+        material_1 = self._make_material("1장.pdf")
+        material_2 = self._make_material("2장.pdf")
+
+        # 분석 완료 순서를 일부러 뒤집는다: 2장을 먼저 저장
+        task_extractor.save_extracted_tasks(material_2, [self._extracted("2장 작업1")])
+        task_extractor.save_extracted_tasks(material_1, [self._extracted("1장 작업1")])
+
+        ordered_titles = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
+        )
+        self.assertEqual(ordered_titles, ["1장 작업1", "2장 작업1"])
+
+    def test_reanalysis_keeps_same_order_block(self):
+        """같은 자료를 재분석해도 그 자료에 할당된 order 구간(범위)은 그대로
+        유지되어야 한다 (다른 자료 순서에 영향 없어야 함)."""
+        material_1 = self._make_material("1장.pdf")
+        material_2 = self._make_material("2장.pdf")
+
+        task_extractor.save_extracted_tasks(material_2, [self._extracted("2장 작업1")])
+        task_extractor.save_extracted_tasks(material_1, [self._extracted("1장 작업1")])
+
+        material_2_order_before = StudyTask.objects.get(
+            study_material=material_2, title="2장 작업1",
+        ).order
+
+        # 1장을 재분석 (재분석 시 미확정 작업은 삭제 후 재생성됨)
+        task_extractor.save_extracted_tasks(material_1, [self._extracted("1장 작업1(재분석)")])
+
+        material_2_order_after = StudyTask.objects.get(
+            study_material=material_2, title="2장 작업1",
+        ).order
+
+        self.assertEqual(material_2_order_before, material_2_order_after)
+        ordered_titles = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
+        )
+        self.assertEqual(ordered_titles, ["1장 작업1(재분석)", "2장 작업1"])
+
+    def test_three_materials_various_completion_orders(self):
+        """3개 자료를 업로드하고, 분석 완료 순서를 완전히 뒤섞어도(3->1->2)
+        최종 순서는 업로드 순서(1->2->3)를 따라야 한다."""
+        material_1 = self._make_material("1장.pdf")
+        material_2 = self._make_material("2장.pdf")
+        material_3 = self._make_material("3장.pdf")
+
+        task_extractor.save_extracted_tasks(material_3, [self._extracted("3장 작업")])
+        task_extractor.save_extracted_tasks(material_1, [self._extracted("1장 작업")])
+        task_extractor.save_extracted_tasks(material_2, [self._extracted("2장 작업")])
+
+        ordered_titles = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
+        )
+        self.assertEqual(ordered_titles, ["1장 작업", "2장 작업", "3장 작업"])
+
+    def test_multiple_tasks_within_one_material_keep_relative_order(self):
+        """한 자료 안에서 여러 작업이 생성되면, 그 안에서의 상대적 순서(응답
+        리스트 순서)는 그대로 유지되어야 한다."""
+        material = self._make_material("1장.pdf")
+
+        task_extractor.save_extracted_tasks(material, [
+            self._extracted("1장 개념"),
+            self._extracted("1장 구현"),
+            self._extracted("1장 복습"),
+        ])
+
+        ordered_titles = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
+        )
+        self.assertEqual(ordered_titles, ["1장 개념", "1장 구현", "1장 복습"])
+
+    def test_other_exam_materials_do_not_affect_order_base(self):
+        """다른 시험(exam)의 자료는 이 exam의 order 구간 계산에 영향을 주지
+        않아야 한다."""
+        other_exam = Exam.objects.create(
+            exam_period=self.period, subject_name="운영체제", exam_date=datetime.date(2026, 8, 19),
+        )
+        StudyMaterial.objects.create(
+            exam=other_exam, title="다른 과목 자료", extracted_text="내용",
+            status=MaterialStatus.COMPLETED,
+        )
+
+        material = self._make_material("1장.pdf")
+        task_extractor.save_extracted_tasks(material, [self._extracted("1장 작업")])
+
+        task = StudyTask.objects.get(exam=self.exam, title="1장 작업")
+        self.assertEqual(task.order, 1)

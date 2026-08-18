@@ -36,6 +36,7 @@ from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 
 from core.choices import TaskType, PriorityLevel, TaskDepth, TaskDifficulty
 from core.exceptions import AICallFailedError, AIResponseValidationError
@@ -572,6 +573,43 @@ def fetch_extracted_tasks(exam: Exam, extracted_text: str) -> list[ExtractedTask
     return extracted_tasks
 
 
+# 자료(StudyMaterial) 하나당 예약해두는 order 구간 크기. 한 PDF에서 나올 수 있는
+# 작업 개수의 현실적 상한(많아도 수십 개)보다 충분히 크게 잡아서, 한 자료의
+# 작업들이 다음 자료의 구간을 절대 침범하지 않도록 여유를 둔다.
+ORDER_BLOCK_SIZE = 1000
+
+
+def _reserved_order_base(study_material: StudyMaterial) -> int:
+    """
+    이 자료(study_material)가 속한 시험(exam) 안에서, "분석이 완료된 순서"가
+    아니라 "자료가 업로드된 순서"를 기준으로 order 구간의 시작값을 계산한다.
+
+    기존 로직(그 시점의 최대 order를 조회해 그 뒤에 이어 붙이는 방식)은 여러
+    자료를 동시에 업로드해서 분석이 비동기로 진행되면, 늦게 끝난 분석의
+    작업이 먼저 끝난 자료의 작업보다 뒤로 밀리는 문제가 있었다. (예: "1장.pdf"를
+    "2장.pdf"보다 먼저 업로드했는데, OCR/AI 분석이 2장 쪽에서 먼저 끝나면
+    2장 작업들이 1장 작업들보다 앞에 배치됨 - 업로드 순서와 최종 화면 순서가
+    어긋난다.)
+
+    이 함수는 그 대신 StudyMaterial의 생성 순서(created_at, 동률이면 id)를
+    기준으로 구간을 미리 "예약"한다. 분석이 몇 번째로 끝나든, 업로드 순서만
+    같으면 그 자료는 항상 같은 구간에 배치되므로 완료 순서와 무관하게 최종
+    order가 업로드 순서를 그대로 따른다. 같은 자료를 재분석해도(같은
+    StudyMaterial), 그 자료의 업로드 순위 자체는 안 바뀌므로 매번 동일한
+    구간이 반환된다.
+    """
+    rank = (
+        StudyMaterial.objects
+        .filter(exam=study_material.exam)
+        .filter(
+            Q(created_at__lt=study_material.created_at)
+            | Q(created_at=study_material.created_at, id__lte=study_material.id)
+        )
+        .count()
+    )
+    return (rank - 1) * ORDER_BLOCK_SIZE
+
+
 @transaction.atomic
 def save_extracted_tasks(
     study_material: StudyMaterial, extracted_tasks: list[ExtractedTask]
@@ -596,13 +634,7 @@ def save_extracted_tasks(
         is_user_modified=False,
     ).delete()
 
-    existing_max_order = (
-        StudyTask.objects
-        .filter(exam=exam)
-        .order_by("-order")
-        .values_list("order", flat=True)
-        .first() or 0
-    )
+    order_base = _reserved_order_base(study_material)
 
     created_tasks = [
         StudyTask(
@@ -620,7 +652,7 @@ def save_extracted_tasks(
             estimated_max_minutes=0,
             is_user_modified=False,
             is_confirmed=False,
-            order=existing_max_order + i,
+            order=order_base + i,
         )
         for i, task in enumerate(extracted_tasks, start=1)
     ]
@@ -640,7 +672,7 @@ def analyze_study_material(study_material: StudyMaterial) -> list[StudyTask]:
 
     - AI가 생성하는 값: unit_name, title, task_type, importance, depth, difficulty, ai_reason
     - AI가 생성하지 않는 값: estimated_min/max_minutes
-      -> 0으로 남겨두고, 이후 BE1의 time_estimator 서비스가 채운다.
+    -> 0으로 남겨두고, 이후 BE1의 time_estimator 서비스가 채운다.
 
     주의: 이 함수 자체는 트랜잭션으로 감싸져 있지 않다 (AI 네트워크 호출을 트랜잭션
     밖에 두기 위함). DB 쓰기는 save_extracted_tasks() 안에서만 짧게 트랜잭션 처리된다.
