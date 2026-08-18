@@ -715,6 +715,7 @@ def calendar(request):
     if not request.user.is_authenticated:
         return render(request, 'planner/calendar.html', {'exam_period': None})
 
+    complete_expired_periods_for_user(request.user)
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)

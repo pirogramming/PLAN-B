@@ -2929,6 +2929,44 @@ class CalendarViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.context["exam_period"])
 
+    def test_expired_active_period_is_lazily_completed(self):
+        """
+        #173: 만료된(end_date가 지난) ACTIVE 시험기간이 dashboard/today를
+        거치지 않고 calendar에 바로 들어와도, 이 화면 진입만으로
+        COMPLETED로 전환되어야 한다. (수정 전에는 calendar()가
+        complete_expired_periods_for_user()를 호출하지 않아서, period_list를
+        거쳤는지에 따라 같은 시험기간의 표시 상태가 달라지는 불일치가 있었다.)
+        """
+        from exams.models import ExamPeriod
+
+        expired_period = ExamPeriod.objects.create(
+            user=self.user, title="만료된 시험기간",
+            start_date=self.today - timedelta(days=20),
+            end_date=self.today - timedelta(days=1),
+            status="active",
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        expired_period.refresh_from_db()
+        self.assertEqual(expired_period.status, "completed")
+        # 만료 처리된 시험기간은 더 이상 ACTIVE가 아니므로 calendar에도
+        # 노출되면 안 된다 (onboarding 상태로 보여야 함).
+        self.assertIsNone(response.context["exam_period"])
+
+    def test_non_expired_active_period_not_affected(self):
+        """아직 end_date가 지나지 않은 ACTIVE 시험기간은 그대로 유지되어야
+        한다 (Lazy Check가 만료 안 된 것까지 건드리면 안 됨)."""
+        period = self._make_active_exam_period()
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        period.refresh_from_db()
+        self.assertEqual(period.status, "active")
+        self.assertEqual(response.context["exam_period"], period)
+
     def test_defaults_to_current_month_when_no_query_params(self):
         self._make_active_exam_period()
         response = self.client.get(self.url)
