@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from unittest.mock import  MagicMock,patch
 from django.conf import settings as dj_settings
+from datetime import timedelta
 
 import pypdfium2 as pdfium
 from django.db import transaction
@@ -1651,8 +1652,8 @@ class MaterialAnalysisViewTestCase(TestCase):
 
     def test_stage_response_includes_extraction_fields(self):
         self.material.status = MaterialStatus.FAILED
-        self.material.error_message = "PDF 추출 실패 사유"
-        self.material.save(update_fields=["status", "error_message"])
+        self.material.user_error_message = "PDF 추출 실패 사유"
+        self.material.save(update_fields=["status", "user_error_message"])
 
         data = self._get_stage()
 
@@ -5348,3 +5349,109 @@ class PdfiumLockConcurrencyTests(TestCase):
 
         self.assertFalse(overlap_detected.is_set(), "PDFium 호출이 락 없이 겹쳐서 실행됨")
         self.assertEqual(errors, [])
+
+INTERNAL_LEAK_MARKER = "PDFium: failed to load document, internal buffer offset 0x4F"
+ 
+ 
+class StudyMaterialDisplayErrorMessageTests(TestCase):
+    def _make_material(self, **kwargs):
+        defaults = dict(
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.FAILED,
+        )
+        defaults.update(kwargs)
+        return StudyMaterial(**defaults)
+ 
+    def test_user_error_message_present_is_used(self):
+        material = self._make_material(
+            error_message=INTERNAL_LEAK_MARKER,
+            user_error_message="PDF 텍스트 추출에 실패했습니다.",
+        )
+        self.assertEqual(material.get_display_error_message(), "PDF 텍스트 추출에 실패했습니다.")
+ 
+    def test_user_error_message_missing_falls_back_to_safe_default_not_internal(self):
+        """마이그레이션 이전 데이터: user_error_message가 비어 있는 경우
+        error_message(내부 상세)로 폴백하지 않고 일반화된 안전한 문구를 반환해야 한다."""
+        material = self._make_material(
+            error_message=INTERNAL_LEAK_MARKER,
+            user_error_message="",
+        )
+        display_message = material.get_display_error_message()
+        self.assertNotEqual(display_message, INTERNAL_LEAK_MARKER)
+        self.assertNotIn("PDFium", display_message or "")
+        self.assertTrue(display_message)  # FAILED 상태면 빈 값이 아닌 안전 문구가 나와야 함
+ 
+    def test_not_failed_status_returns_none(self):
+        material = self._make_material(
+            status=MaterialStatus.COMPLETED,
+            error_message=None,
+            user_error_message="",
+        )
+        self.assertIsNone(material.get_display_error_message())
+ 
+ 
+class MaterialAnalysisStatusApiLeakTests(TestCase):
+    """material_analysis_status API가 내부 error_message를 절대 노출하지 않는지 검증."""
+ 
+    def setUp(self):
+        self.user = self._create_user()
+        self.client.force_login(self.user)
+        today = timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            start_date=today,
+            end_date=today + timedelta(days=7),
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=today + timedelta(days=7),
+        )
+ 
+    def _create_user(self):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        return User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="test-pass-1234",
+        )
+    
+    def test_status_api_does_not_leak_internal_error_message(self):
+        material = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.FAILED,
+            error_message=INTERNAL_LEAK_MARKER,
+            user_error_message="PDF 텍스트 추출에 실패했습니다.",
+        )
+ 
+        response = self.client.get(
+            reverse("exams:material_analysis_status", args=[material.id])
+        )
+ 
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["extraction_error_message"], "PDF 텍스트 추출에 실패했습니다.")
+        self.assertNotIn(INTERNAL_LEAK_MARKER, response.content.decode())
+ 
+    def test_status_api_legacy_material_without_user_error_message_stays_safe(self):
+        """user_error_message 필드가 비어 있는(마이그레이션 이전) 기존 자료도
+        API 응답에 error_message 원문이 그대로 나가서는 안 된다."""
+        material = StudyMaterial.objects.create(
+            exam=self.exam,
+            material_type=MaterialType.PDF,
+            status=MaterialStatus.FAILED,
+            error_message=INTERNAL_LEAK_MARKER,
+            user_error_message="",
+        )
+ 
+        response = self.client.get(
+            reverse("exams:material_analysis_status", args=[material.id])
+        )
+ 
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(INTERNAL_LEAK_MARKER, response.content.decode())
+        body = response.json()
+        self.assertTrue(body["extraction_error_message"])
+        self.assertNotEqual(body["extraction_error_message"], INTERNAL_LEAK_MARKER)

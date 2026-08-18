@@ -13,6 +13,8 @@ from core.choices import (
     TaskType,
 )
 
+DEFAULT_SAFE_EXTRACTION_ERROR_MESSAGE = "추출에 실패했습니다."
+
 # =====================================================================
 
 class ExamPeriod(models.Model):
@@ -147,10 +149,10 @@ class StudyMaterial(models.Model):
         verbose_name="텍스트 추출 상태"
     )
     error_message = models.TextField(null=True, blank=True, verbose_name="추출/파싱 실패 원인")
-    user_error_message = models.TextField(null=True, blank=True)
+    user_error_message = models.TextField(null=True, blank=True, verbose_name="추출 실패 시 사용자 노출용 메시지")
     extraction_started_at = models.DateTimeField(null=True, blank=True, verbose_name="PDF 추출 시작 시각")
     extraction_run_id = models.UUIDField(null=True, blank=True, verbose_name="PDF 추출 실행 식별자")
-
+ 
     # 리뷰 확정 사항: 텍스트 추출 성공 여부와 AI 분석 성공 여부는 서로 다른 단계라 분리한다.
     analysis_status = models.CharField(
         max_length=20,
@@ -162,16 +164,31 @@ class StudyMaterial(models.Model):
     analysis_retry_count = models.PositiveSmallIntegerField(default=0, verbose_name="AI 분석 사용자 재시도 횟수")
     analysis_started_at = models.DateTimeField(null=True, blank=True, verbose_name="AI 분석 시작 시각")
     analysis_run_id = models.UUIDField(null=True, blank=True, verbose_name="AI 분석 실행 식별자")
-
+ 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="생성일시")
-
+ 
     class Meta:
         db_table = 'study_materials'
         verbose_name = '학습 자료'
         verbose_name_plural = '학습 자료 목록'
-
+ 
     def __str__(self):
         return f"[{self.exam.subject_name}] {self.title}"
+ 
+    def get_display_error_message(self):
+        """
+        화면/API에 노출할 안전한 추출 실패 메시지를 반환한다.
+ 
+        user_error_message가 비어 있어도 error_message(PDFium 원본 오류, storage
+        내부 정보 등 내부 상세 원인을 포함할 수 있음)로 폴백하지 않는다.
+        user_error_message 필드 도입 이전에 저장된 기존 데이터의 경우에도
+        여기서 걸러지도록 하기 위함이다.
+        """
+        if self.user_error_message:
+            return self.user_error_message
+        if self.status == MaterialStatus.FAILED:
+            return DEFAULT_SAFE_EXTRACTION_ERROR_MESSAGE
+        return None
 
 
 class StudyTask(models.Model):

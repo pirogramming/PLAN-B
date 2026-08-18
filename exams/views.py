@@ -1142,7 +1142,7 @@ def material_analysis_status(request, material_id):
     analysis_data = get_analysis_status(material)
 
     extraction_status = material.status
-    extraction_error = material.user_error_message
+    extraction_error = material.get_display_error_message()
 
     extraction_is_stale = False
     if extraction_status == MaterialStatus.PROCESSING:
