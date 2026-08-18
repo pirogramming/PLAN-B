@@ -100,3 +100,20 @@ def complete_expired_periods_for_user(user):
             ):
                 period.status = ExamPeriodStatus.COMPLETED
                 period.save(update_fields=['status'])
+
+def is_expired(period):
+    """end_date가 지난 ACTIVE 시험기간인지 여부.
+
+    complete_expired_period()의 "PROCESSING 자료가 있으면 COMPLETED 전환을
+    보류한다"는 정책과, "end_date가 지난 시험기간의 수정은 막는다"는 정책은
+    별개다. PROCESSING 자료 때문에 status가 여전히 ACTIVE로 남아있는 경우도
+    포함해서 판단해야 하므로, status만으로는 이 둘을 구분할 수 없다.
+
+    호출부는 complete_expired_period(period)로 최신 인스턴스를 받은 뒤,
+    status in (COMPLETED, ARCHIVED) 체크와 이 함수를 OR로 함께 써서 수정
+    차단 여부를 판정해야 한다.
+    """
+    return (
+        period.status == ExamPeriodStatus.ACTIVE
+        and period.end_date < timezone.localdate()
+    )
