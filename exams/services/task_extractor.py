@@ -20,9 +20,9 @@ BE3 담당 - AI 분석: 시험 범위 텍스트 -> 단원 분리 -> 학습 작�
 
 AI 제공사 (2026-08 기준):
 - Google Gemini API(google-genai SDK) 사용. 팀 예산상 무료/저비용으로 진행하기 위해
-  Anthropic 대신 Gemini로 전환했다 (기본 모델: gemini-3.5-flash-lite, 2026-08 유료 전환.
-  문서 추출/분류 특화 모델이라 이 서비스(시험범위 분류) 용도에 적합하다고 판단해 선택함).
-- google.genai.errors.APIError를 잡아 재시도 처리한다.
+  Anthropic 대신 Gemini로 전환했다 (기본 모델: gemini-3.5-flash-lite로
+업그레이드, 2026-08부터 배포 프로젝트는 Paid Tier 사용. 문서 추출/분류
+특화 모델이라 이 서비스(시험범위 분류) 용도에 적합하다고 판단해 선택함).
 """
 from __future__ import annotations
 
@@ -50,7 +50,8 @@ MAX_RETRIES = 2
 MAX_VALIDATION_RETRIES = 1
 
 # 같은 입력에 대해 결과 편차(특히 작업 개수)를 줄이기 위한 고정 seed.
-# 완전한 결정론을 보장하진 않지만(모델 특성상), temperature와 함께 재현성을 높인다.
+# seed가 재현성을 관리하는 유일한 수단이다. 다만 완전한 결정론을 보장하진
+# 않는다 (모델 자체의 특성).
 GENERATION_SEED = 42
 
 # Django model의 choices가 이 프로젝트에서 "허용되는 값"의 유일한 기준(source of
@@ -184,6 +185,10 @@ def build_prompt(exam_name: str, exam_date, source_text: str, previous_error: st
       되지 않는다 - 항상 하나의 작업으로 합쳐라. 대신 title과 ai_reason에
       포함된 예제를 전부 언급해야 한다. 일부만 언급하고 나머지는
       source_pages에만 슬쩍 끼워넣지 마라.
+
+      단, 이 병합 규칙은 "예제 이름이 다르다"는 사실 하나만으로 분리하지
+      말라는 뜻이다. 개념/구현 분리나 학습 행동 분리처럼 위에 이미 명시된
+      다른 조건이 같이 충족되는 경우에는, 그 조건이 여전히 우선한다.
    c. 위 b의 조건에 하나도 해당하지 않으면 절대 임의로 나누지 마라.
       "내용이 많아 보여서", "크기 목표보다 클 것 같아서" 같은 막연한 느낌만으로
       작업을 쪼개지 마라. 분리 여부는 오직 b에서 나열한 명시적 조건으로만 정한다.
@@ -333,12 +338,10 @@ def _call_ai(prompt: str) -> str:
                 model=settings.AI_MODEL_NAME,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    # 분류/구조화 작업이라 창의성보다 일관성이 중요함 -> 낮은 온도로 설정
-                    # (기본값 ~1.0은 매번 답이 크게 달라질 수 있어 분류 작업엔 부적합)
-                    temperature=0.2,
                     # 같은 입력에 대한 결과 편차(작업 개수 등)를 줄이기 위한 고정 seed.
-                    # temperature만으로는 편차를 완전히 못 줄여서 같이 사용한다 - 다만
-                    # 이것만으로 완전한 결정론이 보장되진 않는다 (모델 자체의 특성).
+                    # (gemini-3.5-flash-lite는 마이그레이션 가이드상 temperature/top_p/top_k가
+                    # deprecated/무시되는 모델이라, seed만으로 재현성을 관리한다. 다만 seed도
+                    # 완전한 결정론을 보장하진 않는다 - 모델 자체의 특성.)
                     seed=GENERATION_SEED,
                     # API 차원에서 JSON 형식을 강제 -> _strip_code_fence()로도 못 거르는
                     # 이상 응답(코드블록 등) 자체를 줄여줌
