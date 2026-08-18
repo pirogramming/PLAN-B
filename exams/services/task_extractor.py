@@ -36,7 +36,6 @@ from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
 
 from core.choices import TaskType, PriorityLevel, TaskDepth, TaskDifficulty
 from core.exceptions import AICallFailedError, AIResponseValidationError
@@ -591,23 +590,20 @@ def _reserved_order_base(study_material: StudyMaterial) -> int:
     2장 작업들이 1장 작업들보다 앞에 배치됨 - 업로드 순서와 최종 화면 순서가
     어긋난다.)
 
-    이 함수는 그 대신 StudyMaterial의 생성 순서(created_at, 동률이면 id)를
-    기준으로 구간을 미리 "예약"한다. 분석이 몇 번째로 끝나든, 업로드 순서만
-    같으면 그 자료는 항상 같은 구간에 배치되므로 완료 순서와 무관하게 최종
-    order가 업로드 순서를 그대로 따른다. 같은 자료를 재분석해도(같은
-    StudyMaterial), 그 자료의 업로드 순위 자체는 안 바뀌므로 매번 동일한
-    구간이 반환된다.
+    구간 계산은 이 자료 자체의 불변 PK(id)를 그대로 쓴다 (리뷰 반영). 처음엔
+    "같은 exam 안에서 현재 존재하는 자료 중 몇 번째인지"(rank)로 계산했는데,
+    이 방식은 실시간으로 다시 세는 거라 문제가 있었다: StudyTask.study_material은
+    on_delete=SET_NULL이라 자료가 삭제돼도 이미 만들어진 StudyTask.order는
+    그대로 남는데, 그 뒤에 다른 자료를 분석하면 rank가 재계산되면서 이미
+    삭제된 자료가 차지했던 구간과 겹칠 수 있었다 (예: 1번 자료 분석 완료 ->
+    1번 자료 삭제 -> 2번 자료 분석 시, 2번이 rank=1로 재계산되어 이미 남아있는
+    1번 자료의 StudyTask.order와 충돌).
+
+    id는 자료가 생성되는 순간 한 번 정해지면 이후 다른 자료의 생성/삭제와
+    무관하게 절대 바뀌지 않으므로, 이 구간도 항상 안정적으로 유지된다. Django의
+    auto-increment PK는 생성 순서대로 증가하므로 업로드 순서도 그대로 보존된다.
     """
-    rank = (
-        StudyMaterial.objects
-        .filter(exam=study_material.exam)
-        .filter(
-            Q(created_at__lt=study_material.created_at)
-            | Q(created_at=study_material.created_at, id__lte=study_material.id)
-        )
-        .count()
-    )
-    return (rank - 1) * ORDER_BLOCK_SIZE
+    return study_material.id * ORDER_BLOCK_SIZE
 
 
 @transaction.atomic

@@ -4872,12 +4872,18 @@ class GetLevelLockValidationTests(TestCase):
 class SaveExtractedTasksOrderTestCase(TestCase):
     """
     save_extracted_tasks()의 order 할당이 "분석 완료 순서"가 아니라 "자료
-    업로드 순서(StudyMaterial.created_at)"를 기준으로 정해지는지 확인한다.
+    업로드 순서(StudyMaterial의 불변 id)"를 기준으로 정해지는지 확인한다.
 
     배경: 여러 자료(예: "1장.pdf", "2장.pdf")를 업로드하고 비동기로 분석하면,
     완료 순서가 업로드 순서와 다를 수 있다(예: 2장이 1장보다 먼저 끝남). 기존
     로직(그 시점의 최대 order에 이어 붙이는 방식)은 이 경우 늦게 끝난 자료의
     작업이 화면에서 뒤로 밀리는 문제가 있었다.
+
+    구간 계산은 "현재 존재하는 자료 중 몇 번째인지"(rank)가 아니라 자료
+    자체의 불변 id를 직접 쓴다 - StudyTask.study_material이 SET_NULL이라
+    자료가 삭제돼도 이미 저장된 StudyTask.order는 남는데, rank를 실시간으로
+    다시 세면 삭제 이후 재계산된 순위가 이미 남아있는 order와 충돌할 수
+    있었다 (리뷰 반영, test_order_stable_after_earlier_material_deleted 참고).
     """
 
     def setUp(self):
@@ -4919,6 +4925,37 @@ class SaveExtractedTasksOrderTestCase(TestCase):
             StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
         )
         self.assertEqual(ordered_titles, ["1장 작업1", "2장 작업1"])
+
+    def test_order_stable_after_earlier_material_deleted(self):
+        """
+        리뷰 반영: 1번 자료를 분석 완료한 뒤 삭제하고(StudyTask.study_material은
+        SET_NULL이라 StudyTask 자체는 남음), 그 다음 2번 자료를 분석해도
+        order가 충돌하면 안 된다. rank를 실시간으로 재계산하는 방식이었다면
+        1번이 사라진 뒤 2번이 rank=1로 재계산되어, 이미 남아있는 1번 자료의
+        StudyTask.order와 겹쳤을 것이다.
+        """
+        material_1 = self._make_material("1장.pdf")
+        material_2 = self._make_material("2장.pdf")
+
+        task_extractor.save_extracted_tasks(material_1, [self._extracted("1장 작업1")])
+        material_1.delete()
+
+        task_extractor.save_extracted_tasks(material_2, [self._extracted("2장 작업1")])
+
+        orders = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("order", flat=True)
+        )
+        self.assertEqual(len(orders), len(set(orders)), "order가 중복되면 안 된다")
+
+        # 1장 작업(자료는 삭제됐지만 StudyTask는 SET_NULL로 남아있어야 함)이
+        # 여전히 2장 작업보다 먼저 와야 한다.
+        ordered_titles = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("title", flat=True)
+        )
+        self.assertEqual(ordered_titles, ["1장 작업1", "2장 작업1"])
+
+        surviving_task = StudyTask.objects.get(title="1장 작업1")
+        self.assertIsNone(surviving_task.study_material_id)
 
     def test_reanalysis_keeps_same_order_block(self):
         """같은 자료를 재분석해도 그 자료에 할당된 order 구간(범위)은 그대로
@@ -4979,8 +5016,18 @@ class SaveExtractedTasksOrderTestCase(TestCase):
         self.assertEqual(ordered_titles, ["1장 개념", "1장 구현", "1장 복습"])
 
     def test_other_exam_materials_do_not_affect_order_base(self):
-        """다른 시험(exam)의 자료는 이 exam의 order 구간 계산에 영향을 주지
-        않아야 한다."""
+        """
+        다른 시험(exam)의 자료가 생기든 안 생기든, order_base 계산 자체는
+        그 자료 자신의 id로만 결정되어 값이 바뀌지 않아야 한다.
+
+        (id 기반으로 바뀌면서 order 절대값 자체는 이제 그 자료의 실제 DB id에
+        의존한다 - 예전 rank 방식처럼 "이 exam 안에서 항상 1번째면 order=1"이
+        보장되지는 않는다. 그래서 여기서는 절대값 대신, 다른 exam에 자료가
+        추가되기 전/후로 이 자료의 order_base가 그대로인지를 확인한다.)
+        """
+        material = self._make_material("1장.pdf")
+        order_base_before = task_extractor._reserved_order_base(material)
+
         other_exam = Exam.objects.create(
             exam_period=self.period, subject_name="운영체제", exam_date=datetime.date(2026, 8, 19),
         )
@@ -4989,8 +5036,10 @@ class SaveExtractedTasksOrderTestCase(TestCase):
             status=MaterialStatus.COMPLETED,
         )
 
-        material = self._make_material("1장.pdf")
+        order_base_after = task_extractor._reserved_order_base(material)
+        self.assertEqual(order_base_before, order_base_after)
+
         task_extractor.save_extracted_tasks(material, [self._extracted("1장 작업")])
 
         task = StudyTask.objects.get(exam=self.exam, title="1장 작업")
-        self.assertEqual(task.order, 1)
+        self.assertEqual(task.order, material.id * task_extractor.ORDER_BLOCK_SIZE + 1)
