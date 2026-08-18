@@ -5180,3 +5180,59 @@ class FeasibilityDeadlineAwareTests(TestCase):
 
         self.assertEqual(subject_results['A과목']['status'], RISKY)
         self.assertEqual(subject_results['B과목']['status'], RISKY)
+
+class DashboardTodayLazyCheckTests(TestCase):
+    """
+    #173: dashboard()/today()도 period_list 등을 거치지 않고 바로 방문해도
+    만료된 ACTIVE 시험기간을 COMPLETED로 자동 전환해야 한다 (화면 방문
+    순서에 따라 표시 상태가 달라지는 불일치 방지).
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import ExamPeriod
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="lazy_check_tester",
+            email="lazy_check_tester@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="lazy_check_tester@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.expired_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="만료된 시험기간",
+            start_date=self.today - timedelta(days=10),
+            end_date=self.today - timedelta(days=1),
+            status="active",
+        )
+
+    def test_dashboard_visit_completes_expired_period(self):
+        self.expired_period.refresh_from_db()
+        self.assertEqual(self.expired_period.status, "active")
+
+        self.client.get(reverse('planner:dashboard'))
+
+        self.expired_period.refresh_from_db()
+        self.assertEqual(self.expired_period.status, "completed")
+
+    def test_today_visit_completes_expired_period(self):
+        self.expired_period.refresh_from_db()
+        self.assertEqual(self.expired_period.status, "active")
+
+        self.client.get(reverse('planner:today'))
+
+        self.expired_period.refresh_from_db()
+        self.assertEqual(self.expired_period.status, "completed")
+
+    def test_dashboard_does_not_touch_non_expired_period(self):
+        """만료 안 된 ACTIVE 시험기간은 dashboard 방문으로 안 건드려야 한다."""
+        self.expired_period.end_date = self.today + timedelta(days=5)
+        self.expired_period.save(update_fields=["end_date"])
+
+        self.client.get(reverse('planner:dashboard'))
+
+        self.expired_period.refresh_from_db()
+        self.assertEqual(self.expired_period.status, "active")

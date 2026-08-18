@@ -24,6 +24,7 @@ from core.choices import MaterialStatus
 from django.db.models import Q
 from django.urls import reverse
 from exams.models import ExamPeriod, StudyTask, AvailableTime
+from exams.services.exam_period import complete_expired_periods_for_user
 from planner.services.feasibility_checker import calculate_feasibility, POSSIBLE, RISKY, IMPOSSIBLE
 from planner.services.schedule_generator import (
     generate_schedule,
@@ -527,7 +528,8 @@ def dashboard(request):
     """
     if not request.user.is_authenticated:
         return render(request, 'planner/dashboard.html', {'exam_period': None})
-
+    
+    complete_expired_periods_for_user(request.user)
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
@@ -589,9 +591,8 @@ def today(request):
         return render(request, 'planner/today.html', {
             'exam_period': None, 'today': timezone.localdate(),
         })
-
+    complete_expired_periods_for_user(request.user)
     today_date = timezone.localdate()
-
     exam_period = (
         ExamPeriod.objects
         .filter(user=request.user, status=ExamPeriodStatus.ACTIVE)
