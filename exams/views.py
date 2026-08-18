@@ -84,9 +84,11 @@ def _get_owned_exam_period(user, period_id):
 # 시험기간 잠금 데코레이터 (동시성 방어 + POST만 차단)
 # =====================================================================
 def check_exam_period_locked_by_period_id(view_func):
-    """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후
-    만료 여부(Lazy Check) 최신화 + 계획 존재 여부 검증 + view_func 실행까지
-    동일 트랜잭션/락 스코프 안에서 수행"""
+    """period_id 기준: POST는 종료 여부·계획 존재 여부를 모두 검사해 차단하고,
+    GET은 종료 여부만 검사한다. 계획이 이미 생성된 시험기간이라도 화면을
+    "보는" 것 자체(GET)는 막을 이유가 없고, 실제 수정을 시도하는 POST만
+    막으면 되기 때문이다 (계획 존재 시 GET 200 허용은 기존 테스트가 이미
+    보장하는 동작이므로 유지)."""
     @wraps(view_func)
     def wrapped_view(request, period_id, *args, **kwargs):
         if request.method == 'POST':
@@ -96,11 +98,6 @@ def check_exam_period_locked_by_period_id(view_func):
                     id=period_id,
                     user=request.user
                 )
-                # 만료된 ACTIVE 시험기간을 여기서도 COMPLETED로 전환해야
-                # Lazy Check 화면(period_list/period_detail 등)을 거치지
-                # 않고 곧장 POST하는 경로로 만료된 시험기간이 수정되는 걸
-                # 막을 수 있다. 이미 같은 트랜잭션에서 이 row를 잠근
-                # 상태이므로 재잠금 비용은 없다.
                 period = complete_expired_period(period)
                 if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
                     messages.error(request, "종료된 시험기간은 수정할 수 없습니다.")
@@ -109,6 +106,12 @@ def check_exam_period_locked_by_period_id(view_func):
                     messages.error(request, "이미 계획이 생성된 시험기간은 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
                 return view_func(request, period_id, *args, **kwargs)
+        else:
+            period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+            period = complete_expired_period(period)
+            if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
+                messages.error(request, "종료된 시험기간은 수정할 수 없습니다.")
+                return redirect('exams:period_detail', period_id=period.id)
         return view_func(request, period_id, *args, **kwargs)
     return wrapped_view
 
@@ -478,7 +481,7 @@ def period_complete(request, period_id):
 @require_http_methods(["GET"])
 def period_detail(request, period_id):
     period = _get_owned_exam_period(request.user, period_id)
-    exams = period.exams.all()
+    exams = period.exams.prefetch_related('study_materials').all()
     available_times = period.available_times.all()
     context = {'period': period, 'exams': exams, 'available_times': available_times}
     return render(request, 'exams/period_detail.html', context)
@@ -561,6 +564,11 @@ def period_manage_available_time(request, period_id):
     # GET
     # ================================================================
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    period = complete_expired_period(period)
+    if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
+        messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
+        return redirect('exams:period_manage', period_id=period.id)
+
     if not DailyPlan.objects.filter(exam_period=period).exists():
         return redirect('exams:period_detail', period_id=period.id)
     queryset = AvailableTime.objects.filter(exam_period=period).order_by('date')
@@ -740,6 +748,11 @@ def available_time_update(request, period_id):
     # GET
     # ================================================================
     period = get_object_or_404(ExamPeriod, id=period_id, user=request.user)
+    period = complete_expired_period(period)
+    if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED) or is_expired(period):
+        messages.error(request, "종료된 시험기간은 가용 시간을 수정할 수 없습니다.")
+        return redirect('exams:period_detail', period_id=period.id)
+
     queryset = AvailableTime.objects.filter(exam_period=period).order_by("date")
     formset = AvailableTimeFormSet(queryset=queryset)
     next_url = request.GET.get("next") or request.META.get("HTTP_REFERER", "")
