@@ -84,7 +84,8 @@ def _get_owned_exam_period(user, period_id):
 # =====================================================================
 def check_exam_period_locked_by_period_id(view_func):
     """period_id 기준: POST 요청 시 ExamPeriod를 Row Lock(select_for_update) 처리 후
-    계획 존재 여부 검증 + view_func 실행까지 동일 트랜잭션/락 스코프 안에서 수행"""
+    만료 여부(Lazy Check) 최신화 + 계획 존재 여부 검증 + view_func 실행까지
+    동일 트랜잭션/락 스코프 안에서 수행"""
     @wraps(view_func)
     def wrapped_view(request, period_id, *args, **kwargs):
         if request.method == 'POST':
@@ -94,6 +95,12 @@ def check_exam_period_locked_by_period_id(view_func):
                     id=period_id,
                     user=request.user
                 )
+                # 만료된 ACTIVE 시험기간을 여기서도 COMPLETED로 전환해야
+                # Lazy Check 화면(period_list/period_detail 등)을 거치지
+                # 않고 곧장 POST하는 경로로 만료된 시험기간이 수정되는 걸
+                # 막을 수 있다. 이미 같은 트랜잭션에서 이 row를 잠근
+                # 상태이므로 재잠금 비용은 없다.
+                period = complete_expired_period(period)
                 if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
                     messages.error(request, "종료된 시험기간은 수정할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
@@ -116,6 +123,7 @@ def check_exam_period_locked_by_exam_id(view_func):
                     exam_period__user=request.user
                 )
                 period = ExamPeriod.objects.select_for_update().get(id=exam.exam_period_id)
+                period = complete_expired_period(period)
                 if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
                     messages.error(request, "종료된 시험기간의 과목은 수정할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
@@ -132,10 +140,6 @@ def check_exam_period_locked_by_material_id(view_func):
     def wrapped_view(request, material_id, *args, **kwargs):
         if request.method == 'POST':
             with transaction.atomic():
-                # 1. exam_period_id만 얻기 위한 조회. 이 시점의 status/analysis_status는
-                #    아래 판정에 절대 사용하지 않는다 - ExamPeriod 락을 기다리는 동안
-                #    다른 요청(AI 분석 등)이 먼저 락을 잡고 이 material을 PROCESSING으로
-                #    선점할 수 있기 때문이다.
                 material_ref = get_object_or_404(
                     StudyMaterial.objects.select_related('exam__exam_period'),
                     id=material_id,
@@ -144,6 +148,7 @@ def check_exam_period_locked_by_material_id(view_func):
                 period = ExamPeriod.objects.select_for_update().get(
                     id=material_ref.exam.exam_period_id
                 )
+                period = complete_expired_period(period)
 
                 if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
                     messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
@@ -153,11 +158,6 @@ def check_exam_period_locked_by_material_id(view_func):
                     messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                     return redirect('exams:period_detail', period_id=period.id)
 
-                # 2. ExamPeriod 락을 획득한 *이후*에 material을 다시 조회해서
-                #    최신 status/analysis_status로 판정한다. 위 1번에서 락 대기가
-                #    있었다면, 그 사이 다른 요청이 먼저 이 ExamPeriod를 잠그고
-                #    material을 PROCESSING으로 바꿔놓았을 수 있는데, 이 재조회로
-                #    그 변경 사항을 놓치지 않고 반영한다.
                 material = get_object_or_404(
                     StudyMaterial,
                     id=material_id,
@@ -175,28 +175,13 @@ def check_exam_period_locked_by_material_id(view_func):
         return view_func(request, material_id, *args, **kwargs)
     return wrapped_view
 
-def check_exam_period_not_locked_by_material_id(claim_func=None):
-    """material_id 기준: ExamPeriod row lock 안에서
-      1) 계획 존재 여부 검증
-      2) (claim_func가 주어지면) material을 PROCESSING 등으로 원자적 선점
-    까지 마친 뒤 락을 해제하고, view_func 자체(PDF 추출/AI 분석 같은
-    장시간 외부 호출)는 트랜잭션·락 밖에서 실행한다.
 
-    claim_func(material) -> (claimed, message, level, extra)
-        claimed=False면 message/level(예: 'error'|'info')로 안내하고
-        view_func를 호출하지 않은 채 material_detail로 리다이렉트한다.
-        claimed=True면 extra는 view_func에 claim_extra 키워드 인자로
-        그대로 전달된다 (예: 분석 run_id).
-    """
+def check_exam_period_not_locked_by_material_id(claim_func=None):
     def decorator(view_func):
         @wraps(view_func)
         def wrapped_view(request, material_id, *args, **kwargs):
             if request.method == 'POST':
                 with transaction.atomic():
-                    # 1. exam_period_id만 얻기 위한 조회. 이 시점의 material은
-                    #    claim_func 판정에 절대 쓰지 않는다 - ExamPeriod 락을
-                    #    기다리는 동안 다른 요청(삭제 등)이 먼저 락을 잡고
-                    #    이 material을 지우거나 상태를 바꿀 수 있기 때문이다.
                     material_ref = get_object_or_404(
                         StudyMaterial.objects.select_related('exam__exam_period'),
                         id=material_id,
@@ -205,6 +190,7 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
                     period = ExamPeriod.objects.select_for_update().get(
                         id=material_ref.exam.exam_period_id
                     )
+                    period = complete_expired_period(period)
 
                     if period.status in (ExamPeriodStatus.COMPLETED, ExamPeriodStatus.ARCHIVED):
                         messages.error(request, "종료된 시험기간의 학습자료는 수정할 수 없습니다.")
@@ -214,11 +200,6 @@ def check_exam_period_not_locked_by_material_id(claim_func=None):
                         messages.error(request, "이미 계획이 생성된 시험기간의 학습자료는 수정하거나 삭제할 수 없습니다.")
                         return redirect('exams:period_detail', period_id=period.id)
 
-                    # 2. ExamPeriod 락 획득 이후 material을 다시 조회한다.
-                    #    락 대기 중 다른 요청이 먼저 락을 잡고 material을 삭제했거나
-                    #    상태를 바꿨을 수 있으므로, claim_func에는 이 재조회 결과만
-                    #    넘긴다. 삭제된 경우 material_detail로 안내하고 종료한다
-                    #    (500 대신 정상적인 사용자 메시지).
                     try:
                         material = StudyMaterial.objects.get(
                             id=material_id,

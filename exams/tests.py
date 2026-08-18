@@ -2842,18 +2842,24 @@ class ExamPeriodLockValidationTests(TestCase):
             password="password123",
         )
 
+        # 날짜를 하드코딩하면 테스트 실행 시점(실제 시스템 날짜)이 지나가면서
+        # 이 시험기간이 "만료"로 취급되어(end_date < today) Lazy Check가
+        # COMPLETED로 전환해버리는 문제가 있었다. 이 테스트 클래스는 DailyPlan
+        # 존재 여부에 따른 락만 검증하려는 것이므로, 항상 미래인 상대 날짜를
+        # 쓰도록 timezone.localdate() 기준으로 계산한다.
+        today = timezone.localdate()
         self.period = ExamPeriod.objects.create(
             user=self.user,
             title="중간고사",
-            start_date=datetime.date(2026, 5, 1),
-            end_date=datetime.date(2026, 5, 10),
+            start_date=today,
+            end_date=today + datetime.timedelta(days=10),
             status=ExamPeriodStatus.ACTIVE,
         )
 
         self.exam = Exam.objects.create(
             exam_period=self.period,
             subject_name="알고리즘",
-            exam_date=datetime.date(2026, 5, 5),
+            exam_date=today + datetime.timedelta(days=5),
             priority=PriorityLevel.HIGH,
         )
 
@@ -2876,10 +2882,9 @@ class ExamPeriodLockValidationTests(TestCase):
             estimated_max_minutes=60,
         )
 
-        # 계획이 이미 생성된 시험기간 (DailyPlan + DailyPlanItem으로 PROTECT 제약 관계 형성)
         self.daily_plan = DailyPlan.objects.create(
             exam_period=self.period,
-            date=datetime.date(2026, 5, 1),
+            date=today,
             available_minutes=120,
             planned_minutes=120,
             status=DailyPlanStatus.PLANNED,
@@ -2927,8 +2932,8 @@ class ExamPeriodLockValidationTests(TestCase):
             url,
             {
                 "title": "수정된 중간고사",
-                "start_date": "2026-05-01",
-                "end_date": "2026-05-10",
+                "start_date": self.period.start_date,
+                "end_date": self.period.end_date,
             },
         )
 
@@ -2950,11 +2955,11 @@ class ExamPeriodLockValidationTests(TestCase):
         url = reverse("exams:subject_create", args=[self.period.id])
 
         response = self.client.post(
-            url,
+            url,    
             {
-                "subject_name": "자료구조",
-                "exam_date": "2026-05-06",
-                "priority": PriorityLevel.HIGH,
+                "title": "수정된 중간고사",
+                "start_date": self.period.start_date,
+                "end_date": self.period.end_date,
             },
         )
 
@@ -2973,11 +2978,11 @@ class ExamPeriodLockValidationTests(TestCase):
         url = reverse("exams:subject_update", args=[self.period.id, self.exam.id])
 
         response = self.client.post(
-            url,
+            url,    
             {
-                "subject_name": "수정된 알고리즘",
-                "exam_date": "2026-05-06",
-                "priority": PriorityLevel.HIGH,
+                "title": "수정된 중간고사",
+                "start_date": self.period.start_date,
+                "end_date": self.period.end_date,
             },
         )
 
@@ -3013,11 +3018,11 @@ class ExamPeriodLockValidationTests(TestCase):
         url = reverse("exams:material_create", args=[self.exam.id])
 
         response = self.client.post(
-            url,
+            url,    
             {
-                "title": "새로운 자료",
-                "material_type": MaterialType.TEXT,
-                "extracted_text": "새로운 테스트 내용",
+                "title": "수정된 중간고사",
+                "start_date": self.period.start_date,
+                "end_date": self.period.end_date,
             },
         )
 
@@ -3157,7 +3162,7 @@ class ExamPeriodLockValidationTests(TestCase):
             url,
             {
                 "subject_name": "수정된 알고리즘",
-                "exam_date": "2026-05-06",
+                "exam_date": self.exam.exam_date,
                 "priority": PriorityLevel.HIGH,
             },
         )
@@ -4584,3 +4589,139 @@ class LazyCompleteViewConsistencyTests(TestCase):
 
         self.assertEqual(period_a.status, ExamPeriodStatus.COMPLETED)
         self.assertEqual(period_b.status, ExamPeriodStatus.COMPLETED)
+
+# =====================================================================
+# 후속 PR 회귀 테스트: check_exam_period_locked_by_* 데코레이터가
+# Lazy Check 화면(period_list/period_detail 등)을 거치지 않고 곧장 POST가
+# 온 경우에도 만료(status=ACTIVE, end_date 경과)를 감지해 차단하는지 검증.
+# =====================================================================
+class DecoratorLazyCompleteOnDirectPostTests(TestCase):
+    def setUp(self):
+        self.user = _make_user()
+        self.client.force_login(self.user)
+
+    def test_period_update_blocked_when_expired_without_visiting_lazy_check_screen(self):
+        """status=ACTIVE, end_date 경과 시험기간에 period_list/period_detail을
+        거치지 않고 곧장 period_update POST를 보내도 차단되어야 한다."""
+        period = _make_period(self.user, days_ago_end=1, title="원래 제목")
+
+        response = self.client.post(
+            reverse('exams:period_update', args=[period.id]),
+            {
+                'title': '수정 시도',
+                'start_date': period.start_date,
+                'end_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertEqual(period.title, "원래 제목")  # 수정되지 않음
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_subject_create_blocked_when_period_expired_via_direct_post(self):
+        period = _make_period(self.user, days_ago_end=1)
+
+        response = self.client.post(
+            reverse('exams:subject_create', args=[period.id]),
+            {
+                'subject_name': '새 과목',
+                'exam_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertFalse(
+            Exam.objects.filter(exam_period=period, subject_name='새 과목').exists()
+        )
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_subject_delete_blocked_when_period_expired_via_direct_post(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+
+        response = self.client.post(
+            reverse('exams:subject_delete', args=[period.id, exam.id])
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertTrue(Exam.objects.filter(id=exam.id).exists())
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_material_delete_blocked_when_period_expired_via_direct_post(self):
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        material = _make_material(exam)
+
+        response = self.client.post(
+            reverse('exams:material_delete', args=[material.id])
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        self.assertTrue(StudyMaterial.objects.filter(id=material.id).exists())
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_material_extract_blocked_when_period_expired_via_direct_post(self):
+        """check_exam_period_not_locked_by_material_id도 동일 버그였으므로 함께 검증."""
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        pdf_material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            title="자료",
+            status=MaterialStatus.PENDING,
+        )
+
+        response = self.client.post(
+            reverse('exams:material_extract', args=[pdf_material.id])
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        pdf_material.refresh_from_db()
+        self.assertEqual(pdf_material.status, MaterialStatus.PENDING)  # 추출 안 됨
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_period_update_still_allowed_when_not_expired(self):
+        """회귀 방지: end_date가 아직 안 지난 정상 ACTIVE 시험기간은 여전히
+        수정 가능해야 한다 (이번 수정이 정상 케이스를 막으면 안 됨)."""
+        period = _make_period(self.user, days_ago_end=-5, title="원래 제목")
+
+        response = self.client.post(
+            reverse('exams:period_update', args=[period.id]),
+            {
+                'title': '수정된 제목',
+                'start_date': period.start_date,
+                'end_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertEqual(period.title, "수정된 제목")
+        self.assertEqual(response.status_code, 302)
+
+    def test_period_update_not_blocked_when_expired_but_processing_material_exists(self):
+        """만료됐어도 PROCESSING 중인 자료가 있으면 COMPLETED 전환 자체가
+        보류되므로, ACTIVE 상태 그대로 수정 경로에 도달한다(다른 방어 규칙과
+        충돌하지 않는지 확인)."""
+        period = _make_period(self.user, days_ago_end=1, title="원래 제목")
+        exam = _make_exam(period)
+        _make_material(exam, status=MaterialStatus.PROCESSING)
+
+        response = self.client.post(
+            reverse('exams:period_update', args=[period.id]),
+            {
+                'title': '수정된 제목',
+                'start_date': period.start_date,
+                'end_date': period.end_date,
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertEqual(period.title, "수정된 제목")
+        self.assertEqual(response.status_code, 302)
