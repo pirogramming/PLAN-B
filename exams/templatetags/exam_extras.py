@@ -99,3 +99,15 @@ def get_calendar_grid(period_id):
         })
         current += timedelta(days=1)
     return days
+_WIZARD_STEP_ORDER = ['period_form', 'subject_create', 'available_time', 'material', 'task_review', 'feasibility']
+
+
+@register.simple_tag
+def step_state(current_nav, step_name):
+    """사이드바 1~6단계: 지금 단계 기준으로 지나온 단계는 'done', 지금은 'on', 나머지는 ''."""
+    if current_nav == step_name:
+        return 'on'
+    try:
+        return 'done' if _WIZARD_STEP_ORDER.index(step_name) < _WIZARD_STEP_ORDER.index(current_nav) else ''
+    except ValueError:
+        return ''

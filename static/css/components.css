@@ -14,6 +14,8 @@
 .btn.btn-brand{ background:var(--brand4); }
 .btn.btn-brand:hover{ background:var(--brand5); }
 .btn.btn-ghost{ background:var(--neutral1); color:var(--neutral11); border:2px solid var(--neutral4); box-shadow:none; }
+.btn.btn-danger { background: var(--judge3); color: var(--neutral1); }
+.btn.btn-danger:hover { background: var(--judge3); filter: brightness(0.9); }
 .btn.btn-block{ width:100%; }
 
 .card{
@@ -82,6 +84,13 @@
 }
 .nav-step.on .step-num{ background:var(--neutral1); color:var(--neutral11); }
 
+.nav-step.done .step-num {
+  background: var(--brand4);
+  color: var(--neutral1);
+}
+.nav-step.done {
+  color: var(--brand4);
+}
 /* 탭바 — 실제로는 페이지 이동 링크(<a>)지만 시각적으로는 탭처럼 보이게 */
 .tabbar{ display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
 .tabbar a.tab{
@@ -214,6 +223,11 @@
 }
 .task-field-group {
   margin-bottom: 14px;
+}
+.task-item-card input[id$="-title"] {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: var(--neutral11);
 }
 .task-select-row {
   display: flex;
@@ -689,6 +703,78 @@
 .period-link-btn {
   flex: 1;
   justify-content: center;
+  font-size: 12px;
+}
+
+.period-material-list {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--neutral4);
+}
+.period-material-heading {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--neutral7);
+  margin-bottom: 8px;
+}
+.period-material-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.period-material-item-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: var(--neutral2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.period-material-item-label input[type="checkbox"] {
+  flex: none;
+}
+.period-material-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--neutral10);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.period-material-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--neutral7);
+}
+.period-material-delete-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: none;
+  background: var(--neutral2);
+  color: var(--neutral7);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.period-material-delete-btn:hover {
+  background: var(--judge3-bg);
+  color: var(--judge3);
+}
+.period-material-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.period-material-actions .btn {
+  flex: 1;
   font-size: 12px;
 }
 
