@@ -146,7 +146,7 @@
       minutesInput.value = total || '';
     }
 
-    document.querySelectorAll('.avail-day:not(.past-day)')
+    document.querySelectorAll('.avail-day:not(.past-day):not(.finalized-day)').forEach(
       function (btn) {
         btn.addEventListener('click', function () {
           selectDay(btn);

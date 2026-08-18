@@ -74,7 +74,7 @@ def get_calendar_grid(period_id):
         .order_by('date')
         .values_list('date', 'available_minutes')
     )
-        date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
+    date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
     date_to_minutes = {d: m for d, m in available_rows}
     today = timezone.localdate()
 

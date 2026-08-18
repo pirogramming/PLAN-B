@@ -1,7 +1,7 @@
 {% load static exam_extras %}
 {% get_wizard_context period exam as wiz %}
 
-<aside class="side{% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %} side-wizard{% endif %}">
+<aside class="side{% if nav == 'period_form' or nav == 'subject_create' or nav == 'available_time' or nav == 'material' or nav == 'task_review' or nav == 'feasibility' %} side-wizard{% endif %}">
   <button class="brand" id="toggleSide" type="button" aria-label="사이드바 접기">
     <span class="brand-logo"><img src="{% static 'images/logo-lockup.png' %}" alt="PLAN B"></span>
   </button>
@@ -60,9 +60,9 @@
     {% endif %}
   </nav>
 
-  {% if nav != 'period_manage' and nav != 'period_manage_available_time' and nav != 'period_manage_task_view' %}
-  <div class="side-label">시험 준비 단계</div>
-  <nav class="nav-steps">
+    {% if nav == 'period_form' or nav == 'subject_create' or nav == 'available_time' or nav == 'material' or nav == 'task_review' or nav == 'feasibility' %}
+    <div class="side-label">시험 준비 단계</div>
+    <nav class="nav-steps">
     <a class="nav-i nav-step {% if nav == 'period_form' %}on{% endif %}"
        href="{% if wiz.period_id %}{% url 'exams:period_update' wiz.period_id %}{% else %}{% url 'exams:period_create' %}{% endif %}">
       <span class="step-num">1</span>시험기간 등록
@@ -109,4 +109,14 @@
       </button>
     </form>
   </div>
+    <script>
+  (function () {
+    if (window.matchMedia('(max-width: 767px)').matches) {
+      var activeStep = document.querySelector('.side-wizard .nav-i.on');
+      if (activeStep) {
+        activeStep.scrollIntoView({ inline: 'center', block: 'nearest' });
+      }
+    }
+  })();
+  </script>
 </aside>
