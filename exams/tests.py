@@ -5046,3 +5046,44 @@ class SaveExtractedTasksOrderTestCase(TestCase):
 
         task = StudyTask.objects.get(exam=self.exam, title="1장 작업")
         self.assertEqual(task.order, material.id * task_extractor.ORDER_BLOCK_SIZE + 1)
+
+
+class MaterialBulkExtractTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="tester",
+            email="tester@example.com",
+            password="testpass123",
+        )
+        logged_in = self.client.login(email="tester@example.com", password="testpass123")
+        assert logged_in, "로그인 실패 - AUTH_USER_MODEL 설정을 다시 확인하세요"
+
+        today = timezone.localdate()
+        self.period = ExamPeriod.objects.create(
+            user=self.user,
+            title="테스트 시험기간",
+            start_date=today,
+            end_date=today + timezone.timedelta(days=14),
+            status=ExamPeriodStatus.ACTIVE,
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.period,
+            subject_name="테스트 과목",
+            exam_date=today,
+        )
+
+    def test_bulk_extract_ajax_does_not_leak_messages_to_session(self):
+        response = self.client.post(
+            reverse("exams:material_bulk_extract", args=[self.exam.id]),
+            data={"material_ids": ["abc"]},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertTrue(any("잘못된 자료 ID" in r for r in data["fail_reasons"]))
+
+        follow_up = self.client.get(reverse("exams:period_detail", args=[self.period.id]))
+        leaked = [m.message for m in get_messages(follow_up.wsgi_request)]
+        self.assertEqual(leaked, [])

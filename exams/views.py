@@ -939,7 +939,7 @@ def _extract_one(material, run_id):
         except StaleExtractionRunError:
             logger.info(f"추출 실행이 완료 직전 다른 실행에 선점됨 (material_id={material_id})")
             return False, "다른 요청이 먼저 이 자료를 처리했습니다. 최신 상태를 다시 확인해주세요.", "info"
-        return False, "PDF 텍스트 추출에 실패했습니다.", "error"
+        return False, f"PDF 텍스트 추출에 실패했습니다: {e}", "error"
     except Exception:
         logger.exception(f"PDF 추출 중 예기치 못한 시스템 오류 발생 (material_id={material_id})")
         try:
@@ -1192,12 +1192,21 @@ def material_analysis_status(request, material_id):
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
-def _bulk_extract_response(request, period_id, *, ok, success_count=0, fail_count=0, success_ids=None):
-    """AJAX(fetch)로 온 요청이면 실제 추출 성공 여부 + 성공한 자료 id 목록을
-    JSON으로 내려준다. FE가 이 success_ids만 골라서 분석 요청으로 이어간다
-    (일부만 실패해도 나머지 성공한 자료는 계속 분석까지 진행하는 partial-success
-    정책과 맞추기 위함 - MaterialBulkExtractTests/MaterialBulkAnalyzeTests 참고).
-    일반 폼 제출(비AJAX)은 기존처럼 period_detail로 리다이렉트한다.
+def _bulk_action_response(request, redirect_view, redirect_kwargs, *, ok,
+                           success_count=0, fail_count=0, success_ids=None, fail_reasons=None):
+    """AJAX(fetch)로 온 요청이면 실제 처리 성공 여부 + 성공한 자료 id 목록 + 실패
+    사유를 JSON으로 내려준다. material_bulk_extract, material_bulk_analyze가
+    공통으로 사용한다. FE가 success_ids만 골라서 다음 단계(추출 성공 → 분석
+    요청)로 이어가고, fail_reasons로 실패한 자료를 사용자에게 안내한다
+    (일부만 실패해도 나머지 성공한 자료는 계속 진행하는 partial-success 정책과
+    맞추기 위함 - MaterialBulkExtractTests/MaterialBulkAnalyzeTests 참고).
+
+    django messages는 AJAX 응답에서는 소비되지 않고 세션에 남아있다가 다음
+    일반 페이지 렌더링 때 튀어나오므로, AJAX 요청에서는 messages.* 대신 이
+    JSON 필드로만 결과를 전달한다. 일반 폼 제출(비AJAX)은 redirect_view/
+    redirect_kwargs로 지정된 곳으로 리다이렉트한다 - extract는 항상
+    period_detail로, analyze는 항상 task_review로 돌아가는 기존 동작을
+    그대로 유지하기 위해 호출부에서 넘겨받는다.
     """
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return JsonResponse({
@@ -1205,35 +1214,46 @@ def _bulk_extract_response(request, period_id, *, ok, success_count=0, fail_coun
             'success_count': success_count,
             'fail_count': fail_count,
             'success_ids': success_ids or [],
+            'fail_reasons': fail_reasons or [],
         })
-    return redirect('exams:period_detail', period_id=period_id)
-
+    return redirect(redirect_view, **redirect_kwargs)
 
 @login_required
 @require_http_methods(["POST"])
 def material_bulk_extract(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     raw_material_ids = request.POST.getlist("material_ids")
 
+    def _respond(**kwargs):
+        return _bulk_action_response(
+            request, 'exams:period_detail', {'period_id': exam.exam_period_id}, **kwargs
+        )
+
     if not raw_material_ids:
-        messages.error(request, "추출할 자료를 선택해주세요.")
-        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
+        if not is_ajax:
+            messages.error(request, "추출할 자료를 선택해주세요.")
+        return _respond(ok=False)
 
     material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
-    for raw in invalid_ids:
-        messages.error(request, f"잘못된 자료 ID입니다: {raw}")
+    invalid_reasons = [f"잘못된 자료 ID입니다: {raw}" for raw in invalid_ids]
+    if not is_ajax:
+        for m in invalid_reasons:
+            messages.error(request, m)
 
     if not material_ids:
-        messages.error(request, "추출할 자료를 선택해주세요.")
-        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
+        if not is_ajax:
+            messages.error(request, "추출할 자료를 선택해주세요.")
+        return _respond(ok=False, fail_count=len(invalid_reasons), fail_reasons=invalid_reasons)
 
     if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
-        messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
-        return _bulk_extract_response(request, exam.exam_period_id, ok=False)
+        if not is_ajax:
+            messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
+        return _respond(ok=False)
 
     success_count = 0
     success_ids = []
-    fail_messages = []
+    fail_messages = list(invalid_reasons)
 
     for material_id in material_ids:
         def _run(material, extra):
@@ -1249,18 +1269,20 @@ def material_bulk_extract(request, exam_id):
         else:
             fail_messages.append(f"자료 #{material_id}: {msg}")
 
-    if success_count:
-        messages.success(request, f"{success_count}개 자료 추출이 완료되었습니다.")
-    for m in fail_messages:
-        messages.error(request, m)
+    if not is_ajax:
+        if success_count:
+            messages.success(request, f"{success_count}개 자료 추출이 완료되었습니다.")
+        for m in fail_messages[len(invalid_reasons):]:
+            messages.error(request, m)
 
-    return _bulk_extract_response(
-        request, exam.exam_period_id,
+    return _respond(
         ok=success_count > 0,
         success_count=success_count,
         fail_count=len(fail_messages),
         success_ids=success_ids,
+        fail_reasons=fail_messages,
     )
+
 # =====================================================================
 # 자료 일괄 AI 분석 (exams:material_bulk_analyze)
 # material_bulk_extract와 동일한 패턴 - 단건 claim(_claim_material_for_analysis)
@@ -1271,26 +1293,38 @@ def material_bulk_extract(request, exam_id):
 @require_http_methods(["POST"])
 def material_bulk_analyze(request, exam_id):
     exam = get_object_or_404(Exam, id=exam_id, exam_period__user=request.user)
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     raw_material_ids = request.POST.getlist("material_ids")
 
+    def _respond(**kwargs):
+        return _bulk_action_response(
+            request, 'exams:task_review', {'exam_id': exam_id}, **kwargs
+        )
+
     if not raw_material_ids:
-        messages.error(request, "분석할 자료를 선택해주세요.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        if not is_ajax:
+            messages.error(request, "분석할 자료를 선택해주세요.")
+        return _respond(ok=False)
 
     material_ids, invalid_ids = _normalize_material_ids(raw_material_ids)
-    for raw in invalid_ids:
-        messages.error(request, f"잘못된 자료 ID입니다: {raw}")
+    invalid_reasons = [f"잘못된 자료 ID입니다: {raw}" for raw in invalid_ids]
+    if not is_ajax:
+        for m in invalid_reasons:
+            messages.error(request, m)
 
     if not material_ids:
-        messages.error(request, "분석할 자료를 선택해주세요.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        if not is_ajax:
+            messages.error(request, "분석할 자료를 선택해주세요.")
+        return _respond(ok=False, fail_count=len(invalid_reasons), fail_reasons=invalid_reasons)
 
     if len(material_ids) > MAX_BULK_PROCESS_MATERIALS:
-        messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
-        return redirect('exams:period_detail', period_id=exam.exam_period_id)
+        if not is_ajax:
+            messages.error(request, f"한 번에 최대 {MAX_BULK_PROCESS_MATERIALS}개까지 처리할 수 있습니다.")
+        return _respond(ok=False)
 
     success_count = 0
-    fail_messages = []
+    success_ids = []
+    fail_messages = list(invalid_reasons)
 
     for material_id in material_ids:
         def _run(material, extra):
@@ -1302,15 +1336,23 @@ def material_bulk_analyze(request, exam_id):
         )
         if ok:
             success_count += 1
+            success_ids.append(material_id)
         else:
             fail_messages.append(f"자료 #{material_id}: {msg}")
 
-    if success_count:
-        messages.success(request, f"{success_count}개 자료 AI 분석이 완료되었습니다.")
-    for m in fail_messages:
-        messages.error(request, m)
+    if not is_ajax:
+        if success_count:
+            messages.success(request, f"{success_count}개 자료 AI 분석이 완료되었습니다.")
+        for m in fail_messages[len(invalid_reasons):]:
+            messages.error(request, m)
 
-    return redirect('exams:task_review', exam_id=exam_id)
+    return _respond(
+        ok=success_count > 0,
+        success_count=success_count,
+        fail_count=len(fail_messages),
+        success_ids=success_ids,
+        fail_reasons=fail_messages,
+    )
 
 # =====================================================================
 # AI 작업 검토 (exams:task_review) 
