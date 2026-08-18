@@ -94,10 +94,71 @@
         학습 작업 확인
       </a>
     </div>
+
+    {% if exam.study_materials.all %}
+    <div class="period-material-list">
+      <div class="period-material-heading">등록된 자료 ({{ exam.study_materials.all|length }})</div>
+      <form method="post"
+            class="period-material-form"
+            action="{% url 'exams:material_bulk_extract' exam.id %}"
+            data-analyze-url="{% url 'exams:material_bulk_analyze' exam.id %}">
+        {% csrf_token %}
+        {% for m in exam.study_materials.all %}
+        <div class="period-material-item">
+          <label class="period-material-item-label">
+            <input type="checkbox" name="material_ids" value="{{ m.id }}">
+            <span class="period-material-title">{{ m.title }}</span>
+            <span class="period-material-status">
+              추출 {{ m.get_status_display }} · 분석 {{ m.get_analysis_status_display }}
+            </span>
+          </label>
+          <button type="submit"
+                  formaction="{% url 'exams:material_delete' m.id %}"
+                  formnovalidate
+                  class="period-material-delete-btn"
+                  title="이 자료 삭제"
+                  onclick="return confirm('{{ m.title|escapejs }} 자료를 삭제할까요?');">
+            ×
+          </button>
+        </div>
+        {% endfor %}
+        <div class="period-material-actions">
+          <button type="submit" class="btn btn-danger period-small-btn">
+            선택 자료 추출 + 분석
+          </button>
+        </div>
+      </form>
+    </div>
+    {% endif %}
   </div>
   {% endfor %}
 </div>
 {% endblock %}
+{% block exam_extra_js %}
+<script>
+(function () {
+  document.querySelectorAll('.period-material-form').forEach(function (form) {
+    form.addEventListener('submit', function (e) {
+      var submitter = e.submitter;
+      if (!submitter || submitter.classList.contains('period-material-delete-btn')) return;
+      if (form.dataset.chaining === 'true') return;
 
+      var checked = form.querySelectorAll('input[name="material_ids"]:checked');
+      if (checked.length === 0) return;
+
+      e.preventDefault();
+      var formData = new FormData(form);
+      fetch(form.action, { method: 'POST', body: formData })
+        .catch(function () {})
+        .then(function () {
+          form.dataset.chaining = 'true';
+          form.action = form.dataset.analyzeUrl;
+          form.submit();
+        });
+    });
+  });
+})();
+</script>
+{% endblock %}
 {# available_times 요약은 아직 개수만 보여줌 — 더 자세한 요약(예: 채워진 날짜 비율)이
 필요하면 이주헌/장희원한테 view에서 요약값을 context로 내려달라고 요청하면 됨. #}
