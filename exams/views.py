@@ -1179,15 +1179,20 @@ def material_analysis_status(request, material_id):
 # =====================================================================
 @login_required
 @require_http_methods(["POST"])
-def _bulk_extract_response(request, period_id, *, ok, success_count=0, fail_count=0):
-    """AJAX(fetch)로 온 요청이면 실제 추출 성공 여부를 JSON으로 내려준다.
-    이걸로 FE가 '추출이 진짜 성공했을 때만' 분석 요청으로 이어갈 수 있다
-    (기존엔 성공/실패 상관없이 항상 redirect(200)만 내려줘서, fetch의
-    response.ok만으로는 실패를 구분할 수 없었음). 일반 폼 제출(비AJAX)은
-    기존처럼 period_detail로 리다이렉트한다.
+def _bulk_extract_response(request, period_id, *, ok, success_count=0, fail_count=0, success_ids=None):
+    """AJAX(fetch)로 온 요청이면 실제 추출 성공 여부 + 성공한 자료 id 목록을
+    JSON으로 내려준다. FE가 이 success_ids만 골라서 분석 요청으로 이어간다
+    (일부만 실패해도 나머지 성공한 자료는 계속 분석까지 진행하는 partial-success
+    정책과 맞추기 위함 - MaterialBulkExtractTests/MaterialBulkAnalyzeTests 참고).
+    일반 폼 제출(비AJAX)은 기존처럼 period_detail로 리다이렉트한다.
     """
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        return JsonResponse({'ok': ok, 'success_count': success_count, 'fail_count': fail_count})
+        return JsonResponse({
+            'ok': ok,
+            'success_count': success_count,
+            'fail_count': fail_count,
+            'success_ids': success_ids or [],
+        })
     return redirect('exams:period_detail', period_id=period_id)
 
 
@@ -1214,6 +1219,7 @@ def material_bulk_extract(request, exam_id):
         return _bulk_extract_response(request, exam.exam_period_id, ok=False)
 
     success_count = 0
+    success_ids = []
     fail_messages = []
 
     for material_id in material_ids:
@@ -1226,6 +1232,7 @@ def material_bulk_extract(request, exam_id):
         )
         if ok:
             success_count += 1
+            success_ids.append(material_id)
         else:
             fail_messages.append(f"자료 #{material_id}: {msg}")
 
@@ -1236,9 +1243,10 @@ def material_bulk_extract(request, exam_id):
 
     return _bulk_extract_response(
         request, exam.exam_period_id,
-        ok=(len(fail_messages) == 0 and success_count > 0),
+        ok=success_count > 0,
         success_count=success_count,
         fail_count=len(fail_messages),
+        success_ids=success_ids,
     )
 # =====================================================================
 # 자료 일괄 AI 분석 (exams:material_bulk_analyze)
