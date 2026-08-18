@@ -6,6 +6,7 @@ import uuid
 import shutil
 import tempfile
 from unittest.mock import patch
+from django.conf import settings as dj_settings
 
 import pypdfium2 as pdfium
 from django.db import transaction
@@ -3765,41 +3766,7 @@ class MaterialExtractStaleTests(TestCase):
 
         self.assertFalse(data["extraction_is_stale"])
 
-"""
-다중 PDF 업로드(material_create) + 일괄 추출(material_bulk_extract) +
-일괄 분석(material_bulk_analyze)에 대한 테스트.
 
-가정:
-- 앱 이름은 `exams` (views.py 내부의 상대 import 및 URL 네임스페이스 기준)
-- StudyMaterialForm은 material_type + file(선택)을 받는다
-- ExamPeriodStatus.ACTIVE 상태의 시험기간 + 계획(DailyPlan) 없는 상태가
-  "수정 가능" 조건이다 (check_exam_period_locked_by_exam_id 등 참고)
-
-실제 프로젝트의 앱 이름/모델 필드가 다르면 import 경로와 필드명만
-맞춰서 조정하면 된다.
-"""
-from unittest.mock import patch
-
-from django.conf import settings as dj_settings
-from django.contrib.auth import get_user_model
-from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
-from django.urls import reverse
-from django.utils import timezone
-
-from core.choices import ExamPeriodStatus, MaterialStatus, MaterialType
-from exams.models import Exam, ExamPeriod, StudyMaterial
-from exams.services.pdf_extractor import PdfExtractionError
-from exams.services.analysis_orchestrator import (
-    DuplicateAnalysisRequestError,
-)
-
-User = get_user_model()
-
-# 테스트 DB에는 collectstatic이 안 돌아있어 ManifestStaticFilesStorage가
-# 'css/tokens.css' 같은 해시된 정적파일을 찾지 못해 500이 난다. 테스트에서는
-# 매니페스트 없이도 동작하는 기본 스토리지로 우회한다. 기존 STORAGES 설정 중
-# 'default'(미디어 파일) 백엔드는 그대로 두고 'staticfiles'만 바꾼다.
 _TEST_STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
 _TEST_STORAGES = dict(getattr(dj_settings, "STORAGES", {}))
 _TEST_STORAGES["staticfiles"] = {"BACKEND": _TEST_STATICFILES_STORAGE}
@@ -4602,9 +4569,15 @@ class LazyCompleteViewConsistencyTests(TestCase):
         self.assertEqual(period_b.status, ExamPeriodStatus.COMPLETED)
 
 # =====================================================================
-# 후속 PR 회귀 테스트: check_exam_period_locked_by_* 데코레이터가
-# Lazy Check 화면(period_list/period_detail 등)을 거치지 않고 곧장 POST가
-# 온 경우에도 만료(status=ACTIVE, end_date 경과)를 감지해 차단하는지 검증.
+# 후속 PR 회귀 테스트: check_exam_period_locked_by_* 계열 데코레이터 및
+# available_time_update / period_manage_available_time /
+# _claim_and_run_for_material이 Lazy Check 화면(period_list/period_detail
+# 등)을 거치지 않고 곧장 POST가 온 경우에도 만료(status=ACTIVE, end_date
+# 경과)를 감지해 차단하는지 검증.
+#
+# is_expired() 정책 분리 검증도 포함: PROCESSING 자료가 있어 status가
+# COMPLETED로 전환되지 않고 ACTIVE로 남아있는 경우에도, end_date가 지난
+# 이상 수정 POST는 차단되어야 한다 ("전환 보류"와 "수정 차단"은 별개 정책).
 # =====================================================================
 class DecoratorLazyCompleteOnDirectPostTests(TestCase):
     def setUp(self):
@@ -4627,7 +4600,7 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
 
         period.refresh_from_db()
         self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
-        self.assertEqual(period.title, "원래 제목")  # 수정되지 않음
+        self.assertEqual(period.title, "원래 제목")
         self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
 
     def test_subject_create_blocked_when_period_expired_via_direct_post(self):
@@ -4693,12 +4666,12 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         period.refresh_from_db()
         self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
         pdf_material.refresh_from_db()
-        self.assertEqual(pdf_material.status, MaterialStatus.PENDING)  # 추출 안 됨
+        self.assertEqual(pdf_material.status, MaterialStatus.PENDING)
         self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
 
     def test_period_update_still_allowed_when_not_expired(self):
         """회귀 방지: end_date가 아직 안 지난 정상 ACTIVE 시험기간은 여전히
-        수정 가능해야 한다 (이번 수정이 정상 케이스를 막으면 안 됨)."""
+        수정 가능해야 한다."""
         period = _make_period(self.user, days_ago_end=-5, title="원래 제목")
 
         response = self.client.post(
@@ -4716,9 +4689,9 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         self.assertEqual(response.status_code, 302)
 
     def test_period_update_status_stays_active_but_edit_blocked_when_expired_with_processing_material(self):
-        """만료됐고 PROCESSING 자료가 있으면 status는 COMPLETED로 전환되지 않고
-        ACTIVE로 남지만(전환 보류 정책), end_date가 지난 이상 수정 POST 자체는
-        차단되어야 한다(수정 차단 정책은 전환 보류와 별개)."""
+        """만료됐고 PROCESSING 자료가 있으면 status는 COMPLETED로 전환되지
+        않고 ACTIVE로 남지만(전환 보류 정책), end_date가 지난 이상 수정 POST
+        자체는 차단되어야 한다(수정 차단 정책은 전환 보류와 별개)."""
         period = _make_period(self.user, days_ago_end=1, title="원래 제목")
         exam = _make_exam(period)
         _make_material(exam, status=MaterialStatus.PROCESSING)
@@ -4733,13 +4706,14 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         )
 
         period.refresh_from_db()
-        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)  # 전환은 보류됨
-        self.assertEqual(period.title, "원래 제목")  # 그러나 수정은 차단됨
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertEqual(period.title, "원래 제목")
         self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
 
     def test_subject_delete_blocked_when_period_expired_even_with_unrelated_processing_material(self):
-        """만료된 시험기간에 PROCESSING 자료가 있어 status가 ACTIVE로 남아있어도,
-        그 시험기간의 다른(처리 중이 아닌) 과목 삭제는 차단되어야 한다."""
+        """만료된 시험기간에 PROCESSING 자료가 있어 status가 ACTIVE로
+        남아있어도, 그 시험기간의 다른(처리 중이 아닌) 과목 삭제는 차단되어야
+        한다."""
         period = _make_period(self.user, days_ago_end=1)
         exam = _make_exam(period)
         other_exam = _make_exam(period, subject_name="다른 과목", days_offset=1)
@@ -4750,6 +4724,114 @@ class DecoratorLazyCompleteOnDirectPostTests(TestCase):
         )
 
         period.refresh_from_db()
-        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)  # 전환 보류
-        self.assertTrue(Exam.objects.filter(id=exam.id).exists())  # 그러나 삭제도 차단
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        self.assertTrue(Exam.objects.filter(id=exam.id).exists())
         self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_available_time_update_blocked_when_period_expired_via_direct_post(self):
+        period = _make_period(self.user, days_ago_end=1)
+        at = AvailableTime.objects.create(
+            exam_period=period, date=period.start_date, available_minutes=0,
+        )
+
+        response = self.client.post(
+            reverse('exams:available_time_update', args=[period.id]),
+            {
+                'form-TOTAL_FORMS': '1',
+                'form-INITIAL_FORMS': '1',
+                'form-MIN_NUM_FORMS': '0',
+                'form-MAX_NUM_FORMS': '1000',
+                'form-0-id': str(at.id),
+                'form-0-date': at.date.isoformat(),
+                'form-0-hours': '2',
+                'form-0-minutes': '0',
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        at.refresh_from_db()
+        self.assertEqual(at.available_minutes, 0)
+        self.assertRedirects(response, reverse('exams:period_detail', args=[period.id]))
+
+    def test_available_time_update_still_allowed_when_not_expired(self):
+        """회귀 방지: 만료되지 않은 정상 케이스는 그대로 동작해야 한다."""
+        period = _make_period(self.user, days_ago_end=-5)
+        at = AvailableTime.objects.create(
+            exam_period=period, date=period.end_date, available_minutes=0, 
+        )  # ← start_date 대신 미래(또는 오늘 이후)인 end_date 사용
+
+        response = self.client.post(
+            reverse('exams:available_time_update', args=[period.id]),
+            {
+                'form-TOTAL_FORMS': '1',
+                'form-INITIAL_FORMS': '1',
+                'form-MIN_NUM_FORMS': '0',
+                'form-MAX_NUM_FORMS': '1000',
+                'form-0-id': str(at.id),
+                'form-0-date': at.date.isoformat(),
+                'form-0-hours': '2',
+                'form-0-minutes': '0',
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.ACTIVE)
+        at.refresh_from_db()
+        self.assertEqual(at.available_minutes, 120)
+        self.assertEqual(response.status_code, 302)
+
+    def test_period_manage_available_time_blocked_when_period_expired_via_direct_post(self):
+        period = _make_period(self.user, days_ago_end=1)
+        DailyPlan.objects.create(
+            exam_period=period, date=period.start_date,
+            available_minutes=60, planned_minutes=60,
+        )
+        at = AvailableTime.objects.create(
+            exam_period=period, date=period.start_date, available_minutes=60,
+        )
+
+        response = self.client.post(
+            reverse('exams:period_manage_available_time', args=[period.id]),
+            {
+                'form-TOTAL_FORMS': '1',
+                'form-INITIAL_FORMS': '1',
+                'form-MIN_NUM_FORMS': '0',
+                'form-MAX_NUM_FORMS': '1000',
+                'form-0-id': str(at.id),
+                'form-0-date': at.date.isoformat(),
+                'form-0-hours': '3',
+                'form-0-minutes': '0',
+            },
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        at.refresh_from_db()
+        self.assertEqual(at.available_minutes, 60)
+        self.assertRedirects(response, reverse('exams:period_manage', args=[period.id]))
+
+    def test_bulk_extract_blocked_when_period_expired_via_direct_post(self):
+        """_claim_and_run_for_material()을 거치는 material_bulk_extract 경로 검증."""
+        period = _make_period(self.user, days_ago_end=1)
+        exam = _make_exam(period)
+        pdf_material = StudyMaterial.objects.create(
+            exam=exam,
+            material_type=MaterialType.PDF,
+            title="자료",
+            status=MaterialStatus.PENDING,
+        )
+
+        response = self.client.post(
+            reverse('exams:material_bulk_extract', args=[exam.id]),
+            {'material_ids': [str(pdf_material.id)]},
+        )
+
+        period.refresh_from_db()
+        self.assertEqual(period.status, ExamPeriodStatus.COMPLETED)
+        pdf_material.refresh_from_db()
+        self.assertEqual(pdf_material.status, MaterialStatus.PENDING)
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(
+            any("종료된 시험기간의 학습자료입니다" in str(m) for m in messages_list)
+        )
