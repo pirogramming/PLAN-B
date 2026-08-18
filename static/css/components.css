@@ -458,6 +458,12 @@
   color: var(--neutral5);
   cursor: not-allowed;
 }
+.avail-day.finalized-day {
+  background: var(--brand1);
+  color: var(--brand4);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
 .avail-day.has-value::after {
   content: "";
   position: absolute;

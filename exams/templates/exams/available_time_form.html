@@ -58,10 +58,19 @@
           <div class="avail-weekday">토</div>
           <div class="avail-weekday">일</div>
 
-          {% for day in calendar_days %}
+                    {% for day in calendar_days %}
             {% if day.is_past %}
             <button type="button"
                     class="avail-day past-day" disabled
+                    title="지난 날짜는 수정할 수 없어요"
+                    data-date="{{ day.date|date:'Y-m-d' }}"
+                    {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
+              {{ day.date|date:"j" }}
+            </button>
+            {% elif day.is_finalized %}
+            <button type="button"
+                    class="avail-day finalized-day" disabled
+                    title="이미 계획에 반영되어 마감된 날짜예요"
                     data-date="{{ day.date|date:'Y-m-d' }}"
                     {% if forloop.first %}style="grid-column-start:{{ day.weekday }};"{% endif %}>
               {{ day.date|date:"j" }}
@@ -137,7 +146,7 @@
       minutesInput.value = total || '';
     }
 
-    document.querySelectorAll('.avail-day:not(.past-day)').forEach(
+    document.querySelectorAll('.avail-day:not(.past-day)')
       function (btn) {
         btn.addEventListener('click', function () {
           selectDay(btn);
@@ -160,7 +169,7 @@
     // 캘린더에서 currentDay 바로 다음 날짜(지나간 날짜는 제외) 버튼을 찾아 선택 상태로 전환한다.
     function goToNextDay() {
       var days = Array.prototype.slice.call(
-        document.querySelectorAll('.avail-day:not(.past-day)')
+        document.querySelectorAll('.avail-day:not(.past-day):not(.finalized-day)')
       );
       var idx = days.indexOf(currentDay);
       if (idx === -1 || idx === days.length - 1) return; // 마지막 날이면 그대로 둠

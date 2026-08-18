@@ -16,6 +16,7 @@ from django import template
 from django.utils import timezone
 
 from exams.models import Exam, AvailableTime, ExamPeriod
+from planner.models import DailyPlan
 
 register = template.Library()
 
@@ -73,9 +74,15 @@ def get_calendar_grid(period_id):
         .order_by('date')
         .values_list('date', 'available_minutes')
     )
-    date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
+        date_to_index = {d: i for i, (d, _) in enumerate(available_rows)}
     date_to_minutes = {d: m for d, m in available_rows}
     today = timezone.localdate()
+
+    finalized_dates = set(
+        DailyPlan.objects.filter(
+            exam_period_id=period_id, finalized_at__isnull=False,
+        ).values_list('date', flat=True)
+    )
 
     days = []
     current = period.start_date
@@ -85,6 +92,7 @@ def get_calendar_grid(period_id):
             'weekday': current.isoweekday(),  # 1=월 ... 7=일
             'is_exam_day': current in exam_dates,
             'is_past': current < today,
+            'is_finalized': current in finalized_dates,
             'formset_index': date_to_index.get(current),
             'has_value': date_to_minutes.get(current, 0) > 0,
             'minutes': date_to_minutes.get(current, 0),
