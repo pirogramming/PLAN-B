@@ -1,0 +1,12 @@
+{
+  "hosting": {
+    "site": "planb-study",
+    "rewrites": [{
+      "source": "**",
+      "run": {
+        "serviceId": "planb",
+        "region": "asia-northeast3"
+      }
+    }]
+  }
+}
