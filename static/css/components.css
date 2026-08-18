@@ -104,6 +104,9 @@
 .two-col{ display:flex; gap:20px; align-items:flex-start; }
 .two-col > *{ flex:1; min-width:0; }
 .grow{ flex:1; min-width:0; }
+.subject-two-col {
+  grid-template-columns: 1fr 1fr;
+}
 
 /* 리스트 카드 한 줄 (등록된 과목 등) */
 .list-card{
@@ -300,6 +303,8 @@
 }
 .task-action-row .btn {
   width: 100%;
+  height: 56px;
+  font-size: 15px;
 }
 .task-confirm-btn {
   background: var(--neutral11);
