@@ -4955,6 +4955,80 @@ class RecoveryOrderPreservationTests(TestCase):
         self.assertEqual(item_1_2_recovery.changed_date, d1)
         self.assertGreater(item_ds_recovery.changed_date, d1)
 
+class RecoveryOccupiedCapacityDoubleCountTests(TestCase):
+    """
+    #181: 복구안 생성 시, 재배치 대상 작업 자신의 원래 자리가 여전히
+    "점유 중"으로 계산되어 실제로는 배치 가능한 상황이 가용시간 부족으로
+    잘못 실패하지 않는지 검증한다.
+    """
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from exams.models import Exam, ExamPeriod, StudyTask
+
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="occupied_capacity_tester",
+            email="occupied_capacity@example.com",
+            password="pass1234",
+        )
+        self.client.login(username="occupied_capacity@example.com", password="pass1234")
+
+        self.today = django_timezone.localdate()
+        self.exam_period = ExamPeriod.objects.create(
+            user=self.user,
+            title="점유 중복계산 테스트",
+            start_date=self.today - timedelta(days=3),
+            end_date=self.today + timedelta(days=10),
+            status="active",
+        )
+        self.exam = Exam.objects.create(
+            exam_period=self.exam_period,
+            subject_name="테스트 과목",
+            exam_date=self.today + timedelta(days=10),
+            speed_factor=1.0,
+        )
+        self.task_a = StudyTask.objects.create(
+            exam=self.exam, title="A 작업", importance="medium", depth="basic",
+            task_type="concept", difficulty="normal", order=1,
+            estimated_min_minutes=60, estimated_max_minutes=60, is_confirmed=True,
+        )
+
+        # A 작업이 이미 배치돼 있던 계획 (오늘보다 이틀 전, 못함 처리 후 마감)
+        self.source_plan = DailyPlan.objects.create(
+            exam_period=self.exam_period, date=self.today - timedelta(days=2),
+            available_minutes=60, planned_minutes=60,
+        )
+        self.item_a = DailyPlanItem.objects.create(
+            daily_plan=self.source_plan, study_task=self.task_a,
+            planned_minutes=60, order=1,
+        )
+        record_progress(daily_plan_item=self.item_a, status="not_done", actual_minutes=0)
+        self.source_plan.finalized_at = django_timezone.now()
+        self.source_plan.save(update_fields=["finalized_at"])
+
+        # 미래 가용시간을 딱 A 작업(60분)이 들어갈 만큼만 준다.
+        # 이중계산 버그가 있었다면 여기서 "부족"으로 잘못 실패했을 것.
+        self.future_date = self.today + timedelta(days=1)
+        AvailableTime.objects.create(
+            exam_period=self.exam_period, date=self.future_date, available_minutes=60,
+        )
+
+    def test_maintain_volume_succeeds_with_exactly_needed_capacity(self):
+        """
+        딱 필요한 만큼(60분)의 가용시간만 있어도 분량유지형이 성공해야 한다.
+        (원래 자리의 60분이 여전히 점유 중으로 이중계산되면, 실제로는
+        충분한 이 상황도 부족으로 잘못 실패한다.)
+        """
+        result = generate_recovery_options(self.source_plan, [self.item_a])
+
+        self.assertIsNotNone(
+            result['maintain_volume'], result['maintain_volume_failure_reason']
+        )
+        item = result['maintain_volume'].items.get(study_task=self.task_a)
+        self.assertEqual(item.changed_date, self.future_date)
+
+        
 class FeasibilityDeadlineAwareTests(TestCase):
     """
     #167: 전체 실현가능성 판정이 시험 당일 배제/작업 비분할을

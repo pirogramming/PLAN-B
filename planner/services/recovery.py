@@ -110,8 +110,16 @@ def _build_task_inputs(items_with_remaining) -> list[TaskInput]:
 
 
 def _try_allocate(exam_period, from_date, items_with_remaining) -> dict:
+    """
+    items_with_remaining에 있는 작업들은 전부 재배치 대상이다. 이 작업들의
+    원래 DailyPlanItem이 여전히 "점유 중"으로 계산되면, 실제로는 비어있게
+    될 그 자리가 사용 불가능한 것처럼 잘못 판정된다. 그래서 이 함수가
+    다루는 모든 대상 작업의 id를 exclude 대상으로 넘겨서, 자기 자신의
+    원래 자리는 항상 빈 것으로 취급하게 한다.
+    """
     task_inputs = _build_task_inputs(items_with_remaining)
-    available_time_inputs = _future_available_capacity(exam_period, from_date)
+    exclude_ids = {item.id for item, _ in items_with_remaining}
+    available_time_inputs = _future_available_capacity(exam_period, from_date, exclude_ids)
     return allocate_tasks_to_days(task_inputs, available_time_inputs)
 
 
