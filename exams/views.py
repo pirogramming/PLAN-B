@@ -1410,6 +1410,24 @@ def study_task_create(request, exam_id):
             task.estimated_min_minutes = estimated_min
             task.estimated_max_minutes = estimated_max
             task.is_user_modified = True
+
+            # order를 지정하지 않으면 모델 기본값(1)이 그대로 저장되어, 같은
+            # 시험에서 수동으로 여러 작업을 추가할 때마다 order=1로 계속
+            # 겹치는 문제가 있었다. 이 시험(exam) 안의 현재 최대 order 다음으로
+            # 붙여서, 수동 추가한 작업이 항상 기존 목록 맨 끝에 오도록 한다.
+            # (이 View는 @check_exam_period_locked_by_exam_id가 이미 같은
+            # ExamPeriod에 대해 select_for_update()로 트랜잭션을 직렬화하고
+            # 있어서, 동시에 두 번 추가해도 이 조회~저장 사이에 다른 요청이
+            # 끼어들 수 없다 - 별도 락을 추가로 걸 필요가 없다.)
+            existing_max_order = (
+                StudyTask.objects
+                .filter(exam=exam)
+                .order_by("-order")
+                .values_list("order", flat=True)
+                .first() or 0
+            )
+            task.order = existing_max_order + 1
+
             task.save()
 
             return redirect(

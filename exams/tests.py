@@ -607,6 +607,61 @@ class StudyTaskCreateTests(TestCase):
             speed_factor=1.2,
         )
 
+    def test_multiple_manual_tasks_get_sequential_order(self):
+        """
+        수동으로 여러 작업을 연달아 추가하면 order가 겹치지 않고 순차적으로
+        증가해야 한다. (기존 버그: order를 지정하지 않아 모델 기본값(1)이
+        그대로 저장되어, 수동 추가한 작업들이 전부 order=1로 겹쳤었다.)
+        """
+        for title in ["수동작업1", "수동작업2", "수동작업3"]:
+            response = self.client.post(reverse('exams:task_create', args=[self.exam.id]), {
+                'unit_name': '1장',
+                'title': title,
+                'task_type': TaskType.CONCEPT,
+                'importance': 'medium',
+                'depth': 'basic',
+                'difficulty': TaskDifficulty.NORMAL,
+            })
+            self.assertEqual(response.status_code, 302)
+
+        orders = list(
+            StudyTask.objects.filter(exam=self.exam).order_by("order").values_list("order", flat=True)
+        )
+        self.assertEqual(len(orders), len(set(orders)), "order가 중복되면 안 된다")
+        self.assertEqual(orders, sorted(orders))
+
+    def test_manual_task_order_follows_existing_ai_analyzed_tasks(self):
+        """AI 분석으로 이미 생성된 작업이 있는 상태에서 수동으로 작업을
+        추가하면, 그 뒤에 이어 붙어야 한다 (기존 작업과 order가 안 겹침)."""
+        from exams.services import task_extractor
+        from exams.models import StudyMaterial
+        from core.choices import MaterialStatus
+
+        material = StudyMaterial.objects.create(
+            exam=self.exam, title="1장.pdf", extracted_text="내용",
+            status=MaterialStatus.COMPLETED,
+        )
+        task_extractor.save_extracted_tasks(material, [
+            task_extractor.ExtractedTask(
+                unit_name="1장", title="AI작업1", task_type="concept",
+                importance="high", depth="core", difficulty="normal", ai_reason="테스트",
+            ),
+        ])
+        ai_task_order = StudyTask.objects.get(title="AI작업1").order
+
+        response = self.client.post(reverse('exams:task_create', args=[self.exam.id]), {
+            'unit_name': '2장',
+            'title': '수동작업1',
+            'task_type': TaskType.CONCEPT,
+            'importance': 'medium',
+            'depth': 'basic',
+            'difficulty': TaskDifficulty.NORMAL,
+        })
+        self.assertEqual(response.status_code, 302)
+
+        manual_task = StudyTask.objects.get(title="수동작업1")
+        self.assertEqual(manual_task.order, ai_task_order + 1)
+
 
 class TaskReviewTests(TestCase):
     """작업 수정 시 예상시간 재계산 확인"""
