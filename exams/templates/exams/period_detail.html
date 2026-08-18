@@ -107,7 +107,7 @@
         <div class="period-material-item">
           <label class="period-material-item-label">
             <input type="checkbox" name="material_ids" value="{{ m.id }}"
-                   {% if m.status == 'completed' and m.analysis_status != 'completed' and m.analysis_status != 'processing' %}checked{% endif %}>
+                   {% if m.material_type == 'pdf' and m.status == 'completed' and m.analysis_status != 'completed' and m.analysis_status != 'processing' %}checked{% endif %}>
             <span class="period-material-title">{{ m.title }}</span>
             <span class="period-material-status">
               추출 {{ m.get_status_display }} · 분석 {{ m.get_analysis_status_display }}

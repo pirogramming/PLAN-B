@@ -20,9 +20,14 @@
         {{ exam.subject_name }} · 총 {{ formset.forms|length }}개
       </p>
     </div>
-    <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-brand">
-      + 작업 추가하기
-    </a>
+    <div class="row" style="gap:8px;">
+      <a href="{% url 'exams:material_create' exam.id %}" class="btn btn-secondary">
+        + 이 과목 자료 추가
+      </a>
+      <a href="{% url 'exams:task_create' exam.id %}" class="btn btn-brand">
+        + 작업 추가하기
+      </a>
+    </div>
   </div>
 
   <div class="task-review-body">
@@ -30,6 +35,7 @@
       <div class="card card-body task-nav-card">
         <div class="task-nav-title">과목</div>
         {% for e in period_exams %}
+        {% if e.study_materials.exists %}
         <a href="{% url 'exams:task_review' e.id %}"
            class="nav-row-link{% if e.id == exam.id %} active{% endif %}">
           <span>{{ e.subject_name }}</span>
@@ -37,6 +43,14 @@
             {{ e.study_tasks.count }}개
           </span>
         </a>
+        {% else %}
+        <a href="{% url 'exams:material_create' e.id %}" class="nav-row-link">
+          <span>{{ e.subject_name }}</span>
+          <span class="num" style="color:var(--judge3);">
+            시험범위 등록
+          </span>
+        </a>
+        {% endif %}
         {% endfor %}
       </div>
     </div>
