@@ -40,7 +40,7 @@ steps:
       - "--allow-unauthenticated"
       - "--min-instances=0"
       - "--max-instances=3"
-      - "--memory=2Gi"
+      - "--memory=4Gi"
       - "--cpu=2"
       - "--timeout=300"
       - "--concurrency=2"
