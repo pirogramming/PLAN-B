@@ -64,6 +64,50 @@ def _confirmed_tasks(exam_period):
         exam__exam_period=exam_period, is_confirmed=True
     ).select_related('exam')
 
+
+# _remaining_task_minutes(task, latest_log=...)에서 "latest_log를 아예 안 넘김"과
+# "latest_log가 None(진행기록 없음)"을 구분하기 위한 sentinel. None을 기본값으로
+# 쓰면 두 의미가 섞여서, 진행기록이 없는 정상적인 경우에도 매번 재쿼리하게 된다.
+_UNSET = object()
+
+
+def _build_latest_log_map(tasks):
+    """
+    주어진 작업들의 "가장 최근 ProgressLog"를 한 번의 쿼리로 일괄 조회해
+    {study_task_id: ProgressLog} 딕셔너리로 반환한다.
+    (study_task_id, -recorded_at) 순으로 정렬해두면 각 study_task_id 그룹에서
+    맨 처음 나오는 로우가 곧 최신 기록이라, 파이썬에서 한 번만 훑으면 된다.
+    """
+    task_ids = [t.id for t in tasks]
+    if not task_ids:
+        return {}
+
+    logs = (
+        ProgressLog.objects
+        .filter(daily_plan_item__study_task_id__in=task_ids)
+        .order_by('daily_plan_item__study_task_id', '-recorded_at')
+        .select_related('daily_plan_item')
+    )
+    latest_log_map = {}
+    for log in logs:
+        task_id = log.daily_plan_item.study_task_id
+        if task_id not in latest_log_map:
+            latest_log_map[task_id] = log
+    return latest_log_map
+
+
+def _build_task_remaining_map(tasks):
+    """
+    {study_task_id: (min, max)} 형태로, 대시보드에서 반복 쓰이는 "작업별 남은
+    시간"을 한 번만 계산해서 재사용할 수 있게 만든다. ProgressLog 조회는
+    _build_latest_log_map()으로 일괄 처리해 작업 개수만큼 쿼리가 늘어나지 않게 한다.
+    """
+    latest_log_map = _build_latest_log_map(tasks)
+    return {
+        task.id: _remaining_task_minutes(task, latest_log_map.get(task.id))
+        for task in tasks
+    }
+
 def _get_pending_recovery(exam_period):
     """
     exam_period 전체 범위에서 아직 선택 안 된 복구안을 조회한다.
@@ -123,19 +167,25 @@ def _sidebar_context(exam_period):
         'retry_daily_plan_id': _get_retry_daily_plan_id(today_plan),
     }
 
-def _remaining_task_minutes(task):
+def _remaining_task_minutes(task, latest_log=_UNSET):
     """
     아직 안 끝난 작업의 남은 필요시간(min/max).
     recovery.py의 _remaining_minutes()와 같은 방식(최신 speed_factor로 재추정 +
     완료율 반영)이지만, "오늘 계획" 범위가 아니라 이 작업의 가장 최근 ProgressLog
     전체를 본다 (대시보드는 시험기간 전체 기준이라 특정 날짜에 묶이지 않음).
+
+    latest_log를 넘기면 그 값을 그대로 쓰고(대시보드처럼 여러 작업을 한꺼번에
+    다룰 때 _build_latest_log_map()으로 미리 일괄 조회한 값을 재사용), 넘기지
+    않으면(기본값 _UNSET) 기존처럼 이 함수 안에서 직접 쿼리한다 - 호출부 하나만
+    고치는 실수를 방지하기 위해 대량 호출이 아닌 단발성 호출도 그대로 지원한다.
     """
-    latest_log = (
-        ProgressLog.objects
-        .filter(daily_plan_item__study_task=task)
-        .order_by('-recorded_at')
-        .first()
-    )
+    if latest_log is _UNSET:
+        latest_log = (
+            ProgressLog.objects
+            .filter(daily_plan_item__study_task=task)
+            .order_by('-recorded_at')
+            .first()
+        )
     est_min, est_max = estimate_task_minutes(
         task.task_type, task.difficulty, task.exam.speed_factor
     )
@@ -151,15 +201,19 @@ def _remaining_task_minutes(task):
     )
 
 
-def _build_overall(exam_period, remaining_days):
+def _build_overall(exam_period, remaining_days, tasks, task_remaining):
     """
     시험기간 전체 기준 Fit Bar. recovery_compare의 _fit_bar_context()와
     같은 공식(A~B 구간 + axis_max = max(가용,필요) * 1.15)을 재사용한다.
+
+    tasks/task_remaining은 dashboard()에서 한 번만 계산해 넘겨받는다 -
+    _build_subject_summary(), _build_progress()와 같은 값을 공유해서
+    "확정 작업 목록 조회 + 작업별 남은시간 계산"이 화면 하나에서
+    중복(N+1)으로 반복되지 않게 하기 위함이다.
     """
-    tasks = list(_confirmed_tasks(exam_period))
     required_min = required_max = 0
     for task in tasks:
-        mn, mx = _remaining_task_minutes(task)
+        mn, mx = task_remaining[task.id]
         required_min += mn
         required_max += mx
 
@@ -208,15 +262,25 @@ def _build_overall(exam_period, remaining_days):
     }
 
 
-def _build_subject_summary(exam_period):
+def _build_subject_summary(exam_period, tasks, task_remaining):
+    """
+    tasks/task_remaining은 dashboard()에서 한 번만 계산해 넘겨받는다
+    (_build_overall 주석 참고). 과목별로 다시 DB를 조회하는 대신, 이미
+    메모리에 있는 tasks를 exam_id 기준으로 파이썬에서 묶어서 사용한다.
+    """
     today = timezone.localdate()
     summary = []
+
+    tasks_by_exam_id = {}
+    for task in tasks:
+        tasks_by_exam_id.setdefault(task.exam_id, []).append(task)
+
     for exam in exam_period.exams.all().order_by('exam_date'):
-        subject_tasks = _confirmed_tasks(exam_period).filter(exam=exam)
+        subject_tasks = tasks_by_exam_id.get(exam.id, [])
         remaining_minutes = 0
         remaining_task_count = 0
         for task in subject_tasks:
-            _mn, mx = _remaining_task_minutes(task)
+            _mn, mx = task_remaining[task.id]
             if mx > 0:
                 remaining_minutes += mx
                 remaining_task_count += 1
@@ -233,8 +297,10 @@ def _build_subject_summary(exam_period):
     return summary
 
 
-def _build_progress(exam_period, today_plan, today_count, today_minutes):
+def _build_progress(exam_period, today_plan, today_count, today_minutes, tasks, task_remaining):
     """
+    tasks/task_remaining은 dashboard()에서 한 번만 계산해 넘겨받는다
+    (_build_overall 주석 참고).
     완료 크레딧 방식은 today()와 동일: DONE은 planned_minutes 전액,
     PARTIAL은 completion_percent 비율만큼만 인정.
     today_*는 오늘 하루, total_*는 이 시험기간에 지금까지 생성된 모든
@@ -280,8 +346,8 @@ def _build_progress(exam_period, today_plan, today_count, today_minutes):
     total_total, total_done = _credit(all_items)
 
     core_left = sum(
-        1 for task in _confirmed_tasks(exam_period)
-        if task.depth == TaskDepth.CORE and _remaining_task_minutes(task)[1] > 0
+        1 for task in tasks
+        if task.depth == TaskDepth.CORE and task_remaining[task.id][1] > 0
     )
 
     return {
@@ -570,6 +636,14 @@ def dashboard(request):
         {at.date for at in get_future_available_capacity(exam_period, today)}
     )
 
+    # 확정 작업 목록과 작업별 남은시간(min/max)을 여기서 한 번만 계산해서
+    # _build_overall/_build_subject_summary/_build_progress 세 곳에 그대로
+    # 넘겨준다. 예전에는 세 함수가 각자 _confirmed_tasks()를 다시 조회하고
+    # 작업마다 _remaining_task_minutes()를 또 호출해서(N+1), 확정 작업이
+    # 20개만 있어도 대시보드 하나에 DB 쿼리가 60번 넘게 나갔다.
+    tasks = list(_confirmed_tasks(exam_period))
+    task_remaining = _build_task_remaining_map(tasks)
+
     context = {
         'exam_period': exam_period,
         'has_plan': True,
@@ -579,9 +653,11 @@ def dashboard(request):
         'pending_recovery': _get_pending_recovery(exam_period),
         'retry_daily_plan_id': _get_retry_daily_plan_id(today_plan),
         'remaining_days': remaining_days,
-        'overall': _build_overall(exam_period, remaining_days),
-        'subject_summary': _build_subject_summary(exam_period),
-        'progress': _build_progress(exam_period, today_plan, today_count, today_minutes),
+        'overall': _build_overall(exam_period, remaining_days, tasks, task_remaining),
+        'subject_summary': _build_subject_summary(exam_period, tasks, task_remaining),
+        'progress': _build_progress(
+            exam_period, today_plan, today_count, today_minutes, tasks, task_remaining
+        ),
     }
     return render(request, 'planner/dashboard.html', context)
 
